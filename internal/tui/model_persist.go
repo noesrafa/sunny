@@ -1,0 +1,122 @@
+package tui
+
+import (
+	imgclip "github.com/noesrafa/sunny/internal/clipboard"
+	"github.com/noesrafa/sunny/internal/session"
+	"github.com/noesrafa/sunny/internal/state"
+)
+
+// saveState marks the state as dirty so the next saveTickMsg flushes it.
+// Cheap (no I/O), so it's safe to call from any event handler. The actual
+// disk write happens in flushState().
+func (m *Model) saveState() {
+	m.saveDirty = true
+}
+
+// flushState performs the actual MarshalIndent + atomic rename. Only called
+// from the save tick (debounced) and from the quit path (synchronous, so
+// the user's last actions before exit aren't lost).
+func (m *Model) flushState() {
+	m.saveDirty = false
+	m.flushStateNow()
+}
+
+// flushStateNow snapshots EVERYTHING (sessions + panes + active tab) to
+// ~/.sunnytui/state.json. The body of what used to be saveState — kept
+// pointer-receiver because we briefly mutate the current session's Draft
+// to capture in-flight textarea content.
+func (m *Model) flushStateNow() {
+	if m.manager == nil {
+		return
+	}
+	// Capture the in-flight textarea content into the current session's draft
+	// so it survives across restarts.
+	if cur := m.manager.Current(); cur != nil && m.activeKind == activeClaude {
+		cur.Draft = m.textarea.Value()
+	}
+	var sessions []state.SavedSession
+	for _, s := range m.manager.Sessions {
+		// Marshal the transcript so it survives restart. Errors here would
+		// only happen if a new Item type was added without a marshaller —
+		// log but don't drop the session metadata.
+		raw, mErr := session.MarshalItems(s.Items)
+		if mErr != nil {
+			m.logger.Warn("marshal items", "session", s.ID, "err", mErr)
+			raw = nil
+		}
+		eff := s.Effort
+		if eff == "" {
+			eff = m.defaultEffort
+		}
+		sessions = append(sessions, state.SavedSession{
+			Title:     s.Title,
+			Cwd:       s.Cwd,
+			Model:     s.Model,
+			Effort:    eff,
+			Draft:     s.Draft,
+			RemoteID:  s.RemoteID,
+			Items:     raw,
+			TotalCost: s.TotalCost,
+			Turns:     s.Turns,
+		})
+	}
+	var panes []state.SavedPane
+	if m.panes != nil {
+		for _, p := range m.panes.Panes {
+			panes = append(panes, state.SavedPane{
+				Title:   p.Title,
+				Command: p.Command,
+				Cwd:     p.Cwd,
+			})
+		}
+	}
+	kind := "claude"
+	idx := m.manager.Active
+	if m.activeKind == activePane && m.panes != nil {
+		kind = "pane"
+		idx = m.panes.Active
+	}
+	st := &state.State{
+		Sessions:   sessions,
+		Panes:      panes,
+		ActiveKind: kind,
+		ActiveIdx:  idx,
+		Theme:      m.themeID,
+	}
+	if err := state.Save(st); err != nil {
+		m.logger.Error("save state failed", "err", err)
+	} else {
+		m.logger.Info("state saved", "sessions", len(sessions), "panes", len(panes), "kind", kind, "idx", idx)
+	}
+}
+
+// pruneOrphanImages walks every session's transcript, collects the
+// image paths still referenced by past UserItems, and deletes any other
+// file under ~/.sunnytui/images/. Pending (unsent) attachments aren't
+// included because the app just started — there's nothing pending yet.
+// Best-effort; failures only get logged.
+func (m Model) pruneOrphanImages() {
+	if m.manager == nil {
+		return
+	}
+	refs := map[string]bool{}
+	for _, s := range m.manager.Sessions {
+		for _, it := range s.Items {
+			u, ok := it.(session.UserItem)
+			if !ok {
+				continue
+			}
+			for _, a := range u.Attachments {
+				refs[a.Path] = true
+			}
+		}
+	}
+	n, err := imgclip.PruneOrphans(refs)
+	if err != nil {
+		m.logger.Warn("prune images", "err", err)
+		return
+	}
+	if n > 0 {
+		m.logger.Info("pruned orphan images", "count", n)
+	}
+}

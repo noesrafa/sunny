@@ -5,18 +5,18 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.16.0`** (Plex-style auto-discovery: shared
-mesh key + tailnet identity probe → zero-config mesh. Distribute
-the key once, every TUI on the tailnet auto-finds every daemon).
-Brew `sunny version` should match.
+**Latest release: `v0.17.0`** (true zero-config mesh: tailscale
+account identity = mesh membership. Install sunny on N tailnet
+machines, open TUI, you see every one — no keys, no codes, no
+config files). Brew `sunny version` should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
 actual". The short version: chat works end-to-end across four
-backends; the TUI auto-discovers every sunny daemon on your
-tailnet that holds the same `mesh.key` (no peers.yaml needed);
-remote agents appear in the picker as `host/slug` and refresh in
-real time via `GET /events`. Manual `sunny pair` flow still
-works for hosts off the tailnet.
+backends; the TUI auto-discovers every sunny daemon in your
+tailscale account; remote agents appear as `host/slug` and
+refresh in real time via `GET /events`. Optional `mesh.key`
+override exists for sub-meshes within shared tailnets. Manual
+`sunny pair` flow still works for hosts off the tailnet.
 
 **Single most likely next thing to pick up**: write/exec tools
 (`edit`, `write`, `bash`) + their permission flow — the original
@@ -131,15 +131,17 @@ flow with grep / glob / ls.
   Each daemon auto-generates one at first boot. `Fingerprint()` is
   the public 8-hex prefix used by /sunny/identity. Equal compares
   in constant time.
-- `internal/server/mesh.go` — MeshAuth middleware: matches
-  (tailnet IP) + (X-Sunny-Mesh header == our mesh-key) → mark
-  request as already authed. requireBearer downstream skips its
-  check via isMeshAuthed. TailnetIPCache wraps tsnet.Peers() with
-  a 5-min TTL so per-request lookup is map-only.
-- `cmd/sunny/tui.go` `discoverMeshPeers` — at boot, if mesh.key
-  exists AND tailscale is up, walks the tailnet, GETs
-  /sunny/identity in parallel, and `Federation.AddMeshPeer`s any
-  daemon whose fingerprint matches. Discovered peers don't touch
+- `internal/server/mesh.go` — TWO middlewares: `TailnetIdentity
+  Auth` (zero-config: same tailscale UserID → trust without
+  headers) wraps `MeshAuth` (opt-in: shared mesh.key in
+  X-Sunny-Mesh → trust). Both mark via isMeshAuthed which
+  requireBearer downstream honours. TailnetCache caches the full
+  tsnet.Status (IPs + identity) with 5-min TTL.
+- `cmd/sunny/tui.go` `discoverTailnetPeers` — at boot, if
+  tailscale is up, walks the tailnet, GETs /sunny/identity in
+  parallel, and `Federation.AddTailnetPeer`s any daemon whose
+  UserID matches Self (no creds) OR `AddMeshPeer` if our mesh.key
+  matches their fingerprint. Discovered peers don't touch
   peers.yaml — they're ephemeral per TUI session.
 - `internal/client/federation.go` — wraps N `*Client` keyed by peer
   name. `ListAgents` fan-outs in parallel; per-peer failures don't

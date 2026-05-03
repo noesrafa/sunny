@@ -95,13 +95,19 @@ func openTUI(args []string) error {
 	defer closer.Close()
 	lg.Info("tui starting", "cwd", cwd, "log", logger.LogPath())
 
-	// Tailnet auto-discovery: if this host has a mesh.key AND
-	// tailscale is up, scan the tailnet for other sunny daemons
-	// that report the same mesh fingerprint. Add the matches to
-	// the federation in-memory (peers.yaml stays untouched —
-	// these are ephemeral discoveries, not persistent config).
-	if mk, mErr := mesh.Load(*root); mErr == nil && tsnet.Available() {
-		discoverMeshPeers(ctx, fed, mk, lg)
+	// Tailnet auto-discovery: zero-config when tailscale is up.
+	// Two paths, in priority order:
+	//
+	//   1. Identity: any sunny daemon on the tailnet whose
+	//      tailscale UserID matches ours (= our own machine, no
+	//      shared keys needed).
+	//   2. Mesh-key: sunny daemons NOT in our tailscale account
+	//      that hold a shared mesh.key (sub-mesh override).
+	//
+	// peers.yaml entries take precedence over both — operator
+	// config wins.
+	if tsnet.Available() {
+		discoverTailnetPeers(ctx, fed, *root, lg)
 	}
 
 	mgr := session.NewManager()
@@ -145,62 +151,77 @@ func openTUI(args []string) error {
 	return model.Run(ctx)
 }
 
-// discoverMeshPeers walks the tailnet, asks each peer for its
-// /sunny/identity, and adds the ones whose mesh fingerprint
-// matches ours to the federation. Runs synchronously at TUI boot
-// — bounded by tsnet.Peers() (3s) plus per-peer FetchIdentity
-// (3s each, in parallel goroutines), so a tailnet of dozens
-// completes well under a second.
+// discoverTailnetPeers is the zero-config discovery flow. Walks
+// the tailnet, GETs /sunny/identity on each candidate, and adds
+// peers in priority:
 //
-// Discovered peers shadow nothing: if peers.yaml already lists a
-// peer at the same name, AddMeshPeer overwrites with the mesh
-// client (mesh-key auth is preferred over bearer when both
-// exist, since mesh-key trust survives bearer rotation).
-func discoverMeshPeers(ctx context.Context, fed *client.Federation, key mesh.Key, lg *charmlog.Logger) {
-	tspeers, err := tsnet.Peers()
+//	1. Same tailscale UserID as us → AddTailnetPeer (no creds).
+//	2. Our local mesh.key matches their fingerprint → AddMeshPeer.
+//	3. Otherwise skip — daemon belongs to someone else's mesh.
+//
+// Bounded by tsnet.FetchStatus (5s) + per-peer FetchIdentity (3s
+// each, parallel), so a tailnet of dozens completes in seconds.
+func discoverTailnetPeers(ctx context.Context, fed *client.Federation, root string, lg *charmlog.Logger) {
+	st, err := tsnet.FetchStatus()
 	if err != nil {
-		lg.Debug("mesh discovery: tsnet peers", "err", err.Error())
+		lg.Debug("tailnet discovery: status", "err", err.Error())
 		return
 	}
-	want := key.Fingerprint()
-	port := "7777" // sunny default; future versions can probe alternatives
-	type result struct {
-		name string
-		base string
-		ok   bool
+	mk, _ := mesh.Load(root) // optional — empty when no mesh.key
+	wantFP := ""
+	if mk != "" {
+		wantFP = mk.Fingerprint()
 	}
-	resCh := make(chan result, len(tspeers))
-	for _, p := range tspeers {
-		if p.IsSelf || !p.Online || p.IP == "" {
+	port := "7777"
+
+	type result struct {
+		name        string
+		base        string
+		path        string // "identity" | "mesh" | ""
+	}
+	resCh := make(chan result, len(st.Peers))
+	for _, p := range st.Peers {
+		if !p.Online || p.IP == "" {
 			continue
 		}
 		go func(p tsnet.Peer) {
 			base := "http://" + p.IP + ":" + port
 			id, err := client.FetchIdentity(ctx, base)
-			if err != nil || id.Mesh != want {
-				resCh <- result{name: p.HostName, base: base, ok: false}
+			if err != nil {
+				resCh <- result{name: p.HostName, base: base}
 				return
 			}
-			resCh <- result{name: peerNameFromTailscaleHost(p.HostName), base: base, ok: true}
+			r := result{name: peerNameFromTailscaleHost(p.HostName), base: base}
+			switch {
+			case p.UserID != 0 && p.UserID == st.Self.UserID:
+				r.path = "identity"
+			case wantFP != "" && id.Mesh == wantFP:
+				r.path = "mesh"
+			}
+			resCh <- r
 		}(p)
 	}
-	// Drain everything we kicked off. Bounded — every goroutine
-	// either succeeds or errors via FetchIdentity's own timeout.
+
 	added := 0
-	for range tspeers {
+	for range st.Peers {
 		select {
 		case r := <-resCh:
-			if r.ok {
-				fed.AddMeshPeer(r.name, r.base, string(key))
+			switch r.path {
+			case "identity":
+				fed.AddTailnetPeer(r.name, r.base)
 				added++
-				lg.Info("mesh peer discovered", "name", r.name, "url", r.base)
+				lg.Info("tailnet peer discovered (same tailscale account)", "name", r.name, "url", r.base)
+			case "mesh":
+				fed.AddMeshPeer(r.name, r.base, string(mk))
+				added++
+				lg.Info("tailnet peer discovered (shared mesh key)", "name", r.name, "url", r.base)
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
 	if added > 0 {
-		lg.Info("mesh discovery complete", "added", added, "fingerprint", want)
+		lg.Info("tailnet discovery complete", "added", added)
 	}
 }
 

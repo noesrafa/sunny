@@ -2,12 +2,12 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.16.0 — chat works end-to-end across four backends.
-> Plex-style mesh: distribute a shared `mesh.key` once across your
-> tailnet hosts and the TUI auto-discovers every sunny daemon on
-> your tailnet that holds the same key. Zero `peers.yaml`, zero
-> per-peer tokens, real-time events. Conversations stay on the
-> engine they were created on.
+> **Status:** v0.17.0 — chat works end-to-end across four backends.
+> Zero-config mesh: install sunny on every Tailscale node you own,
+> open `sunny`, and your TUI auto-discovers every other sunny
+> daemon in the same tailscale account. No keys, no codes, no
+> config files. Conversations stay on the engine they were created
+> on; events sync in real time.
 
 ## Install
 
@@ -90,31 +90,44 @@ daemon, `sunny start` auto-binds an extra listener to the tailnet
 IPv4 (alongside 127.0.0.1) so peers on the tailnet can reach it
 without exposing the daemon to the LAN or public internet.
 
-### Plex-style auto-discovery (recommended)
+### Zero-config mesh (recommended)
 
-If your sunny instances live on the same Tailscale network, skip
-the pairing dance entirely. Distribute a shared `mesh.key` once
-and every TUI auto-discovers every daemon that holds it:
+If your sunny instances live on the same Tailscale account, you
+literally don't need to do anything:
 
 ```bash
-# on your laptop (first install — key auto-generated at first start)
+# on every machine you own
+brew install sunny
+sunny start
+```
+
+That's it. Open `sunny` on any of them and the TUI auto-discovers
+the others — same tailscale account = same owner = trusted.
+
+Under the hood: the daemon's middleware accepts requests from
+tailnet IPs whose `tailscale whois` reports the same UserID as
+this node. The TUI's discovery flow filters peers the same way.
+No shared keys, no pair codes.
+
+### Sub-mesh override (advanced)
+
+If you share your tailnet with other people but want a private
+sub-mesh between only some nodes (e.g. just your two VPS, not
+your laptop), use the optional `mesh.key`:
+
+```bash
+# on your laptop
 sunny mesh export
 → <base64 mesh key>
 
-# on every other machine
+# on every node you want in the sub-mesh
 echo "<key>" | sunny mesh import
-sunny stop && sunny start    # daemon picks up the new key
+sunny stop && sunny start
 ```
 
-After that, opening `sunny` on any of those machines auto-finds
-the others — no peers.yaml entries, no pair codes. The TUI scans
-the tailnet, asks each peer `GET /sunny/identity`, and adds the
-ones whose `mesh_fingerprint` matches yours.
-
-Auth shortcut: requests from a known tailnet IP that carry the
-shared `X-Sunny-Mesh` key skip bearer auth (the tailnet is the
-first perimeter, the mesh-key is the second). Hosts NOT on your
-tailnet still use the `sunny pair` flow as before.
+Daemons with the same key trust each other regardless of
+tailscale identity. Useful for shared-tailnet setups; ignored
+when not configured.
 
 Discover what's out there manually:
 

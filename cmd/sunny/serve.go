@@ -109,18 +109,19 @@ func serve(args []string) error {
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: server.New(server.Options{
-			Store:         st,
-			Conversations: convs,
-			Secrets:       secretsStore,
-			Engine:        &enginePtr,
-			Log:           log,
-			Token:         tok,
-			RebuildEngine: rebuild,
-			Pairs:         pairs,
-			Hub:           hub,
-			MeshKey:       meshKey,
-			Version:       version,
-			InstanceID:    *root, // not strictly stable across reinstalls; good enough for v0.16
+			Store:            st,
+			Conversations:    convs,
+			Secrets:          secretsStore,
+			Engine:           &enginePtr,
+			Log:              log,
+			Token:            tok,
+			RebuildEngine:    rebuild,
+			Pairs:            pairs,
+			Hub:              hub,
+			MeshKey:          meshKey,
+			Version:          version,
+			InstanceID:       *root,
+			AutoTrustTailnet: true, // zero-config trust between your own tailscale nodes
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

@@ -45,6 +45,19 @@ func (f *Federation) AddMeshPeer(name, base, meshKey string) {
 	f.clients[name] = NewFromBaseMesh(base, meshKey)
 }
 
+// AddTailnetPeer inserts (or replaces) a peer discovered via
+// tailscale identity. The Client carries no credential — the
+// daemon trusts it based on (source IP on tailnet + same
+// tailscale account). Zero-config path.
+func (f *Federation) AddTailnetPeer(name, base string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.clients[name]; !exists {
+		f.order = append(f.order, name)
+	}
+	f.clients[name] = NewFromBaseTailnet(base)
+}
+
 // NewFederation builds a federation from a peers.Roster. Local is
 // always the first entry; remote peers follow in roster order
 // (peers.Save sorts them alphabetically).

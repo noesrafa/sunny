@@ -130,49 +130,106 @@ func isMeshAuthed(r *http.Request) bool {
 	return v
 }
 
-// TailnetIPCache wraps tsnet.Peers() with a small TTL cache so
+// TailnetCache wraps tsnet.FetchStatus() with a small TTL cache so
 // every inbound request doesn't shell out to `tailscale status`.
 // Refreshes lazily: first lookup after expiry blocks briefly, the
 // rest read from the cache.
-type TailnetIPCache struct {
+//
+// Carries the full Status so callers can ask both "is this IP on
+// my tailnet?" (IPs map) AND "does this IP belong to my own
+// tailscale account?" (Status.SameUser).
+type TailnetCache struct {
 	mu      sync.Mutex
 	expires time.Time
 	ttl     time.Duration
-	cached  map[string]bool
+	ips     map[string]bool
+	status  *tsnet.Status
 }
 
-func NewTailnetIPCache(ttl time.Duration) *TailnetIPCache {
-	return &TailnetIPCache{ttl: ttl, cached: map[string]bool{}}
+func NewTailnetCache(ttl time.Duration) *TailnetCache {
+	return &TailnetCache{ttl: ttl, ips: map[string]bool{}}
 }
 
-// Snapshot returns the current map of tailnet IPs. Includes Self
-// so loopback-via-tailnet (a daemon binding 100.x.x.x and a TUI
-// also on the same host hitting that IP) authenticates cleanly.
-func (c *TailnetIPCache) Snapshot() map[string]bool {
+// IPs returns the set of all tailnet IPs (Self + Peers). Used by
+// MeshAuth to decide "is this request from my tailnet at all?"
+// before checking the shared key.
+func (c *TailnetCache) IPs() map[string]bool {
+	c.refresh()
+	return c.ips
+}
+
+// SameUser reports whether the given IP belongs to a peer in the
+// same tailscale account as this daemon. The basis for the
+// zero-config auto-trust path: my own tailscale node = me.
+func (c *TailnetCache) SameUser(ip string) bool {
+	c.refresh()
+	if c.status == nil {
+		return false
+	}
+	return c.status.SameUser(ip)
+}
+
+func (c *TailnetCache) refresh() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if time.Now().Before(c.expires) {
-		return c.cached
+		return
 	}
 	if !tsnet.Available() {
-		c.cached = map[string]bool{}
+		c.ips = map[string]bool{}
+		c.status = nil
 		c.expires = time.Now().Add(c.ttl)
-		return c.cached
+		return
 	}
-	peers, err := tsnet.Peers()
+	st, err := tsnet.FetchStatus()
 	if err != nil {
 		// Keep stale cache on error; better to authenticate yesterday's
 		// peers than to lock everyone out because tailscaled hiccupped.
 		c.expires = time.Now().Add(c.ttl)
-		return c.cached
+		return
 	}
 	fresh := map[string]bool{}
-	for _, p := range peers {
+	if st.Self.IP != "" {
+		fresh[st.Self.IP] = true
+	}
+	for _, p := range st.Peers {
 		if p.IP != "" {
 			fresh[p.IP] = true
 		}
 	}
-	c.cached = fresh
+	c.ips = fresh
+	c.status = st
 	c.expires = time.Now().Add(c.ttl)
-	return c.cached
+}
+
+// TailnetIdentityAuth is the zero-config auto-trust middleware.
+// When a request arrives from a tailnet IP that belongs to the
+// same tailscale account as this daemon, it's marked as
+// authenticated without any header check at all. This is the
+// "Plex on my own LAN" path — the operator never has to share
+// keys or codes between their own machines.
+//
+// Falls through unchanged for non-tailnet IPs and for tailnet IPs
+// belonging to a different tailscale user (shared tailnet, work
+// tailnet with permissions). Those go through the next middleware
+// (MeshAuth, then requireBearer).
+//
+// Pass cache.SameUser as the second arg so the cache lifecycle
+// stays with the server (caller refreshes on its schedule).
+func TailnetIdentityAuth(enabled bool, sameUser func(string) bool, h http.Handler) http.Handler {
+	if !enabled {
+		return h
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !mustAuthMethod(r) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		ip := remoteHost(r)
+		if ip == "" || !sameUser(ip) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		h.ServeHTTP(w, withMeshAuthed(r))
+	})
 }

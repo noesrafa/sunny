@@ -64,6 +64,18 @@ func NewFromBaseMesh(base, meshKey string) *Client {
 	}
 }
 
+// NewFromBaseTailnet is the zero-config path: no bearer, no mesh
+// key. The daemon trusts the request because the source IP is on
+// the same tailnet AND belongs to the same tailscale account
+// (TailnetIdentityAuth middleware). Used by the TUI for peers
+// auto-discovered through tailscale identity.
+func NewFromBaseTailnet(base string) *Client {
+	return &Client{
+		base: base,
+		hc:   &http.Client{},
+	}
+}
+
 // Base returns the daemon URL this client targets. Useful for
 // rendering "you're talking to X" hints in the UI.
 func (c *Client) Base() string { return c.base }

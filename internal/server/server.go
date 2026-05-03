@@ -63,6 +63,13 @@ type Options struct {
 	// /sunny/identity. Lets the TUI distinguish "the same daemon
 	// across reboots" from "a new daemon at the same address".
 	InstanceID string
+	// AutoTrustTailnet enables the zero-config auto-trust path: any
+	// request from a tailnet IP belonging to the same tailscale
+	// account as this daemon authenticates without any header. On
+	// by default in v0.17 — turn off for tailnets you share with
+	// other people whose machines you don't want talking to your
+	// daemon (work tailnets, shared family tailnets).
+	AutoTrustTailnet bool
 }
 
 // New builds the daemon's HTTP handler.
@@ -106,12 +113,18 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("GET /sunny/identity", srv.streamIdentity)
 
 	// Compose middleware:
-	//   logging → meshAuth → requireBearer → mux
-	// meshAuth fast-paths tailnet-resident requests carrying our
-	// shared key; non-matching ones pass through unchanged and
-	// requireBearer enforces the bearer.
-	tailnetCache := NewTailnetIPCache(5 * time.Minute)
-	handler := MeshAuth(opts.MeshKey, tailnetCache.Snapshot, requireBearer(opts.Token, mux))
+	//   logging → tailnetIdentity → meshAuth → requireBearer → mux
+	//
+	// tailnetIdentity is the zero-config auto-trust path: any
+	// request from a tailnet IP belonging to the same tailscale
+	// account as this daemon is marked authed. meshAuth is the
+	// opt-in shared-key path for sub-meshes within a tailnet
+	// (different tailscale users). requireBearer is the always-on
+	// fallback (manual pair flow, off-tailnet hosts).
+	tailnetCache := NewTailnetCache(5 * time.Minute)
+	handler := requireBearer(opts.Token, mux)
+	handler = MeshAuth(opts.MeshKey, tailnetCache.IPs, handler)
+	handler = TailnetIdentityAuth(opts.AutoTrustTailnet, tailnetCache.SameUser, handler)
 	return logging(opts.Log, handler)
 }
 

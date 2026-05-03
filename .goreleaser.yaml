@@ -14,12 +14,19 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    # Build matrix is intentionally trimmed to only the platforms we
+    # actually use: VPS (linux/amd64) and Mac (Apple Silicon).
     goos:
       - linux
       - darwin
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: linux
+        goarch: arm64
+      - goos: darwin
+        goarch: amd64
     ldflags:
       - -s -w
       - -X main.version=v{{.Version}}

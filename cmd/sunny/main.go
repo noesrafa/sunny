@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/noesrafa/sunny/internal/bootstrap"
+	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/logger"
+	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/store"
@@ -154,9 +156,20 @@ func serve(args []string) error {
 	}
 	log.Info("store loaded", "agents", len(st.Agents()))
 
+	// Engine is optional: if ANTHROPIC_API_KEY is missing the daemon still
+	// boots and serves read-only endpoints; POST /agents/{slug}/turn
+	// returns 503 until a key is set.
+	var eng *engine.Engine
+	if drv, derr := anthropic.New(""); derr == nil {
+		eng = engine.New(drv)
+		log.Info("engine ready", "provider", drv.Name())
+	} else {
+		log.Warn("engine disabled", "reason", derr.Error())
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           server.New(st, log),
+		Handler:           server.New(st, eng, log),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

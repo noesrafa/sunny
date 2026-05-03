@@ -9,23 +9,26 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/store"
 )
 
-func New(s *store.Store, log *slog.Logger) http.Handler {
-	srv := &server{store: s, log: log}
+func New(s *store.Store, eng *engine.Engine, log *slog.Logger) http.Handler {
+	srv := &server{store: s, engine: eng, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /agents", srv.listAgents)
 	mux.HandleFunc("GET /agents/{slug}", srv.getAgent)
 	mux.HandleFunc("GET /agents/{slug}/skills/{name}", srv.getSkill)
 	mux.HandleFunc("GET /agents/{slug}/knowledge/{file...}", srv.getKnowledge)
+	mux.HandleFunc("POST /agents/{slug}/turn", srv.postTurn)
 	return logging(log, mux)
 }
 
 type server struct {
-	store *store.Store
-	log   *slog.Logger
+	store  *store.Store
+	engine *engine.Engine
+	log    *slog.Logger
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

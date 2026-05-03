@@ -1,0 +1,153 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	charmlog "charm.land/log/v2"
+
+	"github.com/noesrafa/sunny/internal/auth"
+	"github.com/noesrafa/sunny/internal/lifecycle"
+	"github.com/noesrafa/sunny/internal/logger"
+	"github.com/noesrafa/sunny/internal/session"
+	uistate "github.com/noesrafa/sunny/internal/state"
+	"github.com/noesrafa/sunny/internal/tui"
+)
+
+// openTUI is the entrypoint for `sunny` and `sunny tui`.
+//
+// Responsibilities, in order:
+//  1. Auto-start the daemon if it isn't running (unless --no-auto-start).
+//  2. Load the bearer token from the file the daemon wrote.
+//  3. Restore saved sessions from ~/.sunny/state.json (or boot a fresh one).
+//  4. Construct the bubbletea model and hand off control.
+//
+// Failures in (1) or (2) abort with an error before the TUI ever paints
+// — better to show "daemon failed to start" synchronously than to open
+// onto a frozen chat view.
+func openTUI(args []string) error {
+	fs := flag.NewFlagSet("tui", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:7777", "daemon address to connect to")
+	root := fs.String("root", defaultRoot(), "sunny runtime directory")
+	noAutoStart := fs.Bool("no-auto-start", false, "skip auto-starting the daemon if it isn't running")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Auto-start the daemon when it isn't already running. The TUI is
+	// useless without one; making the user remember `sunny start`
+	// before `sunny` is the wrong default. --no-auto-start opts out.
+	if !*noAutoStart {
+		paths := lifecycle.PathsFor(*root)
+		alive := false
+		if s, err := paths.LoadState(); err == nil && lifecycle.IsAlive(s.PID) {
+			alive = true
+			*addr = s.Addr // honor whatever addr the running daemon is on
+		}
+		if !alive {
+			fmt.Fprintf(os.Stderr, "sunny: daemon not running — starting it on %s…\n", *addr)
+			s, err := startDaemon(*addr, *root, true)
+			if err != nil {
+				return fmt.Errorf("auto-start: %w", err)
+			}
+			*addr = s.Addr
+		}
+	}
+
+	// Token must exist at this point: the daemon writes it on first
+	// boot, and we only get here after we've verified the daemon is
+	// alive.
+	tok, err := auth.LoadToken(*root)
+	if err != nil {
+		return fmt.Errorf("load token: %w (daemon may not have written it yet)", err)
+	}
+
+	cwd, _ := os.Getwd()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	lg, closer := logger.Setup("sunny")
+	defer closer.Close()
+	lg.Info("tui starting", "cwd", cwd, "log", logger.LogPath())
+
+	mgr := session.NewManager()
+	saved, themeID, activeIdx := loadSavedState(lg)
+	for _, ss := range saved {
+		restored, err := restoreSession(ctx, lg, ss)
+		if err != nil {
+			lg.Warn("restore session failed; skipping", "title", ss.Title, "err", err)
+			continue
+		}
+		mgr.Add(restored)
+	}
+	if mgr.Len() == 0 {
+		// First launch (or every restore failed) — bootstrap one fresh
+		// session bound to the default agent.
+		first, err := session.New(ctx, cwd, session.Options{
+			Logger:    lg,
+			Title:     "sunny",
+			AgentSlug: "sunny",
+		})
+		if err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+		mgr.Add(first)
+	} else if activeIdx >= 0 && activeIdx < mgr.Len() {
+		mgr.Active = activeIdx
+	}
+
+	first := mgr.Sessions[0]
+	model := tui.NewModel(ctx, mgr, cwd, tui.Options{
+		Logger:                   lg,
+		DefaultModel:             first.Model,
+		DefaultEffort:            first.Effort,
+		DangerousSkipPermissions: true,
+		DaemonAddr:               *addr,
+		DaemonToken:              tok,
+		DefaultAgent:             "sunny",
+		InitialTheme:             themeID,
+	})
+	return model.Run(ctx)
+}
+
+// loadSavedState reads ~/.sunny/state.json. Failures degrade to a fresh
+// launch — the TUI bootstraps a new session in that case.
+func loadSavedState(lg *charmlog.Logger) ([]uistate.SavedSession, string, int) {
+	st, err := uistate.Load()
+	if err != nil {
+		lg.Warn("load state failed; starting fresh", "err", err)
+		return nil, "", 0
+	}
+	return st.Sessions, st.Theme, st.ActiveIdx
+}
+
+// restoreSession rebuilds a Session from its saved form. The transcript
+// items are decoded from the cached blob; ConvID + AgentSlug are
+// preserved so the next send hits the same server-side conversation.
+// AgentSlug falls back to "sunny" for legacy state files.
+func restoreSession(ctx context.Context, lg *charmlog.Logger, ss uistate.SavedSession) (*session.Session, error) {
+	items, err := session.UnmarshalItems(ss.Items)
+	if err != nil {
+		return nil, fmt.Errorf("decode items: %w", err)
+	}
+	slug := ss.AgentSlug
+	if slug == "" {
+		slug = "sunny"
+	}
+	return session.New(ctx, ss.Cwd, session.Options{
+		Logger:    lg,
+		Title:     ss.Title,
+		Model:     ss.Model,
+		Effort:    ss.Effort,
+		Draft:     ss.Draft,
+		AgentSlug: slug,
+		ConvID:    ss.ConvID,
+		Items:     items,
+		TotalCost: ss.TotalCost,
+		Turns:     ss.Turns,
+	})
+}

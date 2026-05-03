@@ -1,0 +1,195 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/noesrafa/sunny/internal/auth"
+	"github.com/noesrafa/sunny/internal/bootstrap"
+	"github.com/noesrafa/sunny/internal/conversation"
+	"github.com/noesrafa/sunny/internal/engine"
+	"github.com/noesrafa/sunny/internal/provider"
+	"github.com/noesrafa/sunny/internal/provider/anthropic"
+	"github.com/noesrafa/sunny/internal/provider/claudecode"
+	"github.com/noesrafa/sunny/internal/provider/ollama"
+	"github.com/noesrafa/sunny/internal/secrets"
+	"github.com/noesrafa/sunny/internal/server"
+	"github.com/noesrafa/sunny/internal/store"
+)
+
+// serve runs the daemon in the foreground. Used by `start` (re-exec'd
+// as a detached child) and directly when debugging.
+//
+// The engine is held behind atomic.Pointer so PUT /secrets can swap it
+// in place — the http.Server keeps running with the same handler;
+// only the routing-to-provider logic re-resolves.
+func serve(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:7777", "HTTP listen address")
+	root := fs.String("root", defaultRoot(), "sunny runtime directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	seeded, err := bootstrap.EnsureRuntime(*root)
+	if err != nil {
+		return fmt.Errorf("bootstrap: %w", err)
+	}
+	if seeded {
+		log.Info("seeded runtime from defaults", "root", *root)
+	} else {
+		log.Info("using existing runtime", "root", *root)
+	}
+
+	st, err := store.Load(*root)
+	if err != nil {
+		return fmt.Errorf("load store: %w", err)
+	}
+	log.Info("store loaded", "agents", len(st.Agents()))
+
+	tok, err := auth.EnsureToken(*root)
+	if err != nil {
+		return fmt.Errorf("ensure token: %w", err)
+	}
+	log.Info("auth ready", "token_path", auth.Path(*root))
+
+	secretsStore, err := secrets.New(*root)
+	if err != nil {
+		return fmt.Errorf("load secrets: %w", err)
+	}
+	log.Info("secrets ready", "path", secrets.Path(*root))
+
+	var enginePtr atomic.Pointer[engine.Engine]
+	enginePtr.Store(buildEngine(log, secretsStore))
+	convs := conversation.NewStore(*root)
+
+	rebuild := func() {
+		log.Info("rebuilding engine after secrets change")
+		enginePtr.Store(buildEngine(log, secretsStore))
+	}
+
+	srv := &http.Server{
+		Addr: *addr,
+		Handler: server.New(server.Options{
+			Store:         st,
+			Conversations: convs,
+			Secrets:       secretsStore,
+			Engine:        &enginePtr,
+			Log:           log,
+			Token:         tok,
+			RebuildEngine: rebuild,
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", *addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		log.Info("shutting down")
+		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+// buildEngine probes every supported provider and returns an engine
+// indexing all the ones that succeeded. The default provider is the
+// first one to come up in declaration order, or whatever
+// SUNNY_PROVIDER pins.
+//
+// Order: claude-code → anthropic → ollama. claude-code wins by
+// default because it inherits the user's claude.ai login (no separate
+// API key) AND brings claude code's full toolset. The other two
+// depend on `secrets.yaml` (or env vars) being populated.
+//
+// Returning a zero-engine (no providers) is OK — chat returns 503
+// until at least one driver is configured.
+func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
+	choice := strings.ToLower(strings.TrimSpace(os.Getenv("SUNNY_PROVIDER")))
+	if choice == "off" {
+		log.Info("engine disabled", "reason", "SUNNY_PROVIDER=off")
+		return engine.New(nil, "")
+	}
+
+	registry := map[string]provider.Provider{}
+	tryAdd := func(name string, drv provider.Provider, err error) {
+		if err != nil {
+			log.Debug("provider skipped", "name", name, "reason", err.Error())
+			return
+		}
+		registry[name] = drv
+		log.Info("provider ready", "name", name)
+	}
+
+	cc, ccErr := claudecode.New()
+	tryAdd("claude-code", cc, ccErr)
+	an, anErr := anthropic.New(s)
+	tryAdd("anthropic", an, anErr)
+	ol, olErr := ollama.New(s)
+	tryAdd("ollama", ol, olErr)
+
+	defaultName := pickDefaultProvider(choice, registry, log)
+	if defaultName == "" {
+		log.Warn("no providers available — configure one via `sunny secrets <provider> set api_key` or install claude code")
+	}
+	return engine.New(registry, defaultName)
+}
+
+// pickDefaultProvider honors SUNNY_PROVIDER if it points at a
+// registered driver, else falls back to the natural priority order.
+func pickDefaultProvider(choice string, reg map[string]provider.Provider, log *slog.Logger) string {
+	switch choice {
+	case "claude-code", "claude_code", "claudecode":
+		if _, ok := reg["claude-code"]; ok {
+			return "claude-code"
+		}
+		log.Warn("SUNNY_PROVIDER=claude-code but claude CLI not available")
+	case "anthropic":
+		if _, ok := reg["anthropic"]; ok {
+			return "anthropic"
+		}
+		log.Warn("SUNNY_PROVIDER=anthropic but api_key not configured")
+	case "ollama":
+		if _, ok := reg["ollama"]; ok {
+			return "ollama"
+		}
+		log.Warn("SUNNY_PROVIDER=ollama but api_key not configured")
+	}
+	for _, n := range []string{"claude-code", "anthropic", "ollama"} {
+		if _, ok := reg[n]; ok {
+			return n
+		}
+	}
+	return ""
+}
+
+// quiet compile-time check that drivers satisfy provider.Provider.
+var (
+	_ provider.Provider = (*anthropic.Driver)(nil)
+	_ provider.Provider = (*claudecode.Driver)(nil)
+	_ provider.Provider = (*ollama.Driver)(nil)
+)

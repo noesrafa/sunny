@@ -1,23 +1,31 @@
 package tui
 
 import (
-	"context"
-
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/session"
 )
 
-// updateAppMsg handles in-app messages emitted by dialogs and other
-// sub-models. It owns its messages — when handled is true the caller MUST
-// return immediately.
+// updateAppMsg is the central dispatch for in-app messages emitted
+// by dialogs and other sub-models. The big switch routes to family-
+// specific handlers that live next door:
+//
+//   - model_agents.go  — agent CRUD flow
+//   - model_secrets.go — secrets paste flow
+//
+// When handled is true the caller MUST return immediately so other
+// dispatchers don't see the same message twice.
 func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	switch v := msg.(type) {
+
+	// --- core dialog plumbing ---
 	case CloseDialogMsg:
 		m.overlay.CloseTop()
 		return m, nil, true
+	case OpenSubDialogMsg:
+		// A dialog is launching another dialog (e.g. picker → confirm).
+		return m, m.overlay.Open(v.Dialog), true
 	case ConfirmQuitMsg:
 		// Force a synchronous flush so the in-flight draft + transcript
 		// don't get lost to the debounce window.
@@ -25,14 +33,16 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			m.flushState()
 		}
 		return m, tea.Quit, true
+
+	// --- session lifecycle ---
 	case ConfirmCloseSessionMsg:
 		m.overlay.CloseTop()
 		m.handleCloseTab()
 		return m, nil, true
 	case ConfirmNewConvMsg:
 		// "Reset chat" used to spawn a fresh claude subprocess. Now the
-		// engine owns the conversation lifecycle, so locally we just clear
-		// items + state and let the next /chat call start a new turn.
+		// engine owns the conversation lifecycle, so we just clear local
+		// items + the conv binding and let the next send create a new one.
 		m.overlay.CloseTop()
 		cur := m.manager.Current()
 		if cur == nil {
@@ -41,7 +51,7 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		cur.Items = nil
 		cur.State = session.StateIdle
 		cur.LastErr = nil
-		cur.ConvID = "" // detach from prior conversation; next send creates a new one
+		cur.ConvID = ""
 		cur.Turns = 0
 		cur.TotalCost = 0
 		m.textarea.Reset()
@@ -64,13 +74,14 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.overlay.CloseTop()
 		m.switchToTab(v.Kind, v.Index)
 		return m, nil, true
+
+	// --- theme picker ---
 	case PreviewThemeMsg:
 		// Live preview while user navigates the picker. Repaint only —
 		// don't close or persist; the dialog still owns the decision.
 		m.repaint(v.ID)
 		return m, nil, true
 	case ApplyThemeMsg:
-		// User pressed enter — commit the choice.
 		m.overlay.CloseTop()
 		m.repaint(v.ID)
 		m.saveState()
@@ -83,28 +94,20 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.repaint(v.OriginalID)
 		return m, nil, true
 
-	// --- agent CRUD flow ---
-
-	case OpenSubDialogMsg:
-		// A dialog is launching another dialog (e.g. picker → confirm).
-		return m, m.overlay.Open(v.Dialog), true
-
+	// --- agent CRUD (handlers in model_agents.go) ---
 	case SwitchAgentMsg:
 		m.overlay.CloseTop()
 		return m.switchAgent(v.Slug)
-
 	case OpenAgentFormMsg:
 		// Replace the picker with the form (no nested stack — the picker
 		// will be re-opened by AgentSavedMsg if needed).
 		m.overlay.CloseTop()
 		return m, m.overlay.Open(NewAgentFormDialog(m.client, v, m.styles)), true
-
 	case SubmitAgentFormMsg:
 		return m, m.submitAgentForm(v), true
-
 	case AgentSavedMsg:
 		if v.Err != nil {
-			// Form already shows the error; do nothing else.
+			// Form already shows the error; nothing else to do.
 			return m, nil, true
 		}
 		// Close the form, reopen the picker so the user sees the change.
@@ -114,25 +117,21 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			curSlug = cur.AgentSlug()
 		}
 		return m, m.overlay.Open(NewAgentPickerDialog(m.client, curSlug, m.styles)), true
-
 	case DeleteAgentMsg:
-		// Confirm dialog approved; close confirm, run delete async.
+		// Confirm dialog approved; close confirm, archive async.
 		m.overlay.CloseTop()
 		return m, m.deleteAgentCmd(v.Slug), true
-
 	case AgentChangedMsg:
-		// Bubbles down to the open picker (if any) so it refreshes.
-		// CloseTop already ran in the upstream handler; nothing else.
+		// Bubbles down to the open picker so it refreshes.
 		return m, m.overlay.UpdateTop(v), true
 
-	// --- secrets flow ---
+	// --- secrets (handlers in model_secrets.go) ---
 	case SubmitSecretsMsg:
 		// Form submitted — close it, run PUT async.
 		m.overlay.CloseTop()
 		return m, m.putSecretsCmd(v), true
 	case SecretsSavedMsg:
-		// Forward to whatever dialog is on top (the SecretsDialog,
-		// which reloads its list).
+		// Forward to the manager dialog so it reloads its list.
 		return m, m.overlay.UpdateTop(v), true
 	case DeleteSecretsMsg:
 		return m, m.deleteSecretsCmd(v.Provider), true
@@ -140,132 +139,11 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m Model) putSecretsCmd(req SubmitSecretsMsg) tea.Cmd {
-	c := m.client
-	if c == nil {
-		return func() tea.Msg { return SecretsSavedMsg{Provider: req.Provider, Err: errNoClient} }
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		err := c.PutSecrets(ctx, req.Provider, req.Fields)
-		return SecretsSavedMsg{Provider: req.Provider, Err: err}
-	}
-}
-
-func (m Model) deleteSecretsCmd(provider string) tea.Cmd {
-	c := m.client
-	if c == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		err := c.DeleteSecrets(ctx, provider)
-		return SecretsSavedMsg{Provider: provider, Err: err}
-	}
-}
-
-// switchAgent spawns a new session bound to slug. Existing sessions are
-// not modified — agent binding is per-session and immutable for that
-// session's lifetime.
-func (m Model) switchAgent(slug string) (Model, tea.Cmd, bool) {
-	if cur := m.manager.Current(); cur != nil && cur.AgentSlug() == slug {
-		return m, nil, true // already on this agent — picker just closes
-	}
-	if cur := m.manager.Current(); cur != nil {
-		cur.Draft = m.textarea.Value()
-	}
-	s, err := session.New(m.ctx, m.initialCwd, session.Options{
-		Logger:                   m.logger,
-		Model:                    m.defaultModel,
-		Effort:                   m.defaultEffort,
-		DangerousSkipPermissions: m.skipPerms,
-		Title:                    slug,
-	})
-	if err != nil {
-		m.lastErr = err
-		m.logger.Error("switch agent failed", "err", err, "slug", slug)
-		return m, nil, true
-	}
-	if m.client != nil {
-		s.AttachClient(m.client, slug)
-	}
-	m.manager.Add(s)
-	m.textarea.Reset()
-	m.layout()
-	m.refreshViewport()
-	m.saveState()
-	return m, nil, true
-}
-
-// submitAgentForm runs the create/update API call asynchronously and
-// emits AgentSavedMsg with the result.
-func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
-	c := m.client
-	if c == nil {
-		return func() tea.Msg {
-			return AgentSavedMsg{EditSlug: req.EditSlug, Err: errNoClient}
-		}
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if req.EditSlug == "" {
-			a, err := c.CreateAgent(ctx, client.AgentCreate{
-				Slug:        req.Slug,
-				Name:        req.Name,
-				Description: req.Description,
-				Model:       req.Model,
-				Prompt:      req.Prompt,
-			})
-			if err != nil {
-				return AgentSavedMsg{Err: err}
-			}
-			return AgentSavedMsg{Slug: a.Slug}
-		}
-		_, err := c.UpdateAgent(ctx, req.EditSlug, client.AgentPatch{
-			Name:        &req.Name,
-			Description: &req.Description,
-			Model:       &req.Model,
-			Prompt:      &req.Prompt,
-		})
-		if err != nil {
-			return AgentSavedMsg{EditSlug: req.EditSlug, Err: err}
-		}
-		return AgentSavedMsg{EditSlug: req.EditSlug, Slug: req.EditSlug}
-	}
-}
-
-func (m Model) deleteAgentCmd(slug string) tea.Cmd {
-	c := m.client
-	if c == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		if err := c.DeleteAgent(ctx, slug); err != nil {
-			return AgentChangedMsg{Status: "delete failed: " + err.Error()}
-		}
-		return AgentChangedMsg{Status: "deleted " + slug}
-	}
-}
-
-// errNoClient is returned by agent CRUD commands when the TUI was
-// launched without a daemon connection. Should be unreachable in
-// practice (auto-start makes one).
-var errNoClient = clientErr("no daemon connection")
-
-type clientErr string
-
-func (e clientErr) Error() string { return string(e) }
-
-// repaint swaps the active palette and re-applies it everywhere a Style
-// got copied at construction time. Called by all three settings flows
-// (preview, apply, cancel); only apply also closes the overlay and saves.
-// Also called from the tea.BackgroundColorMsg handler when Auto mode
-// needs to flip dark↔light.
+// repaint swaps the active palette and re-applies it everywhere a
+// Style got copied at construction time. Called by all three settings
+// flows (preview, apply, cancel); only apply also closes the overlay
+// and saves. Also called from the tea.BackgroundColorMsg handler when
+// Auto mode needs to flip dark↔light.
 func (m *Model) repaint(id string) {
 	t := ResolveTheme(id, m.bgIsLight)
 	SetPalette(t.P)
@@ -287,6 +165,8 @@ func (m *Model) repaint(id string) {
 	m.refreshViewport()
 }
 
+// createSession spawns a new tab. If v.AgentSlug is empty it falls
+// back to the model's default agent.
 func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 	m.overlay.CloseTop()
 	if v.Model != "" {
@@ -341,9 +221,10 @@ func (m *Model) switchToTab(kind string, index int) {
 }
 
 // handleChatEvent applies one SSE event to the matching session and
-// returns the next read tea.Cmd. Drops events from streams the session
-// has already replaced (e.g. a stale read landing after Cancel + a
-// fresh turn started). Persists the transcript on the terminal event.
+// returns the next read tea.Cmd. Drops events from streams the
+// session has already replaced (e.g. a stale read landing after
+// Cancel + a fresh turn started). Persists the transcript on the
+// terminal event.
 func (m *Model) handleChatEvent(msg chatEventMsg) tea.Cmd {
 	sess := m.manager.ByID(msg.SessionID)
 	if sess == nil {
@@ -364,9 +245,9 @@ func (m *Model) handleChatEvent(msg chatEventMsg) tea.Cmd {
 }
 
 // handleChatStreamDone fires on EOF or transport error. If the daemon
-// closed cleanly without a Done event (rare — usually means context was
-// cancelled mid-turn), fall the session back to Idle so the textarea
-// unlocks.
+// closed cleanly without a Done event (rare — usually means context
+// was cancelled mid-turn), fall the session back to Idle so the
+// textarea unlocks.
 func (m *Model) handleChatStreamDone(msg chatStreamDoneMsg) {
 	sess := m.manager.ByID(msg.SessionID)
 	if sess == nil {

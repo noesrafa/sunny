@@ -129,28 +129,66 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual
+## Estado actual (v0.8.0)
 
-### v0.1.1 (publicado)
+### Lo que funciona end-to-end
 
-- ✅ Daemon `sunny start/stop/status/serve`
-- ✅ Bootstrap desde defaults embebidos a `~/.sunny/`
-- ✅ HTTP API read-only: `/agents`, `/agents/{slug}`, `/agents/{slug}/skills/{name}`, `/agents/{slug}/knowledge/{file}`
-- ✅ TUI completo (lifted desde sunnytui): sidebar, chat, input, modales, themes
-- ✅ Distribución Homebrew tap (`brew install noesrafa/tap/sunny`)
-- ✅ Builds linux/amd64 + darwin/arm64 vía GoReleaser
-
-**Limitación:** la TUI todavía no se conecta al daemon para chat. Submitir un
-mensaje devuelve "no engine connected". El bootstrap usa `claude.StreamOpts.Idle: true`
-como stub mientras el endpoint de chat no exista.
-
-**Deuda técnica:** la TUI arrastra `internal/claude/`, `internal/runs/`,
-`internal/terminal/`, `internal/favs/` de sunnytui (multiplexor de Claude CLI).
-Es dead code en sunny — se elimina en v0.2.0.
+- **Daemon detached** (`sunny start/stop/status/serve`), sobrevive
+  cierre de TUI/terminal vía `Setsid`.
+- **Bootstrap** desde defaults embebidos en `~/.sunny/` la primera vez;
+  agentes existentes nunca se sobreescriben.
+- **HTTP API** completo:
+  - Lectura: `/healthz`, `/agents`, `/agents/{slug}`, `.../skills/{name}`,
+    `.../knowledge/{file}`
+  - Escritura: `POST/PATCH/DELETE /agents`, `POST/GET/DELETE /agents/{slug}/conversations`,
+    `POST /agents/{slug}/conversations/{id}/turn` (SSE), `PUT/DELETE /secrets/{provider}`
+- **Bearer auth** en todas las rutas excepto `/healthz`. Token
+  generado al primer boot en `~/.sunny/token` (mode 0600). Comandos
+  `sunny token`, `sunny token rotate`.
+- **Persistencia de conversaciones** en `agents/<slug>/conversations/<id>/{meta.json, events.jsonl}`.
+  El journal es la verdad; meta es rollup. `provider_state`
+  (claude-code session id) vive en meta para sobrevivir restarts.
+- **Multi-agente con CRUD** via HTTP + TUI (`ctrl+a` picker; create
+  con auto-slug, edit, archive). Borrado mueve a `~/.sunny/.archive/`.
+- **Tres providers**: claude-code (CLI subprocess), anthropic (SDK),
+  ollama (Ollama Cloud /api/chat). Routing por `agent.yaml.provider`
+  con fallback al default del daemon.
+- **Secrets** centralizados en `~/.sunny/secrets.yaml` (mode 0600,
+  estructurado por proveedor). Env vars override. CLI (`sunny
+  secrets <p> set <field>` con stdin), TUI (`ctrl+y` paste form),
+  HTTP. Nunca se devuelve un valor por la API.
+- **TUI** restaura su estado al reabrir (sesiones, drafts, theme,
+  agente activo, conv id). Ctrl+c cancela el turno en vuelo y queda
+  registrado como `cancelled` en el journal.
+- **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew tap
+  auto-actualizado por tag.
 
 ## Roadmap
 
-### v0.2.0 — TUI tonta (refactor "rip multiplexor")
+### Lo que sigue (post-v0.8.0)
+
+- [ ] **Reload del journal en TUI**: hoy los `Items` cacheados en
+      `state.json` son la fuente de verdad para el render al reabrir.
+      Falta reconciliar con `events.jsonl` cuando difieren (otro
+      cliente escribió mientras estábamos cerrados).
+- [ ] **Picker de conversaciones por agente**: la sidebar lista
+      sesiones locales pero no las conversaciones persistidas de un
+      agente. Útil para reabrir un chat archivado.
+- [ ] **launchd / systemd**: sobrevivir reboot del host. Comandos
+      `sunny enable / disable`. Anotado como deuda en CLAUDE.md.
+- [ ] **Tools ejecutables**: skills declaradas en system prompt como
+      texto pero no invocables. MCP nativo o formato propio.
+- [ ] **Rename de agente**: HTTP no lo expone. Hoy: mover el folder a
+      mano y reload.
+- [ ] **Tests**: cero hoy (intencional). CI mínimo + integration
+      suite del daemon como red de seguridad antes del primer
+      refactor mayor.
+
+---
+
+### Histórico (entregado)
+
+#### v0.2.0 — TUI tonta (refactor "rip multiplexor")
 
 Mover toda la lógica de provider/spawn fuera del cliente. El TUI queda
 limitado a presentación + HTTP a engines.

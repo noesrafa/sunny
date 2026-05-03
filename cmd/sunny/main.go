@@ -18,20 +18,28 @@ import (
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
+	"github.com/noesrafa/sunny/internal/tui"
 )
 
-const version = "v0.0.1"
+// version is set by the linker at release time via -ldflags. For local
+// `go build` it stays as "dev".
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		// `sunny` (no args) will eventually open the TUI. For now, print usage.
-		usage()
-		os.Exit(2)
+		// `sunny` with no arguments opens the TUI against the default daemon.
+		if err := openTUI(nil); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
 	var err error
 	switch cmd {
+	case "tui":
+		err = openTUI(args)
 	case "start":
 		err = start(args)
 	case "stop":
@@ -56,9 +64,11 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: sunny <command> [args]
+	fmt.Fprintln(os.Stderr, `usage: sunny [command] [args]
 
 commands:
+  (none)    Open the TUI (alias for 'tui').
+  tui       Open the TUI client. --addr selects which daemon to connect to.
   start     Run the daemon detached. Logs to <root>/run/sunny.log.
   stop      Stop the running daemon.
   status    Show whether the daemon is running, plus pid, addr, uptime.
@@ -68,6 +78,15 @@ commands:
 common flags:
   --addr   HTTP listen address (default 127.0.0.1:7777)
   --root   sunny runtime directory (default ~/.sunny)`)
+}
+
+func openTUI(args []string) error {
+	fs := flag.NewFlagSet("tui", flag.ExitOnError)
+	addr := fs.String("addr", "127.0.0.1:7777", "daemon address to connect to")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return tui.Run(*addr)
 }
 
 func defaultRoot() string {

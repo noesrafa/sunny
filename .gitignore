@@ -1,0 +1,10 @@
+# binaries
+/sunny
+/bin/
+
+# go test/build artifacts
+*.test
+*.out
+
+# os
+.DS_Store

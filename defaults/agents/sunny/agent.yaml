@@ -1,0 +1,3 @@
+name: sunny
+description: Default agent shipped with Sunny. Edit me, fork me, or replace me.
+model: claude-opus-4-7

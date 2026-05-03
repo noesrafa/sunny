@@ -134,8 +134,16 @@ func (e *Engine) HasProviders() bool {
 //   - Skills are listed by name + description + body. Stable enough to
 //     belong inside the cached prefix.
 //   - Knowledge is enumerated as a file index ("you have access to N files
-//     under knowledge/"). The agent can reference them by name; v0.4 adds
-//     a tool to actually open them.
+//     under knowledge/"). The agent can reference them by name; future
+//     work adds a tool to actually open them.
+//
+// **Skill framing note**: we deliberately frame skills as
+// pre-loaded behavioural guidelines, NOT as invocable tools. The
+// claude-code provider has its own Skill tool that loads named
+// skills from a separate registry; without the framing below the
+// model would try to call Skill("greet") and get "Unknown skill"
+// because our skills aren't registered there — they're already
+// inlined in this very prompt.
 func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 	var blocks []provider.SystemBlock
 
@@ -148,8 +156,9 @@ func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 
 	if len(a.Skills) > 0 {
 		var b strings.Builder
-		b.WriteString("# Available skills\n\n")
-		b.WriteString("These are skills you have access to. Each skill describes a capability you can apply when relevant.\n\n")
+		b.WriteString("# Operational guidelines\n\n")
+		b.WriteString("The named guidelines below are pre-loaded into this conversation. They are CONTEXT, not invocable tools — apply each guideline directly when its situation matches.\n\n")
+		b.WriteString("**Important**: do NOT call any Skill, load_skill, or similar tool with these names — the full guidance is already in the sections below; calling a skill tool will fail because these are not registered there.\n\n")
 		for _, sk := range a.Skills {
 			b.WriteString("## ")
 			b.WriteString(sk.Front.Name)

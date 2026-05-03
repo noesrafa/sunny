@@ -17,16 +17,27 @@ import (
 )
 
 type Client struct {
-	base string
-	hc   *http.Client
+	base  string
+	token string
+	hc    *http.Client
 }
 
-func New(addr string) *Client {
+// New constructs a daemon HTTP client. token is sent in
+// `Authorization: Bearer <token>` on every request — empty token skips
+// the header (only useful when talking to an unauth'd dev daemon).
+func New(addr, token string) *Client {
 	return &Client{
-		base: "http://" + addr,
+		base:  "http://" + addr,
+		token: token,
 		// No global timeout — turns can be long. The caller's context
 		// owns lifetime.
 		hc: &http.Client{},
+	}
+}
+
+func (c *Client) auth(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 }
 
@@ -45,6 +56,7 @@ func (c *Client) ListAgents(ctx context.Context) ([]AgentSummary, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.auth(req)
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, err
@@ -137,6 +149,7 @@ func (c *Client) Turn(parent context.Context, slug string, body TurnRequest) (*S
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	c.auth(req)
 
 	resp, err := c.hc.Do(req)
 	if err != nil {

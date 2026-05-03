@@ -68,6 +68,22 @@ survive the daemon restarting under it.
   by checking for `~/.sunny/agents/` (the real "fresh install"
   marker). Once seeded, the directory belongs to the user.
 
+## Auth contract
+
+- `~/.sunny/token` (32 random bytes, base64url, mode 0600) is generated
+  on first daemon boot and reused thereafter. File permissions are the
+  trust boundary — the daemon never exposes the token over HTTP.
+- All HTTP routes require `Authorization: Bearer <token>` except
+  `/healthz` (so liveness probes work without credentials).
+- Clients (TUI, curl, future bridges) read the file directly. The TUI
+  loads it at start and caches it in memory.
+- `sunny token` prints the current token. `sunny token rotate`
+  generates a new one — but the running daemon caches its bearer in
+  memory, so rotation only takes effect after `sunny stop && sunny
+  start`. Open TUI sessions must also be relaunched.
+- Empty token disables auth (test/dev only); the daemon never sets
+  this on its own.
+
 ## Known sharp edges (not yet fixed)
 
 - `lifecycle.IsAlive` uses `signal(0)` only. If the PID gets recycled

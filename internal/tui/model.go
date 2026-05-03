@@ -88,6 +88,10 @@ type Options struct {
 	// without it submitting a message returns ErrNoEngine. main.go
 	// auto-starts the daemon and passes its addr here.
 	DaemonAddr string
+	// DaemonToken is the bearer token sent on every daemon request.
+	// main.go reads it from ~/.sunny/token; empty here disables auth
+	// (only useful against a dev daemon started without auth).
+	DaemonToken string
 	// DefaultAgent is the slug to send turns at. v0.3.x hardcodes "sunny";
 	// session-vs-agent picking lands later.
 	DefaultAgent string
@@ -185,7 +189,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 
 	var cli *client.Client
 	if opts.DaemonAddr != "" {
-		cli = client.New(opts.DaemonAddr)
+		cli = client.New(opts.DaemonAddr, opts.DaemonToken)
 	}
 	defaultAgent := opts.DefaultAgent
 	if defaultAgent == "" {

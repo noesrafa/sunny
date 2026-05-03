@@ -2,6 +2,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,7 +14,11 @@ import (
 	"github.com/noesrafa/sunny/internal/store"
 )
 
-func New(s *store.Store, eng *engine.Engine, log *slog.Logger) http.Handler {
+// New builds the daemon's HTTP handler. token is the bearer token clients
+// must send in `Authorization: Bearer <token>`; only /healthz is exempt
+// (so external probes can verify liveness without credentials). Empty
+// token disables auth — useful for tests, never for production.
+func New(s *store.Store, eng *engine.Engine, log *slog.Logger, token string) http.Handler {
 	srv := &server{store: s, engine: eng, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -22,7 +27,29 @@ func New(s *store.Store, eng *engine.Engine, log *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /agents/{slug}/skills/{name}", srv.getSkill)
 	mux.HandleFunc("GET /agents/{slug}/knowledge/{file...}", srv.getKnowledge)
 	mux.HandleFunc("POST /agents/{slug}/turn", srv.postTurn)
-	return logging(log, mux)
+	return logging(log, requireBearer(token, mux))
+}
+
+// requireBearer enforces `Authorization: Bearer <token>` on every route
+// except /healthz. Compares with subtle.ConstantTimeCompare to avoid
+// timing leaks. If token is empty, auth is bypassed (test/dev only).
+func requireBearer(token string, h http.Handler) http.Handler {
+	if token == "" {
+		return h
+	}
+	expected := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			h.ServeHTTP(w, r)
+			return
+		}
+		got := r.Header.Get("Authorization")
+		if subtle.ConstantTimeCompare([]byte(got), expected) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 type server struct {

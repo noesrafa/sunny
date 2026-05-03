@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.13.0)
+## Estado actual (v0.14.0)
 
 ### Lo que funciona end-to-end
 
@@ -207,21 +207,35 @@ sobrescribe.
   `sunny pair offer` (en remoto) y `sunny pair claim <url> <code>`
   (en cliente) automatiza todo, derivando un nombre de peer del
   hostname. Sin SSH ni copy-paste de tokens.
+
+  **Tailscale (Fase 2b)**: `internal/tsnet` envuelve `tailscale ip`
+  y `tailscale status --json` por shell-out. Si tailscale está
+  instalado al boot, el daemon hace bind extra a la IP del tailnet
+  además de 127.0.0.1 (mismo puerto). `sunny peers scan` lista los
+  peers del tailnet con healthcheck a `:7777/healthz`, distinguiendo
+  candidatos (reachable, no-paired), ya pareados, y "tailnet hosts
+  sin sunny". Sunny doctor surface tailnet IP + hint a `peers scan`
+  cuando el CLI está disponible. Sin tailscale, todo el código
+  degrada silencioso (sin nags ni errores).
 - **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
   tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.13.0)
+### Lo que sigue (post-v0.14.0)
 
-**Fase 2b del mesh — Tailscale + multi-bind**:
+**Fase 3 del mesh — tiempo real cross-cliente**:
 
-- [ ] **Daemon escucha en tailnet IP** además de 127.0.0.1.
-      `tailscale ip` al boot; bind extra si hay éxito.
-- [ ] **`sunny peers scan`** lee `tailscale status --json` y prueba
-      `:7777/healthz` en cada peer; los que responden ofrece pairing
-      automático (paired flow detrás).
-- [ ] **mDNS/Bonjour fallback** para LAN sin Tailscale (nice-to-have).
+- [ ] **`GET /events` SSE general** en el daemon: emite eventos
+      `agent_*` y `conversation_*` en cuanto suceden.
+- [ ] **TUI subscribe a /events de cada peer** al boot; refresca
+      sidebar y agent picker al recibir eventos remotos.
+- [ ] **Optimistic local-first**: muestra el mensaje del usuario
+      inmediatamente; el evento del propio daemon confirma cuando
+      aparece en el journal.
+
+**mDNS/Bonjour fallback** para LAN sin Tailscale — nice-to-have,
+no bloqueante.
 
 **Fase 3 del mesh — tiempo real cross-cliente**:
 

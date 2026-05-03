@@ -12,6 +12,7 @@ import (
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/peers"
 	"github.com/noesrafa/sunny/internal/secrets"
+	"github.com/noesrafa/sunny/internal/tsnet"
 )
 
 // CheckClaudeCode probes for the `claude` binary. We don't try to
@@ -122,6 +123,27 @@ func CheckDaemon(root string) Result {
 	r.Status = StatusOK
 	r.Detail = fmt.Sprintf("pid %d, %s, up %s", state.PID, state.Addr, humanDuration(uptime))
 	return r
+}
+
+// CheckTailscale returns nil when tailscale isn't installed — sunny
+// works fine without it and we don't want to nag solo-install users.
+// When the CLI exists we probe LocalIP() and surface either the
+// tailnet IP (ok) or the friendly error from the CLI (warn).
+func CheckTailscale() *Result {
+	if !tsnet.Available() {
+		return nil
+	}
+	r := Result{Name: "tailscale"}
+	ip, err := tsnet.LocalIP()
+	if err != nil {
+		r.Status = StatusWarn
+		r.Detail = err.Error()
+		r.Hint = "tailscale up"
+		return &r
+	}
+	r.Status = StatusOK
+	r.Detail = "tailnet IP " + ip + " — try: sunny peers scan"
+	return &r
 }
 
 // CheckPeers reads ~/.sunny/peers.yaml and probes each remote with a

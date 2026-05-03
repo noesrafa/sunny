@@ -2,14 +2,13 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.13.0 — chat works end-to-end across four backends
-> (claude-code, Anthropic API, Ollama Cloud, opencode). Phase 2a of the
-> mesh: one TUI can talk to multiple sunny daemons via
-> `~/.sunny/peers.yaml`, paired over a one-time code (`sunny pair
-> offer` / `sunny pair claim`) — no more SSH-then-copy-paste. The agent
-> picker shows `host/slug` rows; conversations stay on the engine they
-> were created on. Tailscale auto-discovery and real-time cross-client
-> sync are next.
+> **Status:** v0.14.0 — chat works end-to-end across four backends
+> (claude-code, Anthropic API, Ollama Cloud, opencode). Mesh through
+> Phase 2b: pair daemons over a one-time code, daemon auto-binds to
+> the tailnet IP when Tailscale is up, `sunny peers scan` walks the
+> tailnet and surfaces sunny-running peers. Conversations stay on
+> the engine they were created on. Real-time cross-client sync is
+> next.
 
 ## Install
 
@@ -83,8 +82,28 @@ echo "<token>" | sunny peers add vps http://100.64.0.5:7777
 ```
 
 Conversations stay on the engine that owns the agent — sunny does
-not replicate data across hosts. Tailscale auto-discovery + daemon
-multi-bind are coming in v0.14.
+not replicate data across hosts.
+
+### Tailscale
+
+When Tailscale is installed and logged in on the host running the
+daemon, `sunny start` auto-binds an extra listener to the tailnet
+IPv4 (alongside 127.0.0.1) so peers on the tailnet can reach it
+without exposing the daemon to the LAN or public internet.
+
+Discovery:
+
+```bash
+sunny peers scan
+→ Candidates (run sunny pair on each side to add):
+    · vps-1                http://100.64.0.10:7777  [linux]
+  Already paired:
+    ✓ pi                   http://100.64.0.20:7777  (as "pi")
+```
+
+Scan never auto-pairs — pairing is a two-side consent flow. Pair
+the candidates with `sunny pair offer` / `sunny pair claim` as
+above.
 
 Or daemon-only:
 

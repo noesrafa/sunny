@@ -5,23 +5,24 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.13.0`** (Phase 2a of multi-client mesh:
-one-time-code pairing dance — `sunny pair offer` / `sunny pair
-claim` — so adding a peer no longer requires SSH-then-copy-paste).
-Brew `sunny version` should match.
+**Latest release: `v0.14.0`** (Phase 2b of multi-client mesh:
+daemon auto-binds the tailnet IP when Tailscale is up, `sunny peers
+scan` lists tailnet hosts running sunny). Brew `sunny version`
+should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
 actual". The short version: chat works end-to-end across four
 backends (claude-code, anthropic, ollama, opencode); the TUI spans
 multiple sunny daemons (local + ~/.sunny/peers.yaml entries); peers
-are added either with `sunny pair claim <url> <code>` (recommended)
-or `sunny peers add <name> <url>` (manual). Conversations stay on
-the engine they were created on — data per location.
+are added with `sunny pair offer/claim` (Phase 2a) and discovered
+via `sunny peers scan` (Phase 2b). Conversations stay on the engine
+they were created on — data per location.
 
-**Single most likely next thing to pick up**: Phase 2b of the mesh —
-daemon multi-bind (tailnet IP), `tailscale status --json` discovery
-in `sunny peers scan`. Design notes are in PLAN.md → "Lo que sigue".
-Read that first; the path is laid out.
+**Single most likely next thing to pick up**: Phase 3 of the mesh —
+real-time cross-client sync. New `GET /events` SSE on the daemon
+emits agent + conversation events; TUI subscribes to every peer's
+stream so changes from one client appear in another without manual
+reload. Design notes in PLAN.md → "Lo que sigue".
 
 ### How to verify things quickly
 
@@ -104,6 +105,15 @@ flow with grep / glob / ls.
   pair offer/claim dance. Codes are 6 chars from a no-ambiguity
   alphabet, single-use, 5min TTL. The daemon's bearer is shared
   as-is on claim (per-pairing tokens are a future improvement).
+- `internal/tsnet/` — thin shell-out wrapper over the `tailscale`
+  CLI. `Available()` is the cheap PATH check; `LocalIP()` and
+  `Peers()` are the work calls. Sunny doesn't import libtailscale
+  to keep the binary lean and the dep graph honest.
+- `cmd/sunny/serve.go` `tailnetBind` — at boot, if tsnet is
+  available and `tailscale ip -4` returns something, the daemon
+  spawns an extra `srv.Serve(ln)` goroutine bound to that IP using
+  the same port as `--addr`. Failures on the tailnet listener log
+  warn and the primary bind keeps running.
 - `internal/client/federation.go` — wraps N `*Client` keyed by peer
   name. `ListAgents` fan-outs in parallel; per-peer failures don't
   fail the whole call. The TUI's `Model.fed` always exists (single-

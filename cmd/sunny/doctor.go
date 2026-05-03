@@ -42,6 +42,11 @@ func renderReport(w io.Writer, r doctor.Report) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Runtime")
 	writeBareRow(w, r.Runtime)
+	if r.Tailscale != nil {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Tailscale")
+		writeBareRow(w, *r.Tailscale)
+	}
 	if len(r.Peers) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Peers")
@@ -116,6 +121,9 @@ func nextSteps(r doctor.Report) []string {
 		if p.Status != doctor.StatusOK {
 			add(p.Hint)
 		}
+	}
+	if r.Tailscale != nil && r.Tailscale.Status != doctor.StatusOK {
+		add(r.Tailscale.Hint)
 	}
 	return out
 }

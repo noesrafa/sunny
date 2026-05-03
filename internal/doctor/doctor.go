@@ -49,11 +49,14 @@ type Result struct {
 // pass. Providers are kept in declaration order; daemon and runtime
 // each surface independently. Peers is one row per remote daemon
 // configured in ~/.sunny/peers.yaml — empty for solo installs.
+// Tailscale, when present, gets one summary line — local IP and a
+// hint about `sunny peers scan`.
 type Report struct {
 	Providers []Result
 	Daemon    Result
 	Runtime   Result
 	Peers     []Result
+	Tailscale *Result // nil when CLI absent and we don't want to show the row
 }
 
 // Run executes every probe against the given runtime root. A missing
@@ -68,8 +71,9 @@ func Run(root string) Report {
 			CheckAnthropic(store),
 			CheckOllama(store),
 		},
-		Daemon:  CheckDaemon(root),
-		Runtime: CheckRuntime(root),
-		Peers:   CheckPeers(root),
+		Daemon:    CheckDaemon(root),
+		Runtime:   CheckRuntime(root),
+		Peers:     CheckPeers(root),
+		Tailscale: CheckTailscale(),
 	}
 }

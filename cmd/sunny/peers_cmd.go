@@ -4,12 +4,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/noesrafa/sunny/internal/auth"
 	"github.com/noesrafa/sunny/internal/peers"
+	"github.com/noesrafa/sunny/internal/tsnet"
 )
 
 // peersCmd is the CLI surface for ~/.sunny/peers.yaml. Mirrors the
@@ -45,6 +48,12 @@ func peersCmd(args []string) error {
 			return fmt.Errorf("usage: sunny peers remove <name>")
 		}
 		return peersRemove(*root, rest[1])
+	case "scan":
+		port := "7777"
+		if _, p, err := net.SplitHostPort(*addr); err == nil && p != "" {
+			port = p
+		}
+		return peersScan(*root, port)
 	}
 	return fmt.Errorf("unknown subcommand: %s", strings.Join(rest, " "))
 }
@@ -142,6 +151,111 @@ func peersRemove(root, name string) error {
 	}
 	fmt.Printf("removed peer %s\n", name)
 	return nil
+}
+
+// peersScan walks the tailnet and surfaces every host that responds
+// on :<port>/healthz, marking the ones that are already paired in
+// peers.yaml. It deliberately does NOT pair anything — pairing is a
+// two-side consent flow (offer + claim), so all this command can do
+// is help the operator see what's pairable.
+//
+// Output groups peers into "candidates" (reachable, not yet paired)
+// and "already paired" + an "unreachable" list at the end.
+func peersScan(root, port string) error {
+	if !tsnet.Available() {
+		return fmt.Errorf("tailscale CLI not installed (brew install tailscale)")
+	}
+	hosts, err := tsnet.Peers()
+	if err != nil {
+		return err
+	}
+	tok, _ := auth.LoadToken(root)
+	r, _ := peers.Load(root, "127.0.0.1:7777", tok) // soft-load; missing peers.yaml is fine
+	knownByURL := map[string]string{} // url → peer name
+	for _, p := range r.Remote {
+		knownByURL[strings.TrimRight(p.URL, "/")] = p.Name
+	}
+
+	type result struct {
+		host      tsnet.Peer
+		url       string
+		reachable bool
+		paired    string // peer name when already in peers.yaml
+	}
+	results := make([]result, len(hosts))
+	var wg sync.WaitGroup
+	for i, h := range hosts {
+		if h.IsSelf || !h.Online || h.IP == "" {
+			results[i] = result{host: h}
+			continue
+		}
+		wg.Add(1)
+		go func(i int, h tsnet.Peer) {
+			defer wg.Done()
+			url := "http://" + net.JoinHostPort(h.IP, port)
+			results[i] = result{host: h, url: url, reachable: probeHealthz(url), paired: knownByURL[url]}
+		}(i, h)
+	}
+	wg.Wait()
+
+	var candidates, paired, dark []result
+	for _, r := range results {
+		switch {
+		case r.host.IsSelf:
+			// drop self
+		case !r.host.Online:
+			// drop offline (tailscale knows they're not reachable)
+		case r.paired != "":
+			paired = append(paired, r)
+		case r.reachable:
+			candidates = append(candidates, r)
+		default:
+			dark = append(dark, r)
+		}
+	}
+
+	if len(candidates) > 0 {
+		fmt.Println("Candidates (run sunny pair on each side to add):")
+		for _, c := range candidates {
+			fmt.Printf("  · %-20s %s  [%s]\n", c.host.HostName, c.url, c.host.OS)
+		}
+	}
+	if len(paired) > 0 {
+		fmt.Println()
+		fmt.Println("Already paired:")
+		for _, p := range paired {
+			fmt.Printf("  ✓ %-20s %s  (as %q)\n", p.host.HostName, p.url, p.paired)
+		}
+	}
+	if len(dark) > 0 {
+		fmt.Println()
+		fmt.Println("Tailnet hosts without a sunny daemon on :" + port + ":")
+		for _, d := range dark {
+			fmt.Printf("  ✗ %-20s %s\n", d.host.HostName, d.url)
+		}
+	}
+	if len(candidates)+len(paired)+len(dark) == 0 {
+		fmt.Println("(no other tailnet hosts found)")
+	}
+	return nil
+}
+
+// probeHealthz GETs /healthz with a short timeout. /healthz is the
+// one endpoint that doesn't require auth, perfect for "is sunny
+// listening here?".
+func probeHealthz(url string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/healthz", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // pingPeer hits GET /agents on the peer with the given token. We use

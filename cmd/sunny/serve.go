@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,8 +19,8 @@ import (
 	"github.com/noesrafa/sunny/internal/bootstrap"
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
-	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/pairing"
+	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
 	"github.com/noesrafa/sunny/internal/provider/ollama"
@@ -28,6 +29,7 @@ import (
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
 	"github.com/noesrafa/sunny/internal/tools"
+	"github.com/noesrafa/sunny/internal/tsnet"
 )
 
 // serve runs the daemon in the foreground. Used by `start` (re-exec'd
@@ -103,13 +105,40 @@ func serve(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	errCh := make(chan error, 1)
-	go func() {
-		log.Info("listening", "addr", *addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+	// Resolve every interface we want to listen on. The primary
+	// `--addr` (usually 127.0.0.1:7777) is non-negotiable; the
+	// optional tailnet bind kicks in only when tailscale is
+	// installed AND logged in. Bind failures on the tailnet are
+	// non-fatal — the daemon stays up on its primary address with
+	// a warning, so a misconfigured Tailscale doesn't kill chat.
+	addrs := []string{*addr}
+	if extra := tailnetBind(*addr, log); extra != "" && extra != *addr {
+		addrs = append(addrs, extra)
+	}
+
+	listeners := make([]net.Listener, 0, len(addrs))
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			if a == *addr {
+				return fmt.Errorf("listen %s: %w", a, err)
+			}
+			log.Warn("tailnet listener skipped", "addr", a, "err", err.Error())
+			continue
 		}
-	}()
+		listeners = append(listeners, ln)
+	}
+
+	errCh := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		ln := ln
+		go func() {
+			log.Info("listening", "addr", ln.Addr().String())
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	select {
 	case err := <-errCh:
@@ -120,6 +149,29 @@ func serve(args []string) error {
 		defer c()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// tailnetBind detects the tailnet IPv4 (when tailscale is installed
+// and logged in) and returns "<ip>:<port>" using the same port as
+// primary. Returns "" when there's nothing to do — caller skips the
+// extra listener silently. Errors are logged at debug level so they
+// don't spam the operator on a non-tailscale host.
+func tailnetBind(primary string, log *slog.Logger) string {
+	if !tsnet.Available() {
+		return ""
+	}
+	ip, err := tsnet.LocalIP()
+	if err != nil {
+		log.Debug("tailscale ip lookup failed; skipping tailnet bind", "err", err.Error())
+		return ""
+	}
+	// Reuse the port from --addr.
+	_, port, err := net.SplitHostPort(primary)
+	if err != nil || port == "" {
+		log.Debug("could not split addr for tailnet bind", "addr", primary)
+		return ""
+	}
+	return net.JoinHostPort(ip, port)
 }
 
 // buildEngine probes every supported provider and returns an engine

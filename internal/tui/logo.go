@@ -7,7 +7,11 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const Version = "0.13.7"
+// Version is the string rendered in the logo's top-right corner.
+// cmd/sunny sets this once at startup from its main.version (which
+// the linker injects at release time via -ldflags). Stays as "dev"
+// for `go build` without flags.
+var Version = "dev"
 
 // Dot-matrix SUNNY: each letter is a 5×5 logical pixel grid where every
 // "pixel" is half a terminal cell tall. We pack two logical rows into one

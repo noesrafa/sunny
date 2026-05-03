@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	charmlog "charm.land/log/v2"
@@ -65,6 +66,11 @@ func openTUI(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load token: %w (daemon may not have written it yet)", err)
 	}
+
+	// Plumb the linker-set version into the logo before the model is
+	// constructed. Strip the leading "v" so the logo's "v" prefix
+	// doesn't double up.
+	tui.Version = strings.TrimPrefix(version, "v")
 
 	cwd, _ := os.Getwd()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -4,10 +4,17 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 )
+
+// ErrConvNotFound is returned by Turn when the daemon responds 404 to
+// a turn POST. Typically this means the saved ConvID points at a
+// conversation that was archived or deleted out-of-band; callers
+// (session.SendBegin) catch this to transparently start fresh.
+var ErrConvNotFound = errors.New("conversation not found")
 
 // Message is one user/assistant turn passed to the daemon.
 type Message struct {
@@ -98,6 +105,12 @@ func (c *Client) Turn(parent context.Context, slug, convID string, body TurnRequ
 	}
 	if resp.StatusCode != http.StatusOK {
 		err := errorFromBody("POST "+url, resp)
+		if resp.StatusCode == http.StatusNotFound {
+			// 404 on a turn means the conv (or its agent) doesn't
+			// exist anymore. Surface as a typed error so the caller
+			// can recover by creating a new conv.
+			err = fmt.Errorf("%w: %s", ErrConvNotFound, err.Error())
+		}
 		_ = resp.Body.Close()
 		cancel()
 		return nil, err

@@ -250,17 +250,24 @@ func (s *Session) RefreshBranch() bool {
 	return changed
 }
 
-// SendBegin starts an assistant turn against the daemon. The user's text
-// is appended to the transcript, state flips to Thinking, and the SSE
-// stream is opened. The returned Stream is non-nil on success — the
-// caller (TUI) is responsible for pumping it via Stream.Next() and
-// applying each event back via ApplyEvent.
+// SendBegin starts an assistant turn against the daemon. The user's
+// text is appended to the transcript, state flips to Thinking, and
+// the SSE stream is opened. The returned Stream is non-nil on success
+// — the caller (TUI) is responsible for pumping it via Stream.Next()
+// and applying each event back via ApplyEvent.
 //
-// Side effects on the session:
+// Side effects on the session (only on success):
 //   - appends UserItem{Text, Attachments}
 //   - clears pending Attachments
 //   - sets State=Thinking, StartedAt=now, turnHadOutput=false
 //   - records activeStream + streamCancel so Cancel() can interrupt
+//
+// Recovery: if the saved ConvID has been archived/deleted out-of-band
+// the daemon returns 404 (client.ErrConvNotFound). We catch that
+// case, clear ConvID, and retry once with a fresh conversation. The
+// local transcript is preserved in the wire payload so the model
+// still sees the full context — but the journal on disk only has
+// the new turn forward, since the prior conv is gone.
 func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, error) {
 	if s.c == nil {
 		return nil, ErrNoEngine
@@ -269,29 +276,8 @@ func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, e
 		return nil, ErrSessionBusy
 	}
 
-	// Lazily create the server-side conversation on first send. Subsequent
-	// turns reuse the same ConvID. Server tracks claude-code's
-	// ProviderState in meta.json so we don't carry it on the wire.
-	if s.ConvID == "" {
-		meta, err := s.c.CreateConversation(ctx, s.agentSlug, s.Title, s.Model)
-		if err != nil {
-			return nil, fmt.Errorf("create conversation: %w", err)
-		}
-		s.ConvID = meta.ID
-		if s.logger != nil {
-			s.logger.Debug("conversation created", "session", s.ID, "conv_id", s.ConvID)
-		}
-	}
-
-	wire := buildWireMessages(s.Items, text)
-
-	turnCtx, cancel := context.WithCancel(ctx)
-	stream, err := s.c.Turn(turnCtx, s.agentSlug, s.ConvID, client.TurnRequest{
-		Messages: wire,
-		Cwd:      s.Cwd,
-	})
+	stream, cancel, err := s.openTurn(ctx, text, false)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 
@@ -307,6 +293,52 @@ func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, e
 		s.logger.Debug("turn started", "session", s.ID, "conv_id", s.ConvID)
 	}
 	return stream, nil
+}
+
+// openTurn ensures a server-side conversation exists, then opens the
+// turn stream. retried=true on the second attempt prevents infinite
+// recursion if the brand-new conversation also 404s (would only
+// happen on truly broken daemon state).
+func (s *Session) openTurn(ctx context.Context, text string, retried bool) (*client.Stream, context.CancelFunc, error) {
+	// Lazily create the server-side conversation on first send.
+	// Subsequent turns reuse the same ConvID. The server tracks
+	// claude-code's ProviderState in meta.json so we don't carry it
+	// on the wire.
+	if s.ConvID == "" {
+		meta, err := s.c.CreateConversation(ctx, s.agentSlug, s.Title, s.Model)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create conversation: %w", err)
+		}
+		s.ConvID = meta.ID
+		if s.logger != nil {
+			s.logger.Debug("conversation created", "session", s.ID, "conv_id", s.ConvID)
+		}
+	}
+
+	wire := buildWireMessages(s.Items, text)
+
+	turnCtx, cancel := context.WithCancel(ctx)
+	stream, err := s.c.Turn(turnCtx, s.agentSlug, s.ConvID, client.TurnRequest{
+		Messages: wire,
+		Cwd:      s.Cwd,
+	})
+	if errors.Is(err, client.ErrConvNotFound) && !retried {
+		// The saved ConvID points at a conversation that no longer
+		// exists. Drop it and start a new one transparently. The
+		// user's intent is "keep talking" — they don't need to know
+		// the journal got reset.
+		cancel()
+		if s.logger != nil {
+			s.logger.Info("conv vanished server-side; creating fresh", "session", s.ID, "old_conv", s.ConvID)
+		}
+		s.ConvID = ""
+		return s.openTurn(ctx, text, true)
+	}
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return stream, cancel, nil
 }
 
 // ApplyEvent mutates Items + State based on one event from the daemon's

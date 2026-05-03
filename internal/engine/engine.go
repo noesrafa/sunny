@@ -9,10 +9,11 @@
 // running conversation, and re-streams. The loop terminates on a
 // Done event with no further tool_use blocks.
 //
-// claude-code is special: it has its own native toolset (Read, Glob,
-// Grep, Bash, …) that it manages internally. Sunny's tools are NOT
-// advertised to claude-code — that would create duplicate names and
-// confuse the model. claude-code agents keep using its native tools.
+// claude-code and opencode are special: each has its own native
+// toolset (Read, Glob, Grep, Bash, …) that it manages internally.
+// Sunny's tools are NOT advertised to either one — that would create
+// duplicate names and confuse the model. Agents on those providers
+// keep using the provider's native tools.
 package engine
 
 import (
@@ -23,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/noesrafa/sunny/internal/provider"
+	"github.com/noesrafa/sunny/internal/provider/opencode"
 	"github.com/noesrafa/sunny/internal/store"
 	"github.com/noesrafa/sunny/internal/tools"
 )
@@ -84,6 +86,12 @@ func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provid
 	system, err := BuildSystemPrompt(agent)
 	if err != nil {
 		return nil, fmt.Errorf("build system prompt: %w", err)
+	}
+
+	// opencode driver writes ~/.config/opencode/agent/sunny-<slug>.md
+	// before its first spawn — needs the slug from context.
+	if p.Name() == "opencode" {
+		ctx = opencode.WithAgentSlug(ctx, agent.Slug)
 	}
 
 	out := make(chan provider.Event, 32)
@@ -151,11 +159,22 @@ func (e *Engine) runTurnLoop(
 			case provider.ThinkingDelta:
 				out <- ev
 			case provider.ToolUse:
-				pendingCalls = append(pendingCalls, provider.ToolCall{
-					ID:    v.ID,
-					Name:  v.Name,
-					Input: json.RawMessage(v.Input),
-				})
+				// Only feed the round-trip loop when sunny is the one
+				// running tools. When `advertised` is empty the provider
+				// is running its own toolset (claude-code, opencode);
+				// these events are informational — the provider already
+				// executed the tool and emitted its result inside the
+				// same stream. Re-running them here would (a) try to
+				// dispatch tool names we don't have ("Read", "Bash") and
+				// (b) feed back a role=tool message the provider would
+				// reject.
+				if len(advertised) > 0 {
+					pendingCalls = append(pendingCalls, provider.ToolCall{
+						ID:    v.ID,
+						Name:  v.Name,
+						Input: json.RawMessage(v.Input),
+					})
+				}
 				out <- ev
 			case provider.ToolResult:
 				out <- ev
@@ -228,7 +247,7 @@ func (e *Engine) advertisedTools(agent *store.Agent) []provider.ToolDef {
 	if e.tools == nil {
 		return nil
 	}
-	if agent.Config.Provider == "claude-code" {
+	if agent.Config.Provider == "claude-code" || agent.Config.Provider == "opencode" {
 		return nil
 	}
 	all := e.tools.All()

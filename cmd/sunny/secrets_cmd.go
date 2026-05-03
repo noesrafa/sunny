@@ -91,7 +91,7 @@ func secretsShow(s *secrets.Store, provider string) error {
 }
 
 func secretsSet(s *secrets.Store, provider, field string) error {
-	value, err := readSecretValue(provider, field)
+	value, err := readSecretValue(provider + "." + field)
 	if err != nil {
 		return err
 	}
@@ -104,26 +104,4 @@ func secretsSet(s *secrets.Store, provider, field string) error {
 	fmt.Printf("saved %s.%s\n", provider, field)
 	fmt.Fprintln(os.Stderr, "(running daemon picks up the new value on next request; no restart needed)")
 	return nil
-}
-
-// readSecretValue reads a secret value from stdin. When stdin is a
-// pipe, reads everything; when it's a TTY, prompts interactively
-// (echo is NOT suppressed — recommend piping for sensitive values;
-// we deliberately don't pull in a terminal-control dep just for this).
-func readSecretValue(provider, field string) (string, error) {
-	stat, _ := os.Stdin.Stat()
-	piped := (stat.Mode() & os.ModeCharDevice) == 0
-	if piped {
-		raw, err := os.ReadFile("/dev/stdin")
-		if err != nil {
-			return "", fmt.Errorf("read stdin: %w", err)
-		}
-		return strings.TrimSpace(string(raw)), nil
-	}
-	fmt.Fprintf(os.Stderr, "value for %s.%s (will echo — pipe for sensitive values): ", provider, field)
-	var line string
-	if _, err := fmt.Fscanln(os.Stdin, &line); err != nil {
-		return "", fmt.Errorf("read input: %w", err)
-	}
-	return strings.TrimSpace(line), nil
 }

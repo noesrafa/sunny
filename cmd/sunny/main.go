@@ -41,6 +41,10 @@ func main() {
 		err = token(args)
 	case "secrets":
 		err = secretsCmd(args)
+	case "doctor":
+		err = doctorCmd(args)
+	case "setup":
+		err = setupCmd(args)
 	case "version", "-v", "--version":
 		fmt.Println("sunny", version)
 	case "help", "-h", "--help":
@@ -68,6 +72,8 @@ commands:
   serve     Run the daemon in the foreground (advanced; prefer 'start').
   token     Print the daemon's bearer token. 'sunny token rotate' regenerates it.
   secrets   Manage provider keys. 'sunny secrets' lists, 'sunny secrets <p> set <field>' reads from stdin.
+  doctor    Print a checklist: providers (✓/⚠/✗), daemon, runtime. Run this first when something feels off.
+  setup     Get a provider ready. 'sunny setup' walks you through it; 'sunny setup <p>' targets one.
   version   Print version.
 
 common flags:

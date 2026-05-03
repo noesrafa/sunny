@@ -22,6 +22,7 @@ import (
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
 	"github.com/noesrafa/sunny/internal/provider/ollama"
+	"github.com/noesrafa/sunny/internal/provider/opencode"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
@@ -122,10 +123,12 @@ func serve(args []string) error {
 // first one to come up in declaration order, or whatever
 // SUNNY_PROVIDER pins.
 //
-// Order: claude-code → anthropic → ollama. claude-code wins by
-// default because it inherits the user's claude.ai login (no separate
-// API key) AND brings claude code's full toolset. The other two
-// depend on `secrets.yaml` (or env vars) being populated.
+// Order: claude-code → anthropic → ollama → opencode. claude-code
+// wins by default because it inherits the user's claude.ai login (no
+// separate API key) AND brings claude code's full toolset. anthropic
+// and ollama depend on `secrets.yaml` (or env vars). opencode is
+// last because it requires its own auth setup (`opencode auth login`)
+// in a separate config tree.
 //
 // Returning a zero-engine (no providers) is OK — chat returns 503
 // until at least one driver is configured.
@@ -153,6 +156,8 @@ func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
 	tryAdd("anthropic", an, anErr)
 	ol, olErr := ollama.New(s)
 	tryAdd("ollama", ol, olErr)
+	oc, ocErr := opencode.New()
+	tryAdd("opencode", oc, ocErr)
 
 	defaultName := pickDefaultProvider(choice, registry, log)
 	if defaultName == "" {
@@ -180,8 +185,13 @@ func pickDefaultProvider(choice string, reg map[string]provider.Provider, log *s
 			return "ollama"
 		}
 		log.Warn("SUNNY_PROVIDER=ollama but api_key not configured")
+	case "opencode":
+		if _, ok := reg["opencode"]; ok {
+			return "opencode"
+		}
+		log.Warn("SUNNY_PROVIDER=opencode but opencode CLI not available")
 	}
-	for _, n := range []string{"claude-code", "anthropic", "ollama"} {
+	for _, n := range []string{"claude-code", "anthropic", "ollama", "opencode"} {
 		if _, ok := reg[n]; ok {
 			return n
 		}
@@ -194,4 +204,5 @@ var (
 	_ provider.Provider = (*anthropic.Driver)(nil)
 	_ provider.Provider = (*claudecode.Driver)(nil)
 	_ provider.Provider = (*ollama.Driver)(nil)
+	_ provider.Provider = (*opencode.Driver)(nil)
 )

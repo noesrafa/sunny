@@ -5,15 +5,15 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.10.0`** (read-only tools — view, ls, grep,
-glob — with full round-trip loop in the engine). Brew `sunny version`
-should match.
+**Latest release: `v0.11.0`** (opencode driver + `sunny doctor` +
+`sunny setup`). Brew `sunny version` should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
-actual". The short version: chat works end-to-end across three
-providers (claude-code, anthropic, ollama), conversations persist
-per-agent, the agent has read-only filesystem access tools, and the
-TUI restores its layout on restart.
+actual". The short version: chat works end-to-end across **four**
+backends (claude-code, anthropic, ollama, opencode), conversations
+persist per-agent, the agent has read-only filesystem access tools,
+the TUI restores its layout on restart, and onboarding is now a
+single `sunny doctor` + `sunny setup <provider>`.
 
 **Single most likely next thing to pick up**: write/exec tools
 (`edit`, `write`, `bash`) + their permission flow. Design notes are
@@ -22,10 +22,9 @@ in PLAN.md → "Lo que sigue". Read that first; the path is laid out.
 ### How to verify things quickly
 
 ```bash
-# basic loop
-sunny start && sunny status               # daemon up, healthz ok
+sunny doctor                               # one-screen checklist
+sunny start && sunny status                # daemon up, healthz ok
 sunny token                                # bearer token (mode 0600)
-sunny secrets                              # list configured providers
 
 # end-to-end smoke
 TOK=$(sunny token)
@@ -39,7 +38,7 @@ provider, create an agent on it, and ask the model to use a tool
 explicitly:
 
 ```bash
-sunny secrets ollama set api_key      # paste from stdin
+sunny setup ollama                     # paste API key, save in secrets.yaml
 sunny stop && sunny start              # daemon picks up new provider
 
 curl -s -X POST -H "Authorization: Bearer $(sunny token)" \
@@ -56,13 +55,19 @@ flow with grep / glob / ls.
 ### Where the bodies are buried
 
 - `internal/engine/engine.go` — `runTurnLoop` is the round-trip
-  driver. If a tool invocation behaves wrong, start there.
+  driver. ToolUse events get added to `pendingCalls` ONLY when
+  `advertised` is non-empty; for claude-code/opencode the events
+  are informational because the provider runs the tools itself.
 - `internal/tools/` — one file per tool. `path.go` is the
   cwd-bounded resolver (had a macOS `/tmp` symlink bug; the fix
   EvalSymlinks both sides).
-- `internal/provider/{anthropic,ollama}/` — the wire translation.
-  `claude-code` deliberately doesn't get `req.Tools`; it has its
-  own native toolset.
+- `internal/provider/{anthropic,ollama}/` — wire translation for
+  providers where sunny advertises its own tools.
+- `internal/provider/{claudecode,opencode}/` — subprocess wrappers
+  for CLIs that bring their own toolset. opencode also writes a
+  per-agent file at `~/.config/opencode/agent/sunny-<slug>.md` to
+  carry the system prompt (opencode has no `--append-system-prompt`).
+- `internal/doctor/` — probes for `sunny doctor` and `sunny setup`.
 - `cmd/sunny/serve.go` `buildEngine` — auto-detection chain. If a
   provider doesn't show up, this is where to log-trace.
 - `cmd/sunny/tui.go` `openTUI` — state restore + bootstrap session.

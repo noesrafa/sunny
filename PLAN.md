@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.10.0)
+## Estado actual (v0.11.0)
 
 ### Lo que funciona end-to-end
 
@@ -154,7 +154,7 @@ sobrescribe.
   con auto-slug desde el nombre, edit con prefill, archive). El
   archive mueve a `~/.sunny/.archive/` con timestamp; restaurar es
   manual (mover folder a `agents/`).
-- **Tres providers**:
+- **Cuatro providers**:
   - **claude-code**: subprocess wrapper, usa el login de claude.ai
     del usuario, trae todo el toolset nativo de claude code.
   - **anthropic**: SDK streaming con cache breakpoints, tool support
@@ -163,6 +163,12 @@ sobrescribe.
     deltas para modelos de razonamiento (gpt-oss, deepseek-r1,
     qwen3-thinking), `keep_alive: 10m` default, tool support
     OpenAI-compatible.
+  - **opencode**: subprocess wrapper de `opencode run --format
+    json`, escribe per-agent file en `~/.config/opencode/agent/
+    sunny-<slug>.md` (opencode no tiene `--append-system-prompt`),
+    delega round-trip de tools a opencode mismo. Hereda los 75+
+    providers de opencode + sus tools nativas (read/edit/bash/
+    grep/glob/task/...) sin que sunny tenga que conocerlos.
   Routing por `agent.yaml.provider` con fallback al default del
   daemon. SUNNY_PROVIDER env var pinea uno explícitamente.
 - **Secrets** centralizados en `~/.sunny/secrets.yaml` (mode 0600).
@@ -180,17 +186,40 @@ sobrescribe.
   agente activo, conv id). `ctrl+q` para salir (no `esc` —
   demasiado fácil de tirar por accidente). NewSession dialog
   reducido a agent + cwd; model + effort viven en `agent.yaml`.
+- **Onboarding**: `sunny doctor` imprime checklist (✓/⚠/✗) de
+  providers, daemon y runtime; `sunny setup [provider]` instala
+  el binario apropiado (brew/curl con confirmación) o pide la API
+  key, según el provider. `--print-only` para flujos no-
+  interactivos (CI, SSH).
 - **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
   tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.10.0)
+### Lo que sigue (post-v0.11.0)
 
-**El siguiente bloque grande**:
+**El siguiente bloque grande — multi-cliente sobre Tailscale**:
+
+Es el feature flagship descrito arriba (sección "Modelo de mesh
+con Tailscale"). Cada host corre su propio `sunny start`; el TUI
+los descubre y los unifica visualmente sin replicar data.
+
+- [ ] **Daemon escucha en tailnet IP** además de 127.0.0.1.
+      `tailscale ip` al boot; bind extra si hay éxito.
+- [ ] **Discovery**: TUI lee `tailscale status --json` y prueba
+      `:7777/healthz` en cada peer. Cache en `~/.sunny/peers.yaml`.
+- [ ] **Auth entre peers**: bearer token compartido vs trust-by-
+      tailnet (la red ya autenticó). Decidir.
+- [ ] **Federation en TUI**: lista unificada de agentes con prefijo
+      `host/slug` (`mac/zoro`, `vps/sunny`). Filtro por host.
+- [ ] **Cliente HTTP multi-engine**: fan-out a N daemons al listar;
+      una sola conv siempre vive en su engine de origen.
+- [ ] **mDNS/Bonjour fallback** para LAN sin Tailscale (nice-to-have).
+
+**Después del mesh** (orden negociable):
 
 - [ ] **Tools de write/exec (edit/write/bash) + permission flow**.
-      Es el complemento natural del read-only quartet que ya está
+      Complemento natural del read-only quartet que ya está
       en `internal/tools/`. Necesita un protocolo nuevo
       daemon→TUI→user para pedir aprobación antes de tocar disco
       o ejecutar comandos. Sub-tasks:
@@ -213,11 +242,10 @@ sobrescribe.
       el directory name. Hoy: mover el folder a mano y reload.
 - [ ] **launchd / systemd**: sobrevivir reboot del host. Comandos
       `sunny enable` / `sunny disable`. Anotado como deuda en CLAUDE.md.
-- [ ] **Tests**: cero hoy (intencional). Mínimo deseable antes del
-      próximo refactor grande: workflow de CI que corra
-      `go vet ./... && go build ./... && go test ./...` en push,
-      más un integration test del daemon (start, /healthz, /agents,
-      POST /turn, stop).
+- [ ] **Tests**: arrancando (state, tui, doctor, opencode hoy).
+      Falta workflow de CI que corra `go vet ./... && go build ./...
+      && go test ./...` en push, más un integration test del daemon
+      (start, /healthz, /agents, POST /turn, stop).
 
 **Capacidades del agente:**
 

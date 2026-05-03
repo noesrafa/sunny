@@ -2,10 +2,12 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.10.0 — chat works end-to-end. The daemon talks to
-> claude-code, Anthropic API, or Ollama Cloud; conversations persist
-> per-agent on disk; the agent has read-only filesystem tools (view,
-> ls, grep, glob). Write/exec tools and a permission flow are next.
+> **Status:** v0.11.0 — chat works end-to-end across four backends:
+> claude-code, Anthropic API, Ollama Cloud, and opencode. Conversations
+> persist per-agent on disk; the agent has read-only filesystem tools
+> (view, ls, grep, glob); `sunny doctor` and `sunny setup` walk you
+> through getting any provider ready. Write/exec tools and a permission
+> flow are next.
 
 ## Install
 
@@ -32,10 +34,22 @@ Requires Go 1.26+.
 ## Quick start
 
 ```bash
+sunny doctor         # checklist: providers, daemon, runtime
+sunny setup          # interactive walk-through of whatever isn't ready
 sunny                # auto-starts daemon if needed; opens TUI
-sunny secrets ollama set api_key   # paste your key from stdin
-sunny stop && sunny start          # picks up the new key
 ```
+
+`sunny setup <provider>` targets one directly:
+
+```bash
+sunny setup claude-code   # installs `claude` CLI, then prompts you to log in
+sunny setup opencode      # installs `opencode` CLI, then prompts you to log in
+sunny setup anthropic     # paste your API key, saved in ~/.sunny/secrets.yaml
+sunny setup ollama        # same, for Ollama Cloud
+```
+
+Pass `--print-only` to any of those to see the commands without
+running them — handy over SSH or in CI.
 
 Or daemon-only:
 
@@ -55,19 +69,20 @@ that the directory is yours; sunny never overwrites your edits.
 
 ## Providers
 
-Three drivers ship in the binary; the daemon auto-detects which are
+Four drivers ship in the binary; the daemon auto-detects which are
 available at boot:
 
 | Provider | Source of credentials | Notes |
 |---|---|---|
-| **claude-code** | The `claude` CLI's existing login | Bring all of Claude Code's native tools (Read, Glob, Grep, Bash, …). No api_key needed. |
+| **claude-code** | The `claude` CLI's existing login | Brings all of Claude Code's native tools (Read, Glob, Grep, Bash, …). No api_key needed. |
 | **anthropic** | `secrets.anthropic.api_key` or `ANTHROPIC_API_KEY` env var | SDK streaming with cache-control breakpoints. |
 | **ollama** | `secrets.ollama.api_key` (+ optional `base_url`) | Ollama Cloud `/api/chat`. `keep_alive: 10m` default. Streams thinking deltas for reasoning models. |
+| **opencode** | The `opencode` CLI's own auth (`opencode auth login`) | Subprocess wrapper. Inherits opencode's full toolset and 75+ provider catalog (anthropic, ollama-cloud, opencode-zen/go, etc.) without sunny needing to know about each one. |
 
 Per-agent override: drop a `provider:` field in any `agent.yaml` and
 that agent always uses that backend regardless of the daemon
-default. The order claude-code → anthropic → ollama drives the
-fallback when the agent doesn't pin one.
+default. The order claude-code → anthropic → ollama → opencode
+drives the fallback when the agent doesn't pin one.
 
 ```bash
 sunny secrets                          # list configured providers (no values)
@@ -134,8 +149,10 @@ sunny/
 │   ├── provider/                # abstraction + drivers
 │   │   ├── anthropic/           # SDK streaming
 │   │   ├── claudecode/          # subprocess wrapper
-│   │   └── ollama/              # Ollama Cloud /api/chat
+│   │   ├── ollama/              # Ollama Cloud /api/chat
+│   │   └── opencode/            # subprocess wrapper for `opencode run`
 │   ├── tools/                   # view, ls, grep, glob (read-only)
+│   ├── doctor/                  # probes: provider binaries, keys, daemon, runtime
 │   ├── server/                  # HTTP API: chat, agents, conversations, secrets
 │   ├── client/                  # daemon HTTP client used by TUI
 │   ├── session/                 # in-process session state for TUI tabs
@@ -171,9 +188,9 @@ sunny/
 ```yaml
 name: My Agent
 description: optional one-liner
-model: claude-opus-4-7        # or gemma4:31b, gpt-oss:120b, etc.
+model: claude-opus-4-7        # or gemma4:31b, gpt-oss:120b, opencode/gpt-5-nano, etc.
 effort: max                   # low|medium|high|xhigh|max
-provider: anthropic           # anthropic|claude-code|ollama (optional)
+provider: anthropic           # anthropic|claude-code|ollama|opencode (optional)
 ```
 
 ### `SKILL.md` (Claude Code convention)

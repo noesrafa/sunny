@@ -13,6 +13,10 @@ type Config struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description,omitempty"`
 	Model       string `yaml:"model"`
+	// Provider is optional. When set ("anthropic", "claude-code",
+	// "ollama", …) it overrides the daemon's default provider for
+	// turns against this agent. Empty falls back to the default.
+	Provider string `yaml:"provider,omitempty"`
 }
 
 func (c Config) Validate() error {

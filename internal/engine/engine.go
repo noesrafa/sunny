@@ -17,11 +17,28 @@ import (
 	"github.com/noesrafa/sunny/internal/store"
 )
 
+// Engine routes turns to the right provider for each agent.
+//
+// Multiple drivers can live side-by-side: an agent.yaml can declare
+// `provider: ollama` to override the daemon default, while another
+// agent uses `provider: anthropic`, all in the same TUI.
+//
+// Concurrency: registry is read-only after construction. Hot-swap of
+// providers (after `sunny secrets <provider> set`) re-instantiates
+// the whole engine — see daemon.rebuildEngine.
 type Engine struct {
-	provider provider.Provider
+	providers   map[string]provider.Provider
+	defaultName string
 }
 
-func New(p provider.Provider) *Engine { return &Engine{provider: p} }
+// New constructs an engine bound to a registry of providers keyed by
+// name (the same name agent.yaml's `provider:` field picks). The
+// default name is used when the agent doesn't specify one. Both can
+// be empty — the engine becomes a 503-er, useful while the daemon
+// has no API keys yet.
+func New(providers map[string]provider.Provider, defaultName string) *Engine {
+	return &Engine{providers: providers, defaultName: defaultName}
+}
 
 // TurnOptions are per-call knobs that travel with the turn but aren't on
 // the agent definition.
@@ -34,18 +51,20 @@ type TurnOptions struct {
 	Cwd string
 }
 
-// Turn runs one user→assistant exchange against the given agent. messages
-// must include the new user turn at the end; prior turns supply
-// conversation history.
+// Turn runs one user→assistant exchange against the given agent.
+// Provider is picked by agent.Config.Provider with fallback to the
+// engine default; agents pinned to an unconfigured provider get a
+// clear error instead of silently falling back.
 func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provider.Message, opts TurnOptions) (<-chan provider.Event, error) {
-	if e.provider == nil {
-		return nil, fmt.Errorf("engine: no provider configured")
-	}
 	if agent == nil {
 		return nil, fmt.Errorf("engine: agent required")
 	}
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("engine: messages required")
+	}
+	p, err := e.pick(agent)
+	if err != nil {
+		return nil, err
 	}
 
 	system, err := BuildSystemPrompt(agent)
@@ -62,15 +81,42 @@ func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provid
 		Cwd:           opts.Cwd,
 		ProviderState: opts.ProviderState,
 	}
-	return e.provider.Stream(ctx, req)
+	return p.Stream(ctx, req)
 }
 
-// ProviderName surfaces the active provider for logging / UI.
+// pick selects the provider for an agent.
+func (e *Engine) pick(agent *store.Agent) (provider.Provider, error) {
+	want := agent.Config.Provider
+	if want != "" {
+		p, ok := e.providers[want]
+		if !ok {
+			return nil, fmt.Errorf("engine: agent %q wants provider %q which isn't configured", agent.Slug, want)
+		}
+		return p, nil
+	}
+	if e.defaultName == "" {
+		return nil, fmt.Errorf("engine: no provider configured")
+	}
+	p, ok := e.providers[e.defaultName]
+	if !ok {
+		return nil, fmt.Errorf("engine: default provider %q missing from registry", e.defaultName)
+	}
+	return p, nil
+}
+
+// ProviderName surfaces the active default for logging / UI. Returns
+// "" when no default is configured.
 func (e *Engine) ProviderName() string {
-	if e == nil || e.provider == nil {
+	if e == nil {
 		return ""
 	}
-	return e.provider.Name()
+	return e.defaultName
+}
+
+// HasProviders reports whether at least one provider is registered.
+// Used by the chat handler to decide between 503 and a real attempt.
+func (e *Engine) HasProviders() bool {
+	return e != nil && len(e.providers) > 0
 }
 
 // BuildSystemPrompt assembles the system prompt from the agent's on-disk

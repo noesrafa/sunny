@@ -17,6 +17,7 @@ type KeyMap struct {
 	Runs          key.Binding // open the runs manager modal
 	TilePicker    key.Binding // ctrl+k — searchable tab switcher
 	Agents        key.Binding // ctrl+a — agent picker / manager
+	Secrets       key.Binding // ctrl+y — secrets manager (api keys)
 	Settings      key.Binding // ctrl+s — open settings modal (theme picker)
 	Game          key.Binding // ctrl+g — open minigames modal (snake)
 	ScrollUp      key.Binding
@@ -42,6 +43,7 @@ func DefaultKeyMap() KeyMap {
 		Runs:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "runs")),
 		TilePicker:    key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "switch tab")),
 		Agents:        key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "agents")),
+		Secrets:       key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "secrets")),
 		Settings:      key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "settings")),
 		Game:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "game")),
 		ScrollUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),

@@ -30,6 +30,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			curSlug = cur.AgentSlug()
 		}
 		return m, m.overlay.Open(NewAgentPickerDialog(m.client, curSlug, m.styles)), true
+	case key.Matches(msg, m.keymap.Secrets):
+		return m, m.overlay.Open(NewSecretsDialog(m.client, m.styles)), true
 	case key.Matches(msg, m.keymap.Settings):
 		return m, m.overlay.Open(NewSettingsDialog(m.themeID, m.bgIsLight, m.styles)), true
 	case key.Matches(msg, m.keymap.Game):

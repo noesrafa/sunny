@@ -124,8 +124,46 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		// Bubbles down to the open picker (if any) so it refreshes.
 		// CloseTop already ran in the upstream handler; nothing else.
 		return m, m.overlay.UpdateTop(v), true
+
+	// --- secrets flow ---
+	case SubmitSecretsMsg:
+		// Form submitted — close it, run PUT async.
+		m.overlay.CloseTop()
+		return m, m.putSecretsCmd(v), true
+	case SecretsSavedMsg:
+		// Forward to whatever dialog is on top (the SecretsDialog,
+		// which reloads its list).
+		return m, m.overlay.UpdateTop(v), true
+	case DeleteSecretsMsg:
+		return m, m.deleteSecretsCmd(v.Provider), true
 	}
 	return m, nil, false
+}
+
+func (m Model) putSecretsCmd(req SubmitSecretsMsg) tea.Cmd {
+	c := m.client
+	if c == nil {
+		return func() tea.Msg { return SecretsSavedMsg{Provider: req.Provider, Err: errNoClient} }
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		err := c.PutSecrets(ctx, req.Provider, req.Fields)
+		return SecretsSavedMsg{Provider: req.Provider, Err: err}
+	}
+}
+
+func (m Model) deleteSecretsCmd(provider string) tea.Cmd {
+	c := m.client
+	if c == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		err := c.DeleteSecrets(ctx, provider)
+		return SecretsSavedMsg{Provider: provider, Err: err}
+	}
 }
 
 // switchAgent spawns a new session bound to slug. Existing sessions are

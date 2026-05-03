@@ -6,34 +6,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/noesrafa/sunny/internal/provider"
+	"github.com/noesrafa/sunny/internal/secrets"
 )
 
-// New returns a driver. The API key is taken from the ANTHROPIC_API_KEY
-// env var if apiKey is empty.
-func New(apiKey string) (*Driver, error) {
-	if apiKey == "" {
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+// New returns a driver bound to the given secrets store. The API key
+// is read on every Stream() call so secret rotations and `sunny
+// secrets anthropic set` take effect immediately, no daemon restart.
+//
+// Resolution order (per call):
+//  1. ANTHROPIC_API_KEY env var (override for headless / CI)
+//  2. secrets.yaml → anthropic.api_key
+//
+// Empty in both → Stream returns a clear error pointing at the fix.
+func New(s *secrets.Store) (*Driver, error) {
+	if s == nil {
+		return nil, errors.New("anthropic: secrets store required")
 	}
-	if apiKey == "" {
-		return nil, errors.New("anthropic: ANTHROPIC_API_KEY not set")
+	// Probe at construction so callers can fall back to another
+	// provider when no key is configured.
+	if probe := s.GetOrEnv("anthropic", "api_key", "ANTHROPIC_API_KEY"); probe == "" {
+		return nil, errors.New("anthropic: api_key not configured (set via `sunny secrets anthropic set api_key` or ANTHROPIC_API_KEY env var)")
 	}
-	c := anthropic.NewClient(option.WithAPIKey(apiKey))
-	return &Driver{client: &c}, nil
+	return &Driver{secrets: s}, nil
 }
 
 type Driver struct {
-	client *anthropic.Client
+	secrets *secrets.Store
 }
 
 func (d *Driver) Name() string { return "anthropic" }
 
 func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	apiKey := d.secrets.GetOrEnv("anthropic", "api_key", "ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		return nil, errors.New("anthropic: api_key missing — configure it before sending a turn")
+	}
+	c := anthropic.NewClient(option.WithAPIKey(apiKey))
+
 	model := req.Model
 	if model == "" {
 		model = "claude-opus-4-7"
@@ -92,7 +106,7 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	}
 	params.OutputConfig = anthropic.OutputConfigParam{Effort: anthropic.OutputConfigEffort(effort)}
 
-	stream := d.client.Messages.NewStreaming(ctx, params)
+	stream := c.Messages.NewStreaming(ctx, params)
 
 	out := make(chan provider.Event, 32)
 	go func() {

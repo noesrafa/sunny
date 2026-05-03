@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +27,8 @@ import (
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
+	"github.com/noesrafa/sunny/internal/provider/ollama"
+	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/session"
 	uistate "github.com/noesrafa/sunny/internal/state"
@@ -62,6 +65,8 @@ func main() {
 		err = serve(args)
 	case "token":
 		err = token(args)
+	case "secrets":
+		err = secretsCmd(args)
 	case "version", "-v", "--version":
 		fmt.Println("sunny", version)
 	case "help", "-h", "--help":
@@ -88,6 +93,7 @@ commands:
   status    Show whether the daemon is running, plus pid, addr, uptime.
   serve     Run the daemon in the foreground (advanced; prefer 'start').
   token     Print the daemon's bearer token. 'sunny token rotate' regenerates it.
+  secrets   Manage provider keys. 'sunny secrets' lists, 'sunny secrets <p> set <field>' reads from stdin.
   version   Print version.
 
 common flags:
@@ -232,63 +238,85 @@ func defaultRoot() string {
 	return filepath.Join(home, ".sunny")
 }
 
-// buildEngine picks a provider with this precedence:
-//
-//  1. SUNNY_PROVIDER env var if set ("claude-code" | "anthropic" | "off"),
-//  2. claude-code if the `claude` CLI is on PATH,
-//  3. anthropic API if ANTHROPIC_API_KEY is set,
-//  4. nothing — daemon serves read-only endpoints; chat returns 503.
+// buildEngine attempts to instantiate every supported provider and
+// returns an Engine indexing all the ones that succeeded. The default
+// provider is the first one to come up (in declaration order below),
+// or whatever SUNNY_PROVIDER pins.
 //
 // Order matters: claude-code wins by default because it inherits the
-// user's claude.ai login (no separate API key) AND brings claude code's
-// full toolset. The Anthropic API path needs a key but is the right
-// choice for headless / cheaper runs.
-func buildEngine(log *slog.Logger) *engine.Engine {
+// user's claude.ai login (no separate API key) AND brings claude
+// code's full toolset. Anthropic API + Ollama Cloud both depend on
+// `secrets.yaml` (or env-var equivalents) being populated.
+//
+// Returning a zero-engine (no providers) is OK — chat endpoints will
+// return 503 until at least one driver is configured.
+func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
 	choice := strings.ToLower(strings.TrimSpace(os.Getenv("SUNNY_PROVIDER")))
-	switch choice {
-	case "off":
+	if choice == "off" {
 		log.Info("engine disabled", "reason", "SUNNY_PROVIDER=off")
-		return nil
-	case "claude-code", "claude_code", "claudecode":
-		drv, err := claudecode.New()
-		if err != nil {
-			log.Warn("engine disabled", "reason", err.Error(), "wanted", choice)
-			return nil
-		}
-		log.Info("engine ready", "provider", drv.Name(), "source", "SUNNY_PROVIDER")
-		return engine.New(drv)
-	case "anthropic":
-		drv, err := anthropic.New("")
-		if err != nil {
-			log.Warn("engine disabled", "reason", err.Error(), "wanted", choice)
-			return nil
-		}
-		log.Info("engine ready", "provider", drv.Name(), "source", "SUNNY_PROVIDER")
-		return engine.New(drv)
+		return engine.New(nil, "")
 	}
 
-	// Auto: prefer claude-code, then anthropic.
-	if drv, err := claudecode.New(); err == nil {
-		log.Info("engine ready", "provider", drv.Name(), "source", "auto-detected")
-		return engine.New(drv)
-	} else {
-		log.Debug("claude-code unavailable", "reason", err.Error())
+	registry := map[string]provider.Provider{}
+	var defaultName string
+
+	tryAdd := func(name string, drv provider.Provider, err error) {
+		if err != nil {
+			log.Debug("provider skipped", "name", name, "reason", err.Error())
+			return
+		}
+		registry[name] = drv
+		log.Info("provider ready", "name", name)
 	}
-	if drv, err := anthropic.New(""); err == nil {
-		log.Info("engine ready", "provider", drv.Name(), "source", "auto-detected")
-		return engine.New(drv)
-	} else {
-		log.Warn("engine disabled",
-			"reason", "no provider available — install Claude Code or set ANTHROPIC_API_KEY")
-		log.Debug("anthropic unavailable", "reason", err.Error())
+
+	cc, ccErr := claudecode.New()
+	tryAdd("claude-code", cc, ccErr)
+	an, anErr := anthropic.New(s)
+	tryAdd("anthropic", an, anErr)
+	ol, olErr := ollama.New(s)
+	tryAdd("ollama", ol, olErr)
+
+	// Pick default. Explicit SUNNY_PROVIDER wins; otherwise first
+	// registered in declaration order (claude-code → anthropic → ollama).
+	switch choice {
+	case "claude-code", "claude_code", "claudecode":
+		if _, ok := registry["claude-code"]; ok {
+			defaultName = "claude-code"
+		} else {
+			log.Warn("SUNNY_PROVIDER=claude-code but claude CLI not available")
+		}
+	case "anthropic":
+		if _, ok := registry["anthropic"]; ok {
+			defaultName = "anthropic"
+		} else {
+			log.Warn("SUNNY_PROVIDER=anthropic but api_key not configured")
+		}
+	case "ollama":
+		if _, ok := registry["ollama"]; ok {
+			defaultName = "ollama"
+		} else {
+			log.Warn("SUNNY_PROVIDER=ollama but api_key not configured")
+		}
 	}
-	return nil
+	if defaultName == "" {
+		for _, n := range []string{"claude-code", "anthropic", "ollama"} {
+			if _, ok := registry[n]; ok {
+				defaultName = n
+				break
+			}
+		}
+	}
+	if defaultName == "" {
+		log.Warn("no providers available — configure one via `sunny secrets <provider> set api_key` or install claude code")
+	}
+	return engine.New(registry, defaultName)
 }
 
-// quiet compile-time check that both drivers satisfy provider.Provider.
+// quiet compile-time check that drivers satisfy provider.Provider.
 var (
 	_ provider.Provider = (*anthropic.Driver)(nil)
 	_ provider.Provider = (*claudecode.Driver)(nil)
+	_ provider.Provider = (*ollama.Driver)(nil)
 )
 
 // serve runs the daemon in the foreground. Used by `start` (re-exec'd as a
@@ -325,20 +353,35 @@ func serve(args []string) error {
 	}
 	log.Info("auth ready", "token_path", auth.Path(*root))
 
-	// Engine is optional: the daemon still boots and serves read-only
-	// endpoints when no provider can be initialized; chat returns 503
-	// until one is available.
-	eng := buildEngine(log)
+	secretsStore, err := secrets.New(*root)
+	if err != nil {
+		return fmt.Errorf("load secrets: %w", err)
+	}
+	log.Info("secrets ready", "path", secrets.Path(*root))
+
+	// Engine is held in an atomic.Pointer so PUT /secrets can swap it
+	// in place — provider drivers re-read on each Stream(), but the
+	// auto-detect chain runs at construction so newly-configured
+	// providers need a rebuild to enter the registry.
+	var enginePtr atomic.Pointer[engine.Engine]
+	enginePtr.Store(buildEngine(log, secretsStore))
 	convs := conversation.NewStore(*root)
+
+	rebuild := func() {
+		log.Info("rebuilding engine after secrets change")
+		enginePtr.Store(buildEngine(log, secretsStore))
+	}
 
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: server.New(server.Options{
 			Store:         st,
 			Conversations: convs,
-			Engine:        eng,
+			Secrets:       secretsStore,
+			Engine:        &enginePtr,
 			Log:           log,
 			Token:         tok,
+			RebuildEngine: rebuild,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -532,6 +575,120 @@ func status(args []string) error {
 	} else {
 		fmt.Printf("healthz:  %v\n", err)
 	}
+	return nil
+}
+
+// secretsCmd is the CLI surface for ~/.sunny/secrets.yaml. Subcommands:
+//
+//	sunny secrets                       → list configured providers + fields
+//	sunny secrets <provider>            → show fields for that provider
+//	sunny secrets <provider> set <fld>  → read value from stdin, save
+//	sunny secrets <provider> delete     → remove provider section
+//
+// `set` reads from stdin so the value never lands in shell history /
+// `ps`. Pipe it: `pbpaste | sunny secrets anthropic set api_key`,
+// or run without stdin and the prompt asks interactively.
+//
+// Writes go straight to ~/.sunny/secrets.yaml. The running daemon
+// re-reads the file on next access (provider drivers consult the
+// store fresh every Stream call), so no restart is required for the
+// new value to take effect — but the daemon's *registry* (which
+// providers exist) only updates on next boot or after a
+// PUT /secrets via HTTP.
+func secretsCmd(args []string) error {
+	fs := flag.NewFlagSet("secrets", flag.ExitOnError)
+	root := fs.String("root", defaultRoot(), "sunny runtime directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	store, err := secrets.New(*root)
+	if err != nil {
+		return err
+	}
+
+	switch len(rest) {
+	case 0:
+		return secretsList(store)
+	case 1:
+		return secretsShow(store, rest[0])
+	}
+	provider := rest[0]
+	switch rest[1] {
+	case "set":
+		if len(rest) != 3 {
+			return fmt.Errorf("usage: sunny secrets %s set <field>", provider)
+		}
+		return secretsSet(store, provider, rest[2])
+	case "delete", "remove", "rm":
+		if err := store.Delete(provider); err != nil {
+			return err
+		}
+		fmt.Printf("removed %s\n", provider)
+		return nil
+	}
+	return fmt.Errorf("unknown subcommand: %s", strings.Join(rest[1:], " "))
+}
+
+func secretsList(s *secrets.Store) error {
+	infos := s.List()
+	if len(infos) == 0 {
+		fmt.Println("(no secrets configured)")
+		fmt.Println("try: sunny secrets anthropic set api_key")
+		return nil
+	}
+	for _, i := range infos {
+		fmt.Printf("%-12s %s\n", i.Provider, strings.Join(i.Fields, ", "))
+	}
+	return nil
+}
+
+func secretsShow(s *secrets.Store, provider string) error {
+	for _, i := range s.List() {
+		if i.Provider == provider {
+			if len(i.Fields) == 0 {
+				fmt.Println("(no fields)")
+				return nil
+			}
+			for _, f := range i.Fields {
+				fmt.Printf("%s ✓\n", f)
+			}
+			return nil
+		}
+	}
+	fmt.Printf("%s: not configured\n", provider)
+	return nil
+}
+
+func secretsSet(s *secrets.Store, provider, field string) error {
+	stat, _ := os.Stdin.Stat()
+	piped := (stat.Mode() & os.ModeCharDevice) == 0
+	var value string
+	if piped {
+		raw, err := os.ReadFile("/dev/stdin")
+		if err != nil {
+			return fmt.Errorf("read stdin: %w", err)
+		}
+		value = strings.TrimSpace(string(raw))
+	} else {
+		fmt.Fprintf(os.Stderr, "value for %s.%s (will not echo): ", provider, field)
+		// Best-effort: read a line. We don't disable echo (no x/term
+		// dep) — recommend piping for sensitive values. Print a
+		// reminder to stderr.
+		var line string
+		if _, err := fmt.Fscanln(os.Stdin, &line); err != nil {
+			return fmt.Errorf("read input: %w", err)
+		}
+		value = strings.TrimSpace(line)
+	}
+	if value == "" {
+		return fmt.Errorf("empty value — refusing to save")
+	}
+	if err := s.SetField(provider, field, value); err != nil {
+		return err
+	}
+	fmt.Printf("saved %s.%s\n", provider, field)
+	fmt.Fprintln(os.Stderr, "(running daemon picks up the new value on next request; no restart needed)")
 	return nil
 }
 

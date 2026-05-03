@@ -41,8 +41,12 @@ type turnRequest struct {
 // client drops mid-stream, a synthetic `cancelled` event is appended to
 // the journal (not sent over SSE — the connection is already gone).
 func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
-	if s.engine == nil {
-		http.Error(w, "engine not configured (set ANTHROPIC_API_KEY and restart)", http.StatusServiceUnavailable)
+	var eng *engine.Engine
+	if s.engine != nil {
+		eng = s.engine.Load()
+	}
+	if eng == nil || !eng.HasProviders() {
+		http.Error(w, "engine not configured — add a provider key via /secrets or restart with one in env", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -95,7 +99,7 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	events, err := s.engine.Turn(r.Context(), a, req.Messages, engine.TurnOptions{
+	events, err := eng.Turn(r.Context(), a, req.Messages, engine.TurnOptions{
 		ProviderState: meta.ProviderState,
 		Cwd:           req.Cwd,
 	})

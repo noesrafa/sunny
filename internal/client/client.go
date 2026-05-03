@@ -155,6 +155,81 @@ type Stream struct {
 	closed bool
 }
 
+// SecretInfo describes one provider's configured fields. Values are
+// never carried over the wire — this is a status view, not a read.
+type SecretInfo struct {
+	Provider string   `json:"provider"`
+	Fields   []string `json:"fields"`
+}
+
+// ListSecrets returns which providers have keys configured (no values).
+func (c *Client) ListSecrets(ctx context.Context) ([]SecretInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/secrets", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GET /secrets: %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out []SecretInfo
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PutSecrets replaces all fields for a provider with the given map.
+// Empty map clears the provider but keeps the section visible until
+// the daemon next compacts the file (sometime later — not exposed).
+func (c *Client) PutSecrets(ctx context.Context, provider string, fields map[string]string) error {
+	buf, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/secrets/"+provider, strings.NewReader(string(buf)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("PUT /secrets/%s: %d: %s", provider, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+// DeleteSecrets removes a provider section. Idempotent.
+func (c *Client) DeleteSecrets(ctx context.Context, provider string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/secrets/"+provider, nil)
+	if err != nil {
+		return err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("DELETE /secrets/%s: %d: %s", provider, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
 // AgentCreate is the body of POST /agents.
 type AgentCreate struct {
 	Slug        string `json:"slug"`

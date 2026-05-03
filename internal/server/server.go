@@ -10,22 +10,34 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
+	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/store"
 )
 
 // Options bundles everything New needs. Grouping these keeps the
 // constructor stable as we add subsystems.
+//
+// Engine is a pointer-to-pointer so the daemon can hot-swap it after
+// secrets change without rebuilding the http.Server. The pointee is
+// nil when no provider is configured; chat returns 503 in that case.
 type Options struct {
 	Store         *store.Store
 	Conversations *conversation.Store
-	Engine        *engine.Engine
+	Secrets       *secrets.Store
+	Engine        *atomic.Pointer[engine.Engine]
 	Log           *slog.Logger
 	// Token is the bearer credential clients must send. Empty disables
 	// auth (test/dev only).
 	Token string
+	// RebuildEngine is invoked after a successful PUT/DELETE on
+	// /secrets so the daemon can re-instantiate provider drivers
+	// against the new file. Optional — if nil, secret writes still
+	// succeed but won't take effect until the daemon restarts.
+	RebuildEngine func()
 }
 
 // New builds the daemon's HTTP handler.
@@ -33,7 +45,14 @@ type Options struct {
 // Auth: every route requires `Authorization: Bearer <token>` except
 // /healthz (so liveness probes work without credentials).
 func New(opts Options) http.Handler {
-	srv := &server{store: opts.Store, conv: opts.Conversations, engine: opts.Engine, log: opts.Log}
+	srv := &server{
+		store:         opts.Store,
+		conv:          opts.Conversations,
+		secrets:       opts.Secrets,
+		engine:        opts.Engine,
+		log:           opts.Log,
+		rebuildEngine: opts.RebuildEngine,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /agents", srv.listAgents)
@@ -48,8 +67,12 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("GET /agents/{slug}/conversations/{id}", srv.getConversation)
 	mux.HandleFunc("DELETE /agents/{slug}/conversations/{id}", srv.deleteConversation)
 	mux.HandleFunc("POST /agents/{slug}/conversations/{id}/turn", srv.postTurn)
+	mux.HandleFunc("GET /secrets", srv.listSecrets)
+	mux.HandleFunc("PUT /secrets/{provider}", srv.putSecrets)
+	mux.HandleFunc("DELETE /secrets/{provider}", srv.deleteSecrets)
 	return logging(opts.Log, requireBearer(opts.Token, mux))
 }
+
 
 // requireBearer enforces `Authorization: Bearer <token>` on every route
 // except /healthz. Compares with subtle.ConstantTimeCompare to avoid
@@ -74,10 +97,12 @@ func requireBearer(token string, h http.Handler) http.Handler {
 }
 
 type server struct {
-	store  *store.Store
-	conv   *conversation.Store
-	engine *engine.Engine
-	log    *slog.Logger
+	store         *store.Store
+	conv          *conversation.Store
+	secrets       *secrets.Store
+	engine        *atomic.Pointer[engine.Engine]
+	log           *slog.Logger
+	rebuildEngine func()
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

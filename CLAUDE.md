@@ -124,6 +124,54 @@ Every chat lives under its agent:
 - The TUI lazily creates a server-side conversation on the first user
   message of a session and reuses the id for subsequent turns.
 
+## Secrets
+
+API keys live in `~/.sunny/secrets.yaml` (mode 0600), structured by
+provider:
+
+```yaml
+anthropic:
+  api_key: sk-ant-…
+openai:
+  api_key: sk-…
+ollama:
+  api_key: …
+  base_url: https://ollama.com
+```
+
+- Env vars (`ANTHROPIC_API_KEY`, `OLLAMA_API_KEY`, …) override the
+  file when both are present. Useful for CI / docker.
+- Provider drivers re-read on every Stream() call — rotating a key
+  takes effect on the next turn, no restart needed for the *value*.
+  Adding a brand-new provider (one not in the registry yet) requires
+  the registry to be rebuilt. PUT/DELETE on `/secrets` triggers that
+  rebuild automatically; CLI writes don't (they write straight to
+  the file).
+- Mutators reload from disk before writing so concurrent edits from
+  the daemon and the CLI don't stomp each other.
+- Daemon NEVER returns secret values over HTTP. `GET /secrets`
+  surfaces only the list of configured providers + their field names.
+- CLI: `sunny secrets` (list), `sunny secrets <p>` (show fields),
+  `sunny secrets <p> set <field>` (read value from stdin or
+  interactive prompt), `sunny secrets <p> delete`.
+- TUI: `ctrl+y` opens the secrets manager. Selecting a provider
+  opens a paste form. Values are not masked — paste verification
+  matters more than shoulder-surfing in a single-user CLI app.
+
+## Provider routing
+
+`agent.yaml` carries an optional `provider:` field. When set, turns
+against that agent always use the named provider regardless of the
+daemon's default. Empty falls through to the daemon's auto-detected
+default (claude-code → anthropic → ollama). This lets one TUI run
+agents on different backends in parallel.
+
+The engine holds a `map[name]provider.Provider` registry plus a
+default name; both come from `buildEngine()` which probes every
+known driver at construction. Drivers that fail to construct
+(missing key, claude CLI not on PATH) just don't enter the registry —
+agents that pinned to them get a clear error on the next turn.
+
 ## Auth contract
 
 - `~/.sunny/token` (32 random bytes, base64url, mode 0600) is generated

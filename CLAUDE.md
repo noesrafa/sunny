@@ -5,24 +5,24 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.14.0`** (Phase 2b of multi-client mesh:
-daemon auto-binds the tailnet IP when Tailscale is up, `sunny peers
-scan` lists tailnet hosts running sunny). Brew `sunny version`
+**Latest release: `v0.15.0`** (Phase 3 of multi-client mesh:
+real-time event bus — `GET /events` SSE on every daemon, TUI
+multiplexes streams from every peer in the federation and refreshes
+its agent picker as remote events arrive). Brew `sunny version`
 should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
 actual". The short version: chat works end-to-end across four
-backends (claude-code, anthropic, ollama, opencode); the TUI spans
-multiple sunny daemons (local + ~/.sunny/peers.yaml entries); peers
-are added with `sunny pair offer/claim` (Phase 2a) and discovered
-via `sunny peers scan` (Phase 2b). Conversations stay on the engine
-they were created on — data per location.
+backends; the TUI spans multiple sunny daemons (local +
+~/.sunny/peers.yaml entries); peers are paired with `sunny pair
+offer/claim` and discovered with `sunny peers scan`; the agent
+picker auto-refreshes when an agent is created/updated/deleted on
+ANY peer. Conversations stay on the engine they were created on.
 
-**Single most likely next thing to pick up**: Phase 3 of the mesh —
-real-time cross-client sync. New `GET /events` SSE on the daemon
-emits agent + conversation events; TUI subscribes to every peer's
-stream so changes from one client appear in another without manual
-reload. Design notes in PLAN.md → "Lo que sigue".
+**Single most likely next thing to pick up**: write/exec tools
+(`edit`, `write`, `bash`) + their permission flow — the original
+post-v0.10 plan that mesh work pushed back. PLAN.md → "Lo que
+sigue" has the design.
 
 ### How to verify things quickly
 
@@ -114,6 +114,20 @@ flow with grep / glob / ls.
   spawns an extra `srv.Serve(ln)` goroutine bound to that IP using
   the same port as `--addr`. Failures on the tailnet listener log
   warn and the primary bind keeps running.
+- `internal/events/` — in-process pub/sub bus. Hub.Publish is non-
+  blocking per subscriber (slow ones drop with a log line, never
+  backpressure). Wired into agent CRUD + conversation CRUD + chat
+  Done so every mutation surfaces a one-line event.
+- `internal/server/events.go` — SSE handler at `GET /events` with
+  30s heartbeat. Auth required.
+- `internal/client/events.go` + `federation.go` — `Client.Subscribe
+  Events(ctx)` parses one SSE stream into BusEvents; `Federation.
+  SubscribeAll(ctx)` multiplexes across every peer with auto-
+  reconnect every 2s on failure.
+- `internal/tui/model.go` `waitForBusEvent` — bubbletea cmd that
+  reads one FederatedEvent off the multiplexer and surfaces it as
+  busEventMsg. The handler in model_appmsg.go re-emits AgentChanged
+  Msg so any open AgentPickerDialog refreshes itself.
 - `internal/client/federation.go` — wraps N `*Client` keyed by peer
   name. `ListAgents` fan-outs in parallel; per-peer failures don't
   fail the whole call. The TUI's `Model.fed` always exists (single-

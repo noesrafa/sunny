@@ -49,3 +49,17 @@ type saveTickMsg struct{}
 // bgPollMsg fires periodically to re-ask the terminal for its current
 // background color, so Auto themes follow OS appearance changes.
 type bgPollMsg struct{}
+
+// busEventMsg surfaces one federated event (from any peer's GET
+// /events stream) into the bubbletea loop. The model reacts based
+// on Event.Type — typically by emitting AgentChangedMsg so an open
+// AgentPickerDialog refreshes itself.
+type busEventMsg struct {
+	Event client.FederatedEvent
+}
+
+// busEventClosedMsg fires when the federation event multiplexer
+// closes (ctx cancellation, all peers gone). Today the model just
+// stops re-arming the wait; future versions can show a "real-time
+// sync paused" hint.
+type busEventClosedMsg struct{}

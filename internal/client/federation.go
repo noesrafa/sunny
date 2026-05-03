@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/noesrafa/sunny/internal/peers"
 )
@@ -84,6 +85,15 @@ type FederatedAgent struct {
 	AgentSummary
 }
 
+// FederatedEvent is a BusEvent tagged with the peer it came from.
+// Lets the TUI route refresh decisions back to the right host
+// (e.g. only refresh the agent picker when an event from `local`
+// arrives if the picker is showing local agents).
+type FederatedEvent struct {
+	Host string
+	BusEvent
+}
+
 // FederatedListResult bundles the fan-out outcome: agents flatten
 // into one list, errors are kept per-peer so the caller can render
 // "vps unreachable" without losing the peers that did respond.
@@ -142,4 +152,82 @@ func (f *Federation) ListAgents(ctx context.Context) FederatedListResult {
 		return out.Agents[i].Slug < out.Agents[j].Slug
 	})
 	return out
+}
+
+// SubscribeAll opens an SSE stream against every peer in the
+// federation and returns a single multiplexed channel of
+// FederatedEvent. Per-peer connection failures are auto-retried
+// every reconnectDelay — a peer rebooting briefly stays in the
+// federation, the consumer just pauses on its events.
+//
+// The returned channel closes when ctx is cancelled. Call sites
+// should treat the channel as the lifetime of one TUI session.
+func (f *Federation) SubscribeAll(ctx context.Context) <-chan FederatedEvent {
+	out := make(chan FederatedEvent, 64)
+	f.mu.RLock()
+	names := append([]string(nil), f.order...)
+	f.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	for _, name := range names {
+		c := f.For(name)
+		if c == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, c *Client) {
+			defer wg.Done()
+			subscribePeerLoop(ctx, name, c, out)
+		}(name, c)
+	}
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+// subscribePeerLoop keeps trying to subscribe to one peer, forwarding
+// every event it receives. On failure or stream end it sleeps
+// reconnectDelay and tries again — the goal is "self-healing as long
+// as ctx is alive."
+func subscribePeerLoop(ctx context.Context, name string, c *Client, out chan<- FederatedEvent) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		ch, err := c.SubscribeEvents(ctx)
+		if err != nil {
+			if !sleepCtx(ctx, reconnectDelay) {
+				return
+			}
+			continue
+		}
+		for ev := range ch {
+			select {
+			case out <- FederatedEvent{Host: name, BusEvent: ev}:
+			case <-ctx.Done():
+				return
+			}
+		}
+		// Stream closed — reconnect after a short pause unless ctx
+		// is done.
+		if !sleepCtx(ctx, reconnectDelay) {
+			return
+		}
+	}
+}
+
+// sleepCtx waits for d unless ctx is cancelled first. Returns true
+// when the wait completed naturally, false when ctx fired (caller
+// should bail).
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

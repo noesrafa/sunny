@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/noesrafa/sunny/internal/agent"
+	"github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/store"
 )
 
@@ -44,6 +45,7 @@ func (s *server) createAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.publish(events.AgentCreated, a.Slug, "")
 	writeJSON(w, http.StatusCreated, summarize(a))
 }
 
@@ -81,6 +83,7 @@ func (s *server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.publish(events.AgentUpdated, a.Slug, "")
 	writeJSON(w, http.StatusOK, summarize(a))
 }
 
@@ -92,5 +95,6 @@ func (s *server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.publish(events.AgentDeleted, slug, "")
 	w.WriteHeader(http.StatusNoContent)
 }

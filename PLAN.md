@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.14.0)
+## Estado actual (v0.15.0)
 
 ### Lo que funciona end-to-end
 
@@ -217,25 +217,43 @@ sobrescribe.
   sin sunny". Sunny doctor surface tailnet IP + hint a `peers scan`
   cuando el CLI está disponible. Sin tailscale, todo el código
   degrada silencioso (sin nags ni errores).
+
+  **Real-time (Fase 3)**: `internal/events.Hub` es el bus en
+  proceso (publish no-bloqueante, slow subscribers se dropean en
+  vez de backpressure al publisher). Endpoint `GET /events` SSE
+  con heartbeat 30s. Publishers wired en agent CRUD + conv CRUD +
+  chat Done. Cliente: `Client.SubscribeEvents(ctx)` parsea el SSE,
+  `Federation.SubscribeAll(ctx)` multiplexa de N peers con
+  reconnect cada 2s en fallo. La TUI subscribe al federated bus en
+  el boot; cuando llega un `agent.*` event de cualquier peer, el
+  AgentPicker abierto se refresca solo.
 - **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
   tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.14.0)
+### Lo que sigue (post-v0.15.0)
 
-**Fase 3 del mesh — tiempo real cross-cliente**:
+El mesh está completo end-to-end. Las próximas piezas son las que
+quedaron pendientes desde el plan post-v0.10 antes de pivotar al
+mesh:
 
-- [ ] **`GET /events` SSE general** en el daemon: emite eventos
-      `agent_*` y `conversation_*` en cuanto suceden.
-- [ ] **TUI subscribe a /events de cada peer** al boot; refresca
-      sidebar y agent picker al recibir eventos remotos.
-- [ ] **Optimistic local-first**: muestra el mensaje del usuario
-      inmediatamente; el evento del propio daemon confirma cuando
-      aparece en el journal.
+**Tools de write/exec (edit/write/bash) + permission flow**:
+- [ ] `permissions.Service` con `Request(ctx, action) → granted bool`
+- [ ] SSE event nuevo `permission_request` (separado del flow del turn)
+- [ ] Dialog en TUI que escucha y responde (allow once / allow session / deny)
+- [ ] Cada tool write/exec gateway-ed con allowed-list de safe commands para bash
 
-**mDNS/Bonjour fallback** para LAN sin Tailscale — nice-to-have,
-no bloqueante.
+**Polish del mesh** (deuda pequeña):
+- [ ] **CRUD de agentes contra remoto** desde el TUI. Hoy el picker
+      muestra `host/slug` pero edit/archive sólo funcionan en
+      local. Federation de escritura.
+- [ ] **mDNS/Bonjour fallback** para LAN sin Tailscale —
+      nice-to-have, no bloqueante.
+- [ ] **Per-pairing tokens**: hoy el pair claim devuelve el bearer
+      maestro, así que revocar un peer requiere rotar el token y
+      re-pairear todos. Token-per-pairing daría revocación
+      individual.
 
 **Fase 3 del mesh — tiempo real cross-cliente**:
 

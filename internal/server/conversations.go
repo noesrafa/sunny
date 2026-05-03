@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/noesrafa/sunny/internal/conversation"
+	evts "github.com/noesrafa/sunny/internal/events"
 )
 
 // listConversations responds with metas (newest first) for an agent.
@@ -61,6 +62,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.publish(evts.ConvCreated, slug, meta.ID)
 	writeJSON(w, http.StatusCreated, meta)
 }
 
@@ -102,5 +104,6 @@ func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.publish(evts.ConvDeleted, slug, id)
 	w.WriteHeader(http.StatusNoContent)
 }

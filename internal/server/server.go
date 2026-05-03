@@ -14,6 +14,7 @@ import (
 
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
+	"github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/store"
@@ -42,6 +43,11 @@ type Options struct {
 	// Pairs handles the `sunny pair offer` / `sunny pair claim`
 	// dance. Optional: if nil, the pairing endpoints return 503.
 	Pairs *pairing.Service
+	// Hub publishes mutation events (agent created, conversation
+	// turn appended, etc.) to subscribers of GET /events. Optional;
+	// if nil, /events returns 503 and mutating handlers no-op the
+	// publish step.
+	Hub *events.Hub
 }
 
 // New builds the daemon's HTTP handler.
@@ -57,6 +63,7 @@ func New(opts Options) http.Handler {
 		log:           opts.Log,
 		rebuildEngine: opts.RebuildEngine,
 		pairs:         opts.Pairs,
+		hub:           opts.Hub,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -77,6 +84,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("DELETE /secrets/{provider}", srv.deleteSecrets)
 	mux.HandleFunc("POST /pairing/offer", srv.offerPairing)
 	mux.HandleFunc("POST /pairing/claim", srv.claimPairing)
+	mux.HandleFunc("GET /events", srv.streamEvents)
 	return logging(opts.Log, requireBearer(opts.Token, mux))
 }
 
@@ -115,6 +123,7 @@ type server struct {
 	log           *slog.Logger
 	rebuildEngine func()
 	pairs         *pairing.Service
+	hub           *events.Hub
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

@@ -2,13 +2,13 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.14.0 — chat works end-to-end across four backends
-> (claude-code, Anthropic API, Ollama Cloud, opencode). Mesh through
-> Phase 2b: pair daemons over a one-time code, daemon auto-binds to
-> the tailnet IP when Tailscale is up, `sunny peers scan` walks the
-> tailnet and surfaces sunny-running peers. Conversations stay on
-> the engine they were created on. Real-time cross-client sync is
-> next.
+> **Status:** v0.15.0 — chat works end-to-end across four backends
+> (claude-code, Anthropic API, Ollama Cloud, opencode). Mesh complete
+> through Phase 3: pair daemons over a one-time code, auto-bind to
+> the tailnet IP, scan with `sunny peers scan`, AND every TUI
+> subscribes to a federated event bus (`GET /events`) so a remote
+> client creating an agent appears in your picker without polling.
+> Conversations stay on the engine they were created on.
 
 ## Install
 

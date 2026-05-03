@@ -9,6 +9,7 @@ import (
 
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
+	evts "github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/provider"
 )
 
@@ -146,6 +147,10 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 			writeSSE(w, flusher, "done", payload)
 			s.journal(slug, convID, "done", payload)
 			s.finalizeTurn(slug, convID, v)
+			// Notify federated subscribers that this conversation
+			// just got a new turn — drives "refresh transcript"
+			// behaviour on remote clients watching the same conv.
+			s.publish(evts.ConvTurnAppended, slug, convID)
 			terminated = true
 		case provider.Error:
 			// Distinguish "user cancelled" from "real error". Provider

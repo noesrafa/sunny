@@ -136,6 +136,25 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, m.overlay.UpdateTop(v), true
 	case DeleteSecretsMsg:
 		return m, m.deleteSecretsCmd(v.Provider), true
+
+	// --- federated event multiplexer ---
+	case busEventMsg:
+		// Re-arm the wait first so we don't drop events while the
+		// dispatch below runs synchronously.
+		next := m.waitForBusEvent()
+		switch v.Event.Type {
+		case "agent.created", "agent.updated", "agent.deleted":
+			// Refresh the picker if it's open. Hint string surfaces
+			// the change inline so the user notices.
+			status := v.Event.Host + " · " + v.Event.Type + " " + v.Event.Slug
+			return m, tea.Batch(next, m.overlay.UpdateTop(AgentChangedMsg{Status: status})), true
+		}
+		return m, next, true
+	case busEventClosedMsg:
+		// Multiplexer terminated (ctx cancelled, peers gone). Stop
+		// re-arming; future versions can show a "real-time sync
+		// paused" indicator. For now silent.
+		return m, nil, true
 	}
 	return m, nil, false
 }

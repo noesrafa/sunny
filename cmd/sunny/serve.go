@@ -19,6 +19,7 @@ import (
 	"github.com/noesrafa/sunny/internal/bootstrap"
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
+	"github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
@@ -86,6 +87,7 @@ func serve(args []string) error {
 	}
 
 	pairs := pairing.NewService(tok)
+	hub := events.New(log)
 
 	srv := &http.Server{
 		Addr: *addr,
@@ -98,6 +100,7 @@ func serve(args []string) error {
 			Token:         tok,
 			RebuildEngine: rebuild,
 			Pairs:         pairs,
+			Hub:           hub,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

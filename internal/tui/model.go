@@ -30,10 +30,11 @@ type Model struct {
 	keymap KeyMap
 	logger *log.Logger
 
-	manager       *session.Manager
-	client        *client.Client       // local daemon client; CRUD ops still go here
-	fed           *client.Federation   // peer roster — chat routing flows through For(host)
-	defaultAgent  string               // slug to send turns at (v0.3.x: hardcoded "sunny")
+	manager      *session.Manager
+	client       *client.Client     // local daemon client; CRUD ops still go here
+	fed          *client.Federation // peer roster — chat routing flows through For(host)
+	busEvents    chan client.FederatedEvent
+	defaultAgent string // slug to send turns at (v0.3.x: hardcoded "sunny")
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -237,6 +238,28 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		}
 	}
 
+	// Start the federated-event multiplexer so the model can react
+	// to remote agent changes without polling. The channel is owned
+	// here; the goroutine closes it when fed.SubscribeAll's source
+	// closes (ctx cancellation, all peers gone).
+	busCh := make(chan client.FederatedEvent, 64)
+	if fed != nil {
+		go func() {
+			defer close(busCh)
+			src := fed.SubscribeAll(ctx)
+			for ev := range src {
+				select {
+				case busCh <- ev:
+				default:
+					// Drop on TUI backpressure — better to skip a
+					// refresh than to block the upstream pump.
+				}
+			}
+		}()
+	} else {
+		close(busCh)
+	}
+
 	return Model{
 		ctx:           ctx,
 		styles:        st,
@@ -245,6 +268,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		manager:       mgr,
 		client:        cli,
 		fed:           fed,
+		busEvents:     busCh,
 		defaultAgent:  defaultAgent,
 		overlay:       &Overlay{},
 		chat:          chatVP,
@@ -256,6 +280,21 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		defaultEffort: defEffort,
 		themeID:       themeID,
 		skipPerms:     opts.DangerousSkipPermissions,
+	}
+}
+
+// waitForBusEvent reads one event off the federated multiplexer
+// and surfaces it as a busEventMsg. The Update handler reacts
+// (e.g. emit AgentChangedMsg to refresh the open picker) and
+// re-arms with another waitForBusEvent. When the channel closes,
+// returns busEventClosedMsg and the loop stops.
+func (m Model) waitForBusEvent() tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-m.busEvents
+		if !ok {
+			return busEventClosedMsg{}
+		}
+		return busEventMsg{Event: ev}
 	}
 }
 
@@ -303,6 +342,9 @@ func (m Model) Init() tea.Cmd {
 	// changes (Ghostty updates bg in lockstep) flip Auto themes within
 	// half a minute without sub-second polling overhead.
 	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd()}
+	if m.busEvents != nil {
+		cmds = append(cmds, m.waitForBusEvent())
+	}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}

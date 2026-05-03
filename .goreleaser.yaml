@@ -1,0 +1,75 @@
+version: 2
+
+project_name: sunny
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sunny
+    main: ./cmd/sunny
+    binary: sunny
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version=v{{.Version}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
+
+archives:
+  - id: default
+    name_template: >-
+      {{- .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch -}}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+brews:
+  - name: sunny
+    repository:
+      owner: noesrafa
+      name: homebrew-tap
+      branch: main
+      token: '{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}'
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    directory: Formula
+    homepage: 'https://github.com/noesrafa/sunny'
+    description: 'Self-hosted personal agent. One binary, your data, your rules.'
+    license: MIT
+    install: |
+      bin.install "sunny"
+    test: |
+      system "#{bin}/sunny", "version"
+
+release:
+  draft: false
+  prerelease: auto

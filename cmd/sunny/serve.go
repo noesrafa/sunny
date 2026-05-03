@@ -20,6 +20,7 @@ import (
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/events"
+	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
@@ -89,6 +90,22 @@ func serve(args []string) error {
 	pairs := pairing.NewService(tok)
 	hub := events.New(log)
 
+	// Mesh key: load if present, generate-and-save if absent so a
+	// fresh install is mesh-ready by default. Failure to write is
+	// non-fatal — daemon still serves bearer-only.
+	meshKey, mErr := mesh.Load(*root)
+	if mErr != nil && errors.Is(mErr, mesh.ErrAbsent) {
+		generated, gErr := mesh.Generate()
+		if gErr == nil {
+			if sErr := mesh.Save(*root, generated); sErr == nil {
+				meshKey = generated
+				log.Info("mesh key generated", "fingerprint", meshKey.Fingerprint())
+			}
+		}
+	} else if mErr == nil {
+		log.Info("mesh key loaded", "fingerprint", meshKey.Fingerprint())
+	}
+
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: server.New(server.Options{
@@ -101,6 +118,9 @@ func serve(args []string) error {
 			RebuildEngine: rebuild,
 			Pairs:         pairs,
 			Hub:           hub,
+			MeshKey:       meshKey,
+			Version:       version,
+			InstanceID:    *root, // not strictly stable across reinstalls; good enough for v0.16
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

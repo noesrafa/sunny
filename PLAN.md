@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.15.0)
+## Estado actual (v0.16.0)
 
 ### Lo que funciona end-to-end
 
@@ -227,16 +227,30 @@ sobrescribe.
   reconnect cada 2s en fallo. La TUI subscribe al federated bus en
   el boot; cuando llega un `agent.*` event de cualquier peer, el
   AgentPicker abierto se refresca solo.
+
+  **Plex-style auto-discovery (Fase 4 / v0.16)**: `internal/mesh`
+  guarda `~/.sunny/mesh.key` (32 bytes random, generada al primer
+  boot). Endpoint público `GET /sunny/identity` devuelve `{app,
+  version, mesh_fingerprint}` — el fingerprint es sha256(key)[:8].
+  Middleware `MeshAuth` acepta requests sin bearer cuando vienen
+  de IP del tailnet AND traen `X-Sunny-Mesh` con la key correcta.
+  Al boot del TUI, `discoverMeshPeers` escanea el tailnet con
+  `tsnet.Peers()`, hace GET /sunny/identity en paralelo, y añade
+  in-memory a la federation los peers cuyo fingerprint coincide.
+  Cliente: `NewFromBaseMesh` envía `X-Sunny-Mesh` automáticamente
+  en lugar de bearer. CLI: `sunny mesh export/import/rotate`.
+  Resultado: distribuís la key una vez, después instalás sunny en
+  N máquinas del tailnet y todas se ven entre sí sin más config.
 - **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
   tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.15.0)
+### Lo que sigue (post-v0.16.0)
 
-El mesh está completo end-to-end. Las próximas piezas son las que
-quedaron pendientes desde el plan post-v0.10 antes de pivotar al
-mesh:
+El mesh está completo end-to-end con auto-discovery. Las próximas
+piezas son las que quedaron pendientes desde el plan post-v0.10
+antes de pivotar al mesh:
 
 **Tools de write/exec (edit/write/bash) + permission flow**:
 - [ ] `permissions.Service` con `Request(ctx, action) → granted bool`

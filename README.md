@@ -2,13 +2,12 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.15.0 — chat works end-to-end across four backends
-> (claude-code, Anthropic API, Ollama Cloud, opencode). Mesh complete
-> through Phase 3: pair daemons over a one-time code, auto-bind to
-> the tailnet IP, scan with `sunny peers scan`, AND every TUI
-> subscribes to a federated event bus (`GET /events`) so a remote
-> client creating an agent appears in your picker without polling.
-> Conversations stay on the engine they were created on.
+> **Status:** v0.16.0 — chat works end-to-end across four backends.
+> Plex-style mesh: distribute a shared `mesh.key` once across your
+> tailnet hosts and the TUI auto-discovers every sunny daemon on
+> your tailnet that holds the same key. Zero `peers.yaml`, zero
+> per-peer tokens, real-time events. Conversations stay on the
+> engine they were created on.
 
 ## Install
 
@@ -91,7 +90,33 @@ daemon, `sunny start` auto-binds an extra listener to the tailnet
 IPv4 (alongside 127.0.0.1) so peers on the tailnet can reach it
 without exposing the daemon to the LAN or public internet.
 
-Discovery:
+### Plex-style auto-discovery (recommended)
+
+If your sunny instances live on the same Tailscale network, skip
+the pairing dance entirely. Distribute a shared `mesh.key` once
+and every TUI auto-discovers every daemon that holds it:
+
+```bash
+# on your laptop (first install — key auto-generated at first start)
+sunny mesh export
+→ <base64 mesh key>
+
+# on every other machine
+echo "<key>" | sunny mesh import
+sunny stop && sunny start    # daemon picks up the new key
+```
+
+After that, opening `sunny` on any of those machines auto-finds
+the others — no peers.yaml entries, no pair codes. The TUI scans
+the tailnet, asks each peer `GET /sunny/identity`, and adds the
+ones whose `mesh_fingerprint` matches yours.
+
+Auth shortcut: requests from a known tailnet IP that carry the
+shared `X-Sunny-Mesh` key skip bearer auth (the tailnet is the
+first perimeter, the mesh-key is the second). Hosts NOT on your
+tailnet still use the `sunny pair` flow as before.
+
+Discover what's out there manually:
 
 ```bash
 sunny peers scan
@@ -100,10 +125,6 @@ sunny peers scan
   Already paired:
     ✓ pi                   http://100.64.0.20:7777  (as "pi")
 ```
-
-Scan never auto-pairs — pairing is a two-side consent flow. Pair
-the candidates with `sunny pair offer` / `sunny pair claim` as
-above.
 
 Or daemon-only:
 

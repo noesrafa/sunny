@@ -32,6 +32,19 @@ func NewFederationFromClient(name string, c *Client) *Federation {
 	}
 }
 
+// AddMeshPeer inserts (or replaces) a peer discovered through the
+// tailnet mesh. Used after construction by the discovery flow so
+// peers.yaml-configured peers and auto-discovered ones live in
+// the same map. Safe to call concurrently with reads.
+func (f *Federation) AddMeshPeer(name, base, meshKey string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.clients[name]; !exists {
+		f.order = append(f.order, name)
+	}
+	f.clients[name] = NewFromBaseMesh(base, meshKey)
+}
+
 // NewFederation builds a federation from a peers.Roster. Local is
 // always the first entry; remote peers follow in roster order
 // (peers.Save sorts them alphabetically).

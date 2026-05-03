@@ -45,6 +45,8 @@ func main() {
 		err = peersCmd(args)
 	case "pair":
 		err = pairCmd(args)
+	case "mesh":
+		err = meshCmd(args)
 	case "doctor":
 		err = doctorCmd(args)
 	case "setup":
@@ -78,6 +80,7 @@ commands:
   secrets   Manage provider keys. 'sunny secrets' lists, 'sunny secrets <p> set <field>' reads from stdin.
   peers     Manage federated daemons. 'sunny peers' lists, 'sunny peers add <name> <url>' adds (token from stdin).
   pair      Pair two daemons over a one-time code. 'sunny pair offer' on the remote, 'sunny pair claim <url> <code>' on the client.
+  mesh      Manage shared tailnet mesh key. 'sunny mesh export' on one host, 'sunny mesh import <key>' on another → zero-config discovery between them.
   doctor    Print a checklist: providers (✓/⚠/✗), daemon, runtime. Run this first when something feels off.
   setup     Get a provider ready. 'sunny setup' walks you through it; 'sunny setup <p>' targets one.
   version   Print version.

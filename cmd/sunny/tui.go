@@ -15,9 +15,11 @@ import (
 	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/logger"
+	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/peers"
 	"github.com/noesrafa/sunny/internal/session"
 	uistate "github.com/noesrafa/sunny/internal/state"
+	"github.com/noesrafa/sunny/internal/tsnet"
 	"github.com/noesrafa/sunny/internal/tui"
 )
 
@@ -93,6 +95,15 @@ func openTUI(args []string) error {
 	defer closer.Close()
 	lg.Info("tui starting", "cwd", cwd, "log", logger.LogPath())
 
+	// Tailnet auto-discovery: if this host has a mesh.key AND
+	// tailscale is up, scan the tailnet for other sunny daemons
+	// that report the same mesh fingerprint. Add the matches to
+	// the federation in-memory (peers.yaml stays untouched —
+	// these are ephemeral discoveries, not persistent config).
+	if mk, mErr := mesh.Load(*root); mErr == nil && tsnet.Available() {
+		discoverMeshPeers(ctx, fed, mk, lg)
+	}
+
 	mgr := session.NewManager()
 	saved, themeID, activeIdx := loadSavedState(lg)
 	for _, ss := range saved {
@@ -132,6 +143,80 @@ func openTUI(args []string) error {
 		Federation:               fed,
 	})
 	return model.Run(ctx)
+}
+
+// discoverMeshPeers walks the tailnet, asks each peer for its
+// /sunny/identity, and adds the ones whose mesh fingerprint
+// matches ours to the federation. Runs synchronously at TUI boot
+// — bounded by tsnet.Peers() (3s) plus per-peer FetchIdentity
+// (3s each, in parallel goroutines), so a tailnet of dozens
+// completes well under a second.
+//
+// Discovered peers shadow nothing: if peers.yaml already lists a
+// peer at the same name, AddMeshPeer overwrites with the mesh
+// client (mesh-key auth is preferred over bearer when both
+// exist, since mesh-key trust survives bearer rotation).
+func discoverMeshPeers(ctx context.Context, fed *client.Federation, key mesh.Key, lg *charmlog.Logger) {
+	tspeers, err := tsnet.Peers()
+	if err != nil {
+		lg.Debug("mesh discovery: tsnet peers", "err", err.Error())
+		return
+	}
+	want := key.Fingerprint()
+	port := "7777" // sunny default; future versions can probe alternatives
+	type result struct {
+		name string
+		base string
+		ok   bool
+	}
+	resCh := make(chan result, len(tspeers))
+	for _, p := range tspeers {
+		if p.IsSelf || !p.Online || p.IP == "" {
+			continue
+		}
+		go func(p tsnet.Peer) {
+			base := "http://" + p.IP + ":" + port
+			id, err := client.FetchIdentity(ctx, base)
+			if err != nil || id.Mesh != want {
+				resCh <- result{name: p.HostName, base: base, ok: false}
+				return
+			}
+			resCh <- result{name: peerNameFromTailscaleHost(p.HostName), base: base, ok: true}
+		}(p)
+	}
+	// Drain everything we kicked off. Bounded — every goroutine
+	// either succeeds or errors via FetchIdentity's own timeout.
+	added := 0
+	for range tspeers {
+		select {
+		case r := <-resCh:
+			if r.ok {
+				fed.AddMeshPeer(r.name, r.base, string(key))
+				added++
+				lg.Info("mesh peer discovered", "name", r.name, "url", r.base)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+	if added > 0 {
+		lg.Info("mesh discovery complete", "added", added, "fingerprint", want)
+	}
+}
+
+// peerNameFromTailscaleHost makes a slug out of a tailnet hostname.
+// tailscale's HostName is already short and dash-friendly (e.g.
+// "mac-rafael", "vps-1") but may have uppercase or trailing dots
+// from the magicDNS suffix.
+func peerNameFromTailscaleHost(h string) string {
+	h = strings.ToLower(h)
+	if i := strings.Index(h, "."); i >= 0 {
+		h = h[:i]
+	}
+	if h == "" {
+		return "remote"
+	}
+	return h
 }
 
 // loadSavedState reads ~/.sunny/state.json. Failures degrade to a fresh

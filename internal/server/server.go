@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/events"
+	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/store"
@@ -48,6 +50,19 @@ type Options struct {
 	// if nil, /events returns 503 and mutating handlers no-op the
 	// publish step.
 	Hub *events.Hub
+	// MeshKey, when non-empty, enables tailnet-based auto-auth:
+	// requests from a known tailnet IP carrying X-Sunny-Mesh that
+	// matches this key bypass bearer auth. Empty disables the
+	// shortcut (bearer remains the only path).
+	MeshKey mesh.Key
+	// Version is the linker-set version string (`vX.Y.Z`). Surfaced
+	// at GET /sunny/identity for compat checks. Empty falls back to
+	// "dev".
+	Version string
+	// InstanceID is a stable per-installation random ID, surfaced at
+	// /sunny/identity. Lets the TUI distinguish "the same daemon
+	// across reboots" from "a new daemon at the same address".
+	InstanceID string
 }
 
 // New builds the daemon's HTTP handler.
@@ -64,6 +79,9 @@ func New(opts Options) http.Handler {
 		rebuildEngine: opts.RebuildEngine,
 		pairs:         opts.Pairs,
 		hub:           opts.Hub,
+		meshKey:       opts.MeshKey,
+		version:       opts.Version,
+		instanceID:    opts.InstanceID,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -85,7 +103,16 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /pairing/offer", srv.offerPairing)
 	mux.HandleFunc("POST /pairing/claim", srv.claimPairing)
 	mux.HandleFunc("GET /events", srv.streamEvents)
-	return logging(opts.Log, requireBearer(opts.Token, mux))
+	mux.HandleFunc("GET /sunny/identity", srv.streamIdentity)
+
+	// Compose middleware:
+	//   logging → meshAuth → requireBearer → mux
+	// meshAuth fast-paths tailnet-resident requests carrying our
+	// shared key; non-matching ones pass through unchanged and
+	// requireBearer enforces the bearer.
+	tailnetCache := NewTailnetIPCache(5 * time.Minute)
+	handler := MeshAuth(opts.MeshKey, tailnetCache.Snapshot, requireBearer(opts.Token, mux))
+	return logging(opts.Log, handler)
 }
 
 
@@ -101,8 +128,16 @@ func requireBearer(token string, h http.Handler) http.Handler {
 		// /healthz must be reachable for liveness probes; pairing
 		// /claim carries its own credential (the one-shot code) and
 		// must reject the bearer header — a pairing client legitimately
-		// has no token yet.
-		if r.URL.Path == "/healthz" || pairingExempt(r.URL.Path) {
+		// has no token yet. /sunny/identity is intentionally public
+		// so the mesh discovery flow can ask "is this daemon part of
+		// my mesh?" before sending any credential.
+		if r.URL.Path == "/healthz" || pairingExempt(r.URL.Path) || identityExempt(r.URL.Path) {
+			h.ServeHTTP(w, r)
+			return
+		}
+		// Mesh middleware upstream may have already authenticated
+		// this request via the tailnet + shared-key shortcut.
+		if isMeshAuthed(r) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -124,6 +159,9 @@ type server struct {
 	rebuildEngine func()
 	pairs         *pairing.Service
 	hub           *events.Hub
+	meshKey       mesh.Key
+	version       string
+	instanceID    string
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

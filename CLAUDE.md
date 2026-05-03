@@ -5,19 +5,18 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.15.0`** (Phase 3 of multi-client mesh:
-real-time event bus — `GET /events` SSE on every daemon, TUI
-multiplexes streams from every peer in the federation and refreshes
-its agent picker as remote events arrive). Brew `sunny version`
-should match.
+**Latest release: `v0.16.0`** (Plex-style auto-discovery: shared
+mesh key + tailnet identity probe → zero-config mesh. Distribute
+the key once, every TUI on the tailnet auto-finds every daemon).
+Brew `sunny version` should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
 actual". The short version: chat works end-to-end across four
-backends; the TUI spans multiple sunny daemons (local +
-~/.sunny/peers.yaml entries); peers are paired with `sunny pair
-offer/claim` and discovered with `sunny peers scan`; the agent
-picker auto-refreshes when an agent is created/updated/deleted on
-ANY peer. Conversations stay on the engine they were created on.
+backends; the TUI auto-discovers every sunny daemon on your
+tailnet that holds the same `mesh.key` (no peers.yaml needed);
+remote agents appear in the picker as `host/slug` and refresh in
+real time via `GET /events`. Manual `sunny pair` flow still
+works for hosts off the tailnet.
 
 **Single most likely next thing to pick up**: write/exec tools
 (`edit`, `write`, `bash`) + their permission flow — the original
@@ -128,6 +127,20 @@ flow with grep / glob / ls.
   reads one FederatedEvent off the multiplexer and surfaces it as
   busEventMsg. The handler in model_appmsg.go re-emits AgentChanged
   Msg so any open AgentPickerDialog refreshes itself.
+- `internal/mesh/` — shared `mesh.key` (32 random bytes, base64url).
+  Each daemon auto-generates one at first boot. `Fingerprint()` is
+  the public 8-hex prefix used by /sunny/identity. Equal compares
+  in constant time.
+- `internal/server/mesh.go` — MeshAuth middleware: matches
+  (tailnet IP) + (X-Sunny-Mesh header == our mesh-key) → mark
+  request as already authed. requireBearer downstream skips its
+  check via isMeshAuthed. TailnetIPCache wraps tsnet.Peers() with
+  a 5-min TTL so per-request lookup is map-only.
+- `cmd/sunny/tui.go` `discoverMeshPeers` — at boot, if mesh.key
+  exists AND tailscale is up, walks the tailnet, GETs
+  /sunny/identity in parallel, and `Federation.AddMeshPeer`s any
+  daemon whose fingerprint matches. Discovered peers don't touch
+  peers.yaml — they're ephemeral per TUI session.
 - `internal/client/federation.go` — wraps N `*Client` keyed by peer
   name. `ListAgents` fan-outs in parallel; per-peer failures don't
   fail the whole call. The TUI's `Model.fed` always exists (single-

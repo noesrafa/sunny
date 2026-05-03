@@ -23,9 +23,10 @@ import (
 // connection pool tuning); concurrent use is fine — net/http handles
 // the connection management.
 type Client struct {
-	base  string
-	token string
-	hc    *http.Client
+	base    string
+	token   string
+	meshKey string // when set, sent as X-Sunny-Mesh in lieu of bearer
+	hc      *http.Client
 }
 
 // New constructs a daemon HTTP client from an "host:port" address
@@ -50,13 +51,32 @@ func NewFromBase(base, token string) *Client {
 	}
 }
 
+// NewFromBaseMesh is for peers reachable via the tailnet mesh: the
+// client carries the shared mesh key in X-Sunny-Mesh on every
+// request (instead of a bearer token). Bearer header is omitted —
+// the daemon's mesh middleware accepts the request based on
+// (tailnet IP + matching key).
+func NewFromBaseMesh(base, meshKey string) *Client {
+	return &Client{
+		base:    base,
+		meshKey: meshKey,
+		hc:      &http.Client{},
+	}
+}
+
 // Base returns the daemon URL this client targets. Useful for
 // rendering "you're talking to X" hints in the UI.
 func (c *Client) Base() string { return c.base }
 
-// auth attaches the bearer header when one is configured. Called by
-// every request method before c.hc.Do.
+// auth attaches the bearer header when one is configured. When
+// the client was constructed via NewFromBaseMesh, sends the shared
+// mesh key in X-Sunny-Mesh instead — the daemon's middleware
+// accepts that route when the source IP is on the tailnet.
 func (c *Client) auth(req *http.Request) {
+	if c.meshKey != "" {
+		req.Header.Set("X-Sunny-Mesh", c.meshKey)
+		return
+	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}

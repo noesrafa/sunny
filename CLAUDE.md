@@ -3,6 +3,71 @@
 This file is the contract for how we evolve `sunny`. Read it before
 proposing changes; update it when conventions change.
 
+## Resume here (where we are right now)
+
+**Latest release: `v0.10.0`** (read-only tools — view, ls, grep,
+glob — with full round-trip loop in the engine). Brew `sunny version`
+should match.
+
+Everything that works today is enumerated in PLAN.md → "Estado
+actual". The short version: chat works end-to-end across three
+providers (claude-code, anthropic, ollama), conversations persist
+per-agent, the agent has read-only filesystem access tools, and the
+TUI restores its layout on restart.
+
+**Single most likely next thing to pick up**: write/exec tools
+(`edit`, `write`, `bash`) + their permission flow. Design notes are
+in PLAN.md → "Lo que sigue". Read that first; the path is laid out.
+
+### How to verify things quickly
+
+```bash
+# basic loop
+sunny start && sunny status               # daemon up, healthz ok
+sunny token                                # bearer token (mode 0600)
+sunny secrets                              # list configured providers
+
+# end-to-end smoke
+TOK=$(sunny token)
+curl -s -H "Authorization: Bearer $TOK" localhost:7777/agents | jq
+```
+
+### How to verify the tools
+
+Configure ollama (or anthropic) so we have a non-claude-code
+provider, create an agent on it, and ask the model to use a tool
+explicitly:
+
+```bash
+sunny secrets ollama set api_key      # paste from stdin
+sunny stop && sunny start              # daemon picks up new provider
+
+curl -s -X POST -H "Authorization: Bearer $(sunny token)" \
+  -H "Content-Type: application/json" \
+  -d '{"slug":"gemma","name":"Gemma","model":"gemma4:31b","provider":"ollama","prompt":"You are Gemma."}' \
+  localhost:7777/agents
+```
+
+Then in the TUI: `ctrl+a` → enter on `gemma`. Ask it to "read
+README.md with the view tool"; the model will emit a tool_use, the
+engine runs `view`, feeds the result back, model continues. Same
+flow with grep / glob / ls.
+
+### Where the bodies are buried
+
+- `internal/engine/engine.go` — `runTurnLoop` is the round-trip
+  driver. If a tool invocation behaves wrong, start there.
+- `internal/tools/` — one file per tool. `path.go` is the
+  cwd-bounded resolver (had a macOS `/tmp` symlink bug; the fix
+  EvalSymlinks both sides).
+- `internal/provider/{anthropic,ollama}/` — the wire translation.
+  `claude-code` deliberately doesn't get `req.Tools`; it has its
+  own native toolset.
+- `cmd/sunny/serve.go` `buildEngine` — auto-detection chain. If a
+  provider doesn't show up, this is where to log-trace.
+- `cmd/sunny/tui.go` `openTUI` — state restore + bootstrap session.
+- `internal/server/chat.go` `postTurn` — SSE writer + journal append.
+
 ## Code principles (in priority order)
 
 1. **Idiomatic Go.** Errors wrapped with `%w`, no `panic` outside `main`,

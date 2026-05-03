@@ -2,9 +2,10 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.0.2 — substrate only. The daemon loads the filesystem, exposes a
-> read-only HTTP API, and provides a minimal TUI client. No engine, no provider,
-> no chat loop yet — those land in v0.1.
+> **Status:** v0.10.0 — chat works end-to-end. The daemon talks to
+> claude-code, Anthropic API, or Ollama Cloud; conversations persist
+> per-agent on disk; the agent has read-only filesystem tools (view,
+> ls, grep, glob). Write/exec tools and a permission flow are next.
 
 ## Install
 
@@ -15,17 +16,7 @@ brew tap noesrafa/tap
 brew install sunny
 ```
 
-Currently ships binaries for **macOS Apple Silicon** and **Linux x86_64**. Other
-targets can be added by editing `.goreleaser.yaml`.
-
-### Linux via tarball (no brew)
-
-```bash
-curl -L https://github.com/noesrafa/sunny/releases/latest/download/sunny_0.0.2_linux_amd64.tar.gz | tar xz
-sudo mv sunny /usr/local/bin/
-```
-
-(Replace `0.0.2` with the latest tag from [releases](https://github.com/noesrafa/sunny/releases).)
+Currently ships binaries for **macOS Apple Silicon** and **Linux x86_64**.
 
 ### From source
 
@@ -38,102 +29,151 @@ go build -o bin/sunny ./cmd/sunny
 
 Requires Go 1.26+.
 
-## Update
-
-```bash
-brew upgrade sunny
-```
-
-Or, if installed from tarball, redo the `curl … | tar xz` step above with the
-new version.
-
-## Uninstall
-
-```bash
-brew uninstall sunny
-brew untap noesrafa/tap         # optional: remove the tap entirely
-rm -rf ~/.sunny                  # optional: also wipe your runtime data
-```
-
 ## Quick start
 
 ```bash
-sunny start    # daemon detached, listens on 127.0.0.1:7777
-sunny status   # pid, addr, uptime, healthz
-sunny          # open the TUI (alias: sunny tui)
-sunny stop     # graceful shutdown
+sunny                # auto-starts daemon if needed; opens TUI
+sunny secrets ollama set api_key   # paste your key from stdin
+sunny stop && sunny start          # picks up the new key
 ```
 
-On the very first run, `sunny start` seeds `~/.sunny/` from the defaults baked
-into the binary. After that the directory is yours — Sunny never overwrites it.
+Or daemon-only:
+
+```bash
+sunny start          # daemon detached on 127.0.0.1:7777
+sunny status         # pid, addr, uptime, healthz
+sunny stop           # graceful shutdown
+```
+
+The daemon survives the TUI exiting — by design. Closing your
+terminal does not stop sunny. The only ways to stop it are
+`sunny stop` and a hard kill of the pid.
+
+On the very first run, `sunny start` seeds `~/.sunny/` from defaults
+baked into the binary and writes `~/.sunny/token` (mode 0600). After
+that the directory is yours; sunny never overwrites your edits.
+
+## Providers
+
+Three drivers ship in the binary; the daemon auto-detects which are
+available at boot:
+
+| Provider | Source of credentials | Notes |
+|---|---|---|
+| **claude-code** | The `claude` CLI's existing login | Bring all of Claude Code's native tools (Read, Glob, Grep, Bash, …). No api_key needed. |
+| **anthropic** | `secrets.anthropic.api_key` or `ANTHROPIC_API_KEY` env var | SDK streaming with cache-control breakpoints. |
+| **ollama** | `secrets.ollama.api_key` (+ optional `base_url`) | Ollama Cloud `/api/chat`. `keep_alive: 10m` default. Streams thinking deltas for reasoning models. |
+
+Per-agent override: drop a `provider:` field in any `agent.yaml` and
+that agent always uses that backend regardless of the daemon
+default. The order claude-code → anthropic → ollama drives the
+fallback when the agent doesn't pin one.
+
+```bash
+sunny secrets                          # list configured providers (no values)
+sunny secrets ollama set api_key       # reads value from stdin
+sunny secrets anthropic delete         # remove a provider's section
+```
+
+Values are stored in `~/.sunny/secrets.yaml` (mode 0600). The daemon
+never returns a secret value over HTTP — only the list of configured
+field names.
+
+## TUI shortcuts
+
+```
+ctrl+n   new session (pick agent + cwd)
+ctrl+a   agents (create / edit / archive)
+ctrl+y   secrets (paste API keys)
+ctrl+r   rename current session
+ctrl+l   reset chat (new conversation, same tab)
+ctrl+d   git diff viewer
+ctrl+k   tab switcher
+ctrl+s   settings (theme)
+tab      next session
+ctrl+w   close session tab
+ctrl+c   cancel turn in flight (does not touch input)
+ctrl+q   quit (with confirmation)
+```
 
 ## Idea
 
-A Go daemon you install with `brew install sunny` and run anywhere — Mac, VPS,
-Raspberry Pi. Every agent, skill, and piece of knowledge lives as plain files
-you can edit, version, share, and back up.
+A Go daemon you install with `brew install sunny` and run anywhere —
+Mac, VPS, Raspberry Pi. Every agent, skill, conversation, and piece
+of knowledge lives as plain files you can edit, version, share, and
+back up.
 
 Three principles:
 
-- **Data sovereignty.** Conversations, memory, skills live on your host. Never
-  in someone else's cloud.
-- **Radical distribution.** One binary. `brew install` and go. Your sibling
-  installs it on a $35 Pi and has their own agent without a monthly bill.
-- **Ecosystem-compatible.** Filesystem layout follows Claude Code conventions
-  (`SKILL.md`, agent folders). Skills move freely between Sunny and any
-  Claude-family client.
+- **Data sovereignty.** Conversations, memory, secrets live on your
+  host. Never in someone else's cloud.
+- **Radical distribution.** One binary. `brew install` and go.
+- **Ecosystem-compatible.** Filesystem layout follows Claude Code
+  conventions (`SKILL.md`, agent folders). Skills move freely
+  between sunny and any Claude-family client.
 
-Inspirations: **Plex** (self-hosted server, multi-client UI), **Ollama**
-(daemon + thin clients), **Claude Code** (filesystem as source of truth for
-skills/agents).
+Inspirations: **Plex** (self-hosted server, multi-client UI),
+**Ollama** (daemon + thin clients), **Claude Code** (filesystem as
+source of truth for skills/agents).
 
 ## Repo layout
 
 ```
 sunny/
-├── cmd/sunny/                   # CLI entrypoint
+├── cmd/sunny/                   # CLI entrypoint, dispatch + per-command files
 ├── internal/
+│   ├── auth/                    # bearer token (~/.sunny/token, mode 0600)
+│   ├── secrets/                 # ~/.sunny/secrets.yaml (mode 0600)
 │   ├── agent/                   # agent.yaml loader + validation
 │   ├── skill/                   # SKILL.md frontmatter parser
-│   ├── store/                   # walks ~/.sunny, builds in-memory index
+│   ├── store/                   # walks ~/.sunny, in-memory index, CRUD
+│   ├── conversation/            # per-agent conversation persistence
 │   ├── bootstrap/               # seeds ~/.sunny from embedded defaults
 │   ├── lifecycle/               # pid/state/log files for start/stop/status
-│   ├── server/                  # read-only HTTP API
-│   ├── client/                  # tiny HTTP client used by the TUI
+│   ├── engine/                  # turn loop, tool round-trip, system prompt
+│   ├── provider/                # abstraction + drivers
+│   │   ├── anthropic/           # SDK streaming
+│   │   ├── claudecode/          # subprocess wrapper
+│   │   └── ollama/              # Ollama Cloud /api/chat
+│   ├── tools/                   # view, ls, grep, glob (read-only)
+│   ├── server/                  # HTTP API: chat, agents, conversations, secrets
+│   ├── client/                  # daemon HTTP client used by TUI
+│   ├── session/                 # in-process session state for TUI tabs
+│   ├── state/                   # ~/.sunny/state.json (TUI layout cache)
 │   └── tui/                     # Bubble Tea client
 └── defaults/                    # baked into the binary via go:embed
-    └── agents/
-        └── sunny/               # default agent shipped with the binary
-            ├── agent.yaml
-            ├── prompt.md
-            ├── knowledge/
-            └── skills/
+    └── agents/sunny/            # default agent
 ```
 
 ## Runtime layout (`~/.sunny/`)
 
 ```
 ~/.sunny/
-├── run/                          # pid, log, state.json (managed by sunny)
-└── agents/
-    └── sunny/
-        ├── agent.yaml            # identity: name, description, model
-        ├── prompt.md             # system prompt (optional)
-        ├── knowledge/            # any *.md, walked recursively
-        │   └── about.md
-        └── skills/
-            ├── greet/
-            │   └── SKILL.md      # YAML frontmatter (name, description) + body
-            └── summarize/
-                └── SKILL.md
+├── token                            # bearer token (mode 0600)
+├── secrets.yaml                     # provider keys (mode 0600)
+├── state.json                       # TUI layout cache
+├── run/                             # pid, log (managed by sunny)
+├── agents/
+│   └── <slug>/
+│       ├── agent.yaml               # name, description, model, effort, provider
+│       ├── prompt.md                # system prompt
+│       ├── knowledge/               # any *.md, walked recursively
+│       ├── skills/<name>/SKILL.md   # claude-code-compatible
+│       └── conversations/
+│           └── <conv_id>/
+│               ├── meta.json        # title, timestamps, msg_count, model, provider_state
+│               └── events.jsonl     # append-only turn journal
+└── .archive/                        # archived agents/convs (mv'd here, not deleted)
 ```
 
 ### `agent.yaml`
 
 ```yaml
-name: sunny
-description: Default agent shipped with Sunny.
-model: claude-opus-4-7
+name: My Agent
+description: optional one-liner
+model: claude-opus-4-7        # or gemma4:31b, gpt-oss:120b, etc.
+effort: max                   # low|medium|high|xhigh|max
+provider: anthropic           # anthropic|claude-code|ollama (optional)
 ```
 
 ### `SKILL.md` (Claude Code convention)
@@ -150,23 +190,51 @@ When the conversation opens or the user says hello, respond with a brief
 warm greeting and ask how their day is going.
 ```
 
-A skill is a folder. `SKILL.md` is the contract; anything else in the folder
-(scripts, templates, references) is a resource the skill can use.
+A skill is a folder. `SKILL.md` is the contract; anything else in the
+folder is a resource the skill can use.
+
+> Sunny frames skills as **pre-loaded behavioural guidelines**, not
+> as tools. The model reads them inline in the system prompt and
+> applies them when relevant — there's no `Skill()` invocation. The
+> filesystem layout stays Claude-Code-compatible so skills move
+> freely between sunny and `claude` itself.
 
 ## HTTP API
 
-While the daemon is running:
+Auth: every endpoint except `/healthz` requires
+`Authorization: Bearer $(sunny token)`.
 
-| Endpoint | Returns |
+| Method + path | Purpose |
 |---|---|
-| `GET /healthz` | `{"status":"ok"}` |
-| `GET /agents` | List of agents with name, model, skill/knowledge counts |
-| `GET /agents/{slug}` | Full agent detail incl. skill names + knowledge files |
+| `GET /healthz` | Liveness probe (no auth) |
+| `GET /agents` | List agent summaries |
+| `POST /agents` | Create agent (slug, name, model, …) |
+| `GET /agents/{slug}` | Full agent detail incl. prompt + skills + knowledge |
+| `PATCH /agents/{slug}` | Partial update; nil fields untouched |
+| `DELETE /agents/{slug}` | Move to `~/.sunny/.archive/` (idempotent) |
 | `GET /agents/{slug}/skills/{name}` | Skill frontmatter + body |
-| `GET /agents/{slug}/knowledge/{file...}` | Raw markdown file |
+| `GET /agents/{slug}/knowledge/{file...}` | Raw markdown (path-traversal guarded) |
+| `GET /agents/{slug}/conversations` | List conversations newest-first |
+| `POST /agents/{slug}/conversations` | Create empty conversation |
+| `GET /agents/{slug}/conversations/{id}` | Meta + events journal |
+| `DELETE /agents/{slug}/conversations/{id}` | Archive |
+| `POST /agents/{slug}/conversations/{id}/turn` | SSE stream of one assistant turn |
+| `GET /secrets` | List configured providers + field names (no values) |
+| `PUT /secrets/{provider}` | Replace fields (`{api_key, base_url, …}`) |
+| `DELETE /secrets/{provider}` | Remove provider section |
 
 ```bash
-curl -s localhost:7777/agents | jq
+TOK=$(sunny token)
+curl -s -H "Authorization: Bearer $TOK" localhost:7777/agents | jq
+```
+
+## Update / uninstall
+
+```bash
+brew upgrade sunny
+brew uninstall sunny
+brew untap noesrafa/tap         # optional: remove the tap entirely
+rm -rf ~/.sunny                  # optional: also wipe your runtime data
 ```
 
 ## License

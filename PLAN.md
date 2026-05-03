@@ -129,60 +129,103 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.8.0)
+## Estado actual (v0.10.0)
 
 ### Lo que funciona end-to-end
 
 - **Daemon detached** (`sunny start/stop/status/serve`), sobrevive
-  cierre de TUI/terminal vía `Setsid`.
-- **Bootstrap** desde defaults embebidos en `~/.sunny/` la primera vez;
-  agentes existentes nunca se sobreescriben.
-- **HTTP API** completo:
-  - Lectura: `/healthz`, `/agents`, `/agents/{slug}`, `.../skills/{name}`,
-    `.../knowledge/{file}`
-  - Escritura: `POST/PATCH/DELETE /agents`, `POST/GET/DELETE /agents/{slug}/conversations`,
-    `POST /agents/{slug}/conversations/{id}/turn` (SSE), `PUT/DELETE /secrets/{provider}`
-- **Bearer auth** en todas las rutas excepto `/healthz`. Token
-  generado al primer boot en `~/.sunny/token` (mode 0600). Comandos
-  `sunny token`, `sunny token rotate`.
+  cierre de TUI/terminal vía `Setsid`. Healthcheck + recuperación
+  de boot fallido (mata huérfano, limpia state, surface tail del log).
+- **Bootstrap** desde defaults embebidos en `~/.sunny/` la primera
+  vez; agentes existentes nunca se sobreescriben.
+- **HTTP API** completo (todas las rutas autenticadas con Bearer
+  token salvo `/healthz`):
+  - Agentes: `GET/POST/PATCH/DELETE /agents` + `GET /agents/{slug}/skills/{name}` + `GET /agents/{slug}/knowledge/{file}`
+  - Conversaciones: `GET/POST /agents/{slug}/conversations`, `GET/DELETE /agents/{slug}/conversations/{id}`, `POST /agents/{slug}/conversations/{id}/turn` (SSE)
+  - Secrets: `GET /secrets`, `PUT/DELETE /secrets/{provider}` (nunca devuelve valores)
+- **Auth**: token de 32 bytes random en `~/.sunny/token` (mode 0600)
+  generado al primer boot. Comandos `sunny token` / `sunny token rotate`.
 - **Persistencia de conversaciones** en `agents/<slug>/conversations/<id>/{meta.json, events.jsonl}`.
-  El journal es la verdad; meta es rollup. `provider_state`
-  (claude-code session id) vive en meta para sobrevivir restarts.
-- **Multi-agente con CRUD** via HTTP + TUI (`ctrl+a` picker; create
-  con auto-slug, edit, archive). Borrado mueve a `~/.sunny/.archive/`.
-- **Tres providers**: claude-code (CLI subprocess), anthropic (SDK),
-  ollama (Ollama Cloud /api/chat). Routing por `agent.yaml.provider`
-  con fallback al default del daemon.
-- **Secrets** centralizados en `~/.sunny/secrets.yaml` (mode 0600,
-  estructurado por proveedor). Env vars override. CLI (`sunny
-  secrets <p> set <field>` con stdin), TUI (`ctrl+y` paste form),
-  HTTP. Nunca se devuelve un valor por la API.
+  El journal es la verdad; meta es rollup. `provider_state` vive en
+  meta para sobrevivir restart. Cancel mid-turn registra `cancelled`
+  en el journal. Si la conv server-side fue archivada, la TUI crea
+  una nueva transparentemente al siguiente send (no error rojo).
+- **Multi-agente con CRUD** vía HTTP + TUI (`ctrl+a` picker; create
+  con auto-slug desde el nombre, edit con prefill, archive). El
+  archive mueve a `~/.sunny/.archive/` con timestamp; restaurar es
+  manual (mover folder a `agents/`).
+- **Tres providers**:
+  - **claude-code**: subprocess wrapper, usa el login de claude.ai
+    del usuario, trae todo el toolset nativo de claude code.
+  - **anthropic**: SDK streaming con cache breakpoints, tool support
+    completo.
+  - **ollama**: Ollama Cloud `/api/chat`, JSONL streaming, thinking
+    deltas para modelos de razonamiento (gpt-oss, deepseek-r1,
+    qwen3-thinking), `keep_alive: 10m` default, tool support
+    OpenAI-compatible.
+  Routing por `agent.yaml.provider` con fallback al default del
+  daemon. SUNNY_PROVIDER env var pinea uno explícitamente.
+- **Secrets** centralizados en `~/.sunny/secrets.yaml` (mode 0600).
+  Env vars override. CLI (`sunny secrets <p> set <field>` con
+  stdin), TUI (`ctrl+y` paste form), HTTP. Mutators reload del
+  disco antes de escribir para no pisar ediciones concurrentes
+  CLI/daemon.
+- **Tools read-only**: `view`, `ls`, `grep`, `glob` en
+  `internal/tools/`. cwd-bounded con resolución de symlinks
+  (catched bug en macOS de `/tmp` → `/private/tmp`). Engine corre
+  el round-trip loop (cap 25 iteraciones), tool events surface a
+  la SSE stream para que la TUI los renderice. claude-code no
+  recibe estos tools (tiene los suyos nativos; evitar colisión).
 - **TUI** restaura su estado al reabrir (sesiones, drafts, theme,
-  agente activo, conv id). Ctrl+c cancela el turno en vuelo y queda
-  registrado como `cancelled` en el journal.
-- **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew tap
-  auto-actualizado por tag.
+  agente activo, conv id). `ctrl+q` para salir (no `esc` —
+  demasiado fácil de tirar por accidente). NewSession dialog
+  reducido a agent + cwd; model + effort viven en `agent.yaml`.
+- **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
+  tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.8.0)
+### Lo que sigue (post-v0.10.0)
 
-- [ ] **Reload del journal en TUI**: hoy los `Items` cacheados en
+**El siguiente bloque grande**:
+
+- [ ] **Tools de write/exec (edit/write/bash) + permission flow**.
+      Es el complemento natural del read-only quartet que ya está
+      en `internal/tools/`. Necesita un protocolo nuevo
+      daemon→TUI→user para pedir aprobación antes de tocar disco
+      o ejecutar comandos. Sub-tasks:
+      - `permissions.Service` con `Request(ctx, action) → granted bool`
+      - SSE event nuevo `permission_request` (separado del flow del turn)
+      - Dialog en TUI que escucha y responde (allow once / allow session / deny)
+      - Cada tool write/exec gateway-ed con allowed-list de safe commands para bash
+
+**Polish que ayudaría:**
+
+- [ ] **Reload del journal en TUI**: los `Items` cacheados en
       `state.json` son la fuente de verdad para el render al reabrir.
       Falta reconciliar con `events.jsonl` cuando difieren (otro
-      cliente escribió mientras estábamos cerrados).
-- [ ] **Picker de conversaciones por agente**: la sidebar lista
-      sesiones locales pero no las conversaciones persistidas de un
-      agente. Útil para reabrir un chat archivado.
+      cliente escribió mientras estábamos cerrados). `GET
+      /conversations/{id}` ya existe; falta wire en TUI.
+- [ ] **Picker de conversaciones por agente** en la sidebar.
+      Hoy se ven sesiones locales pero no las convs persistidas
+      del agente. Útil para reabrir chats archivados.
+- [ ] **Rename de agente**: HTTP no lo expone porque el slug es
+      el directory name. Hoy: mover el folder a mano y reload.
 - [ ] **launchd / systemd**: sobrevivir reboot del host. Comandos
-      `sunny enable / disable`. Anotado como deuda en CLAUDE.md.
-- [ ] **Tools ejecutables**: skills declaradas en system prompt como
-      texto pero no invocables. MCP nativo o formato propio.
-- [ ] **Rename de agente**: HTTP no lo expone. Hoy: mover el folder a
-      mano y reload.
-- [ ] **Tests**: cero hoy (intencional). CI mínimo + integration
-      suite del daemon como red de seguridad antes del primer
-      refactor mayor.
+      `sunny enable` / `sunny disable`. Anotado como deuda en CLAUDE.md.
+- [ ] **Tests**: cero hoy (intencional). Mínimo deseable antes del
+      próximo refactor grande: workflow de CI que corra
+      `go vet ./... && go build ./... && go test ./...` en push,
+      más un integration test del daemon (start, /healthz, /agents,
+      POST /turn, stop).
+
+**Capacidades del agente:**
+
+- [ ] **Tools adicionales**: `download` (HTTP get), `fetch`
+      (HTML→md), MCP bridge. Todos pueden venir gradualmente
+      después del permission flow.
+- [ ] **Subagentes**: que un agente pueda llamar a otro como tool.
+      Útil para workflows multi-paso.
 
 ---
 

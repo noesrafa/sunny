@@ -10,7 +10,6 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/noesrafa/sunny/internal/session"
-	"github.com/noesrafa/sunny/internal/terminal"
 )
 
 func (m Model) View() tea.View {
@@ -25,27 +24,6 @@ func (m Model) View() tea.View {
 		v.SetContent(m.composeWithModal(base))
 	} else {
 		v.SetContent(base)
-		// In claude-session mode the textarea owns its own (virtual) cursor.
-		// In pane mode we project the embedded child's caret to absolute
-		// screen coordinates so the user sees a real terminal cursor.
-		if p := m.activePane(); p != nil {
-			cx, cy, vis := p.Cursor()
-			if vis {
-				// renderBase JoinVerticals (header, body, status). header is
-				// "" but `strings.Split("", "\n")` yields [""] — that
-				// becomes one blank row before the body. Account for it
-				// here so the caret lands on the same row as the cell
-				// the child terminal is rendering. The main column starts
-				// at x=mainPadLeft (the left gutter), so add that offset.
-				v.Cursor = tea.NewCursor(
-					mainPadLeft+cx,
-					headerHeight+cy,
-				)
-				v.Cursor.Color = colSecondary
-				v.Cursor.Shape = tea.CursorBlock
-				v.Cursor.Blink = true
-			}
-		}
 	}
 	return v
 }
@@ -108,7 +86,7 @@ func clampHeight(s string, maxLines int) string {
 }
 
 func (m Model) renderHeader() string {
-	// Header used to show "☀ sunnytui · <session title>" but the logo is
+	// Header used to show "☀ sunny · <session title>" but the logo is
 	// already in the sidebar and the title is in the session list — so we
 	// leave the header blank to avoid duplication. Keeping the function
 	// (returns "") so the layout math (headerHeight=1) stays consistent.
@@ -121,7 +99,7 @@ func (m Model) renderBody() string {
 		bodyH = 6
 	}
 	main := m.renderMain(bodyH)
-	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles, m.logoFrame, m.sysStats)
+	sidebar := renderSidebar(m.manager, bodyH, m.styles, m.logoFrame, m.sysStats)
 	// 3-col gap between main and sidebar — Crush-style breathing room, no
 	// vertical divider line. Sidebar sits on the RIGHT (Rafael's preference,
 	// keeps the chat anchored to the left edge where the eye lands first).
@@ -137,11 +115,6 @@ func (m Model) renderMain(height int) string {
 	// outerW is the full slot the main column occupies in the body row;
 	// inner content uses mainW and the PaddingLeft eats the gutter.
 	outerW := mainW + mainPadLeft
-
-	// Pane mode: full main column is the vt10x grid.
-	if p := m.activePane(); p != nil {
-		return lipgloss.NewStyle().Width(outerW).Height(height).PaddingLeft(mainPadLeft).Render(terminal.Render(p))
-	}
 
 	// Claude session mode: transcript + (gap) + input + hint. The blank
 	// rows between transcript and input give the assistant attribution

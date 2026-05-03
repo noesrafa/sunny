@@ -111,7 +111,7 @@ func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {
 	return strings.Join(rendered, "\n")
 }
 
-// shortenPath collapses /Users/me/.sunnytui/images/foo.png down to fit
+// shortenPath collapses /Users/me/.sunny/images/foo.png down to fit
 // `width`. Keeps the basename, replaces middle with "…" if too long.
 func shortenPath(p string, width int) string {
 	if width <= 0 || lipgloss.Width(p) <= width {

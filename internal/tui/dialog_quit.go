@@ -64,7 +64,7 @@ func (d *QuitDialog) View(width, height int) string {
 
 	var lines []string
 	lines = append(lines, title, "")
-	lines = append(lines, d.styles.AssistantText.Render("¿Salir de sunnytui?"), "")
+	lines = append(lines, d.styles.AssistantText.Render("¿Salir de sunny?"), "")
 
 	if d.anyThinking {
 		lines = append(lines, d.styles.DialogWarning.Render("⚠ hay sesiones aún pensando"))

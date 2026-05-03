@@ -21,24 +21,16 @@ func (m *Model) flushState() {
 	m.flushStateNow()
 }
 
-// flushStateNow snapshots EVERYTHING (sessions + panes + active tab) to
-// ~/.sunnytui/state.json. The body of what used to be saveState — kept
-// pointer-receiver because we briefly mutate the current session's Draft
-// to capture in-flight textarea content.
+// flushStateNow snapshots all sessions + active tab to ~/.sunny/state.json.
 func (m *Model) flushStateNow() {
 	if m.manager == nil {
 		return
 	}
-	// Capture the in-flight textarea content into the current session's draft
-	// so it survives across restarts.
-	if cur := m.manager.Current(); cur != nil && m.activeKind == activeClaude {
+	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
 	}
 	var sessions []state.SavedSession
 	for _, s := range m.manager.Sessions {
-		// Marshal the transcript so it survives restart. Errors here would
-		// only happen if a new Item type was added without a marshaller —
-		// log but don't drop the session metadata.
 		raw, mErr := session.MarshalItems(s.Items)
 		if mErr != nil {
 			m.logger.Warn("marshal items", "session", s.ID, "err", mErr)
@@ -60,39 +52,21 @@ func (m *Model) flushStateNow() {
 			Turns:     s.Turns,
 		})
 	}
-	var panes []state.SavedPane
-	if m.panes != nil {
-		for _, p := range m.panes.Panes {
-			panes = append(panes, state.SavedPane{
-				Title:   p.Title,
-				Command: p.Command,
-				Cwd:     p.Cwd,
-			})
-		}
-	}
-	kind := "claude"
-	idx := m.manager.Active
-	if m.activeKind == activePane && m.panes != nil {
-		kind = "pane"
-		idx = m.panes.Active
-	}
 	st := &state.State{
-		Sessions:   sessions,
-		Panes:      panes,
-		ActiveKind: kind,
-		ActiveIdx:  idx,
-		Theme:      m.themeID,
+		Sessions:  sessions,
+		ActiveIdx: m.manager.Active,
+		Theme:     m.themeID,
 	}
 	if err := state.Save(st); err != nil {
 		m.logger.Error("save state failed", "err", err)
 	} else {
-		m.logger.Info("state saved", "sessions", len(sessions), "panes", len(panes), "kind", kind, "idx", idx)
+		m.logger.Info("state saved", "sessions", len(sessions), "idx", m.manager.Active)
 	}
 }
 
 // pruneOrphanImages walks every session's transcript, collects the
 // image paths still referenced by past UserItems, and deletes any other
-// file under ~/.sunnytui/images/. Pending (unsent) attachments aren't
+// file under ~/.sunny/images/. Pending (unsent) attachments aren't
 // included because the app just started — there's nothing pending yet.
 // Best-effort; failures only get logged.
 func (m Model) pruneOrphanImages() {

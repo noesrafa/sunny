@@ -12,8 +12,6 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/ultraviolet v0.0.0-20260428153724-66037269d7be
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/creack/pty v1.1.24
-	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02
 	github.com/rivo/uniseg v0.4.7
 	gopkg.in/yaml.v3 v3.0.1
 )

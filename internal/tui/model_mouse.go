@@ -51,10 +51,6 @@ func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if m.overlay.HasOpen() {
 			return m, m.overlay.UpdateTop(mm), true
 		}
-		// Pane mode: let the wheel pass to the embedded child terminal.
-		if m.activeKind == activePane {
-			return m, nil, false
-		}
 		// Vertical wheel on the chat: scroll a few lines per tick.
 		step := 3
 		if mm.Button == tea.MouseWheelUp {
@@ -68,8 +64,8 @@ func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 	if !ok {
 		return m, nil, false
 	}
-	// Overlays and pane mode never get app-level drag-to-select.
-	if m.overlay.HasOpen() || m.activeKind == activePane {
+	// Overlays never get app-level drag-to-select.
+	if m.overlay.HasOpen() {
 		return m, nil, true
 	}
 	e := mm.Mouse()

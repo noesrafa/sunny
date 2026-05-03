@@ -59,7 +59,7 @@ func logoColorRamp() []color.Color {
 }
 
 // brandColorRamp returns a width-wide ramp used to paint the brand row
-// (sunnytui™ … vX.Y.Z) so it shares the same gradient as the SUNNY
+// (sunny™ … vX.Y.Z) so it shares the same gradient as the SUNNY
 // letters. Cached by (width, top, bot) — invalidates on resize and on
 // palette swap.
 func brandColorRamp(width int) []color.Color {
@@ -86,7 +86,7 @@ func brandColorRamp(width int) []color.Color {
 // Layout (unchanged):
 //
 //	╱╱╱╱╱╱╱╱…   ← top hatching
-//	sunnytui™ … v0.x.y
+//	sunny™ … v0.x.y
 //	█████ █ █ ███ █ █ █ █   ← SUNNY block letters
 //	╱╱╱╱╱╱╱╱…   ← bottom hatching
 func renderLogo(width int, s Styles, frame int) string {
@@ -102,7 +102,7 @@ func renderLogo(width int, s Styles, frame int) string {
 	}
 	padStr := strings.Repeat(" ", pad)
 
-	brandText := "sunnytui™"
+	brandText := "sunny™"
 	verText := "v" + Version
 	leftW := lipgloss.Width(brandText)
 	rightW := lipgloss.Width(verText)
@@ -181,7 +181,7 @@ func colorizeLetterRow(row string, cols []color.Color) string {
 // colorizeText paints each rune of text with ramp[startCol+i], inheriting
 // base (e.g. italic for the brand). Adjacent runes that share the same
 // ramp color get batched into a single Render to keep the escape soup
-// down. Assumes text is single-column-wide runes (true for "sunnytui™"
+// down. Assumes text is single-column-wide runes (true for "sunny™"
 // and "vX.Y.Z").
 func colorizeText(text string, ramp []color.Color, startCol int, base lipgloss.Style) string {
 	runes := []rune(text)

@@ -8,7 +8,7 @@
 //     command (see `sunnytui statusline-install` for the snippet).
 //  2. Each time Claude Code refreshes its statusline, it pipes a JSON
 //     payload to stdin of our subcommand. We persist it to
-//     ~/.sunnytui/usage-snapshot.json and print a one-line summary
+//     ~/.sunny/usage-snapshot.json and print a one-line summary
 //     (Claude Code displays whatever stdout we produce).
 //  3. The TUI sidebar reads that snapshot to draw the usage bars.
 //
@@ -64,7 +64,7 @@ func snapshotPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".sunnytui", "usage-snapshot.json"), nil
+	return filepath.Join(home, ".sunny", "usage-snapshot.json"), nil
 }
 
 // Write persists the payload bytes to disk. Called from the statusline

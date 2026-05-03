@@ -11,26 +11,10 @@ import (
 	"github.com/noesrafa/sunny/internal/sysstats"
 )
 
-// anyRunRunning is true while at least one registered run has its child
-// process alive. Used to keep the spinner tick chain alive so the logs
-// viewer refreshes in real time.
-func (m Model) anyRunRunning() bool {
-	if m.runs == nil {
-		return false
-	}
-	for _, r := range m.runs.All() {
-		if r.Running() {
-			return true
-		}
-	}
-	return false
-}
-
-// handleSpinnerTick keeps ticking while any session is thinking OR any run
-// is alive (so the logs viewer auto-tails) OR a modal that wants live data
-// is open.
+// handleSpinnerTick keeps ticking while any session is thinking OR a modal
+// that wants live data is open.
 func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
-	if !m.anyThinking() && !m.anyRunRunning() && !m.overlay.HasOpen() {
+	if !m.anyThinking() && !m.overlay.HasOpen() {
 		return m, nil
 	}
 	var cmd tea.Cmd

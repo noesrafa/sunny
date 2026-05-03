@@ -16,7 +16,7 @@ import (
 // and caps disk usage at ~2× this value.
 const maxLogBytes = 5 * 1024 * 1024 // 5 MB
 
-// Setup opens (or creates) ~/.sunnytui/sunnytui.log for append and returns a
+// Setup opens (or creates) ~/.sunny/sunnytui.log for append and returns a
 // configured logger plus an io.Closer for the underlying file. Failures fall
 // back to a logger writing to io.Discard so callers can keep going.
 //
@@ -28,11 +28,11 @@ func Setup(prefix string) (*log.Logger, io.Closer) {
 	if err != nil {
 		return Discard(prefix), noopCloser{}
 	}
-	dir := filepath.Join(home, ".sunnytui")
+	dir := filepath.Join(home, ".sunny")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Discard(prefix), noopCloser{}
 	}
-	logPath := filepath.Join(dir, "sunnytui.log")
+	logPath := filepath.Join(dir, "sunny.log")
 	rotateIfBig(logPath)
 	f, err := os.OpenFile(logPath,
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -81,7 +81,7 @@ func LogPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".sunnytui", "sunnytui.log")
+	return filepath.Join(home, ".sunny", "sunny.log")
 }
 
 // Discard returns a no-op logger that writes to io.Discard. Use it as a

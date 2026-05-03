@@ -12,16 +12,13 @@ import (
 
 	imgclip "github.com/noesrafa/sunny/internal/clipboard"
 	"github.com/noesrafa/sunny/internal/session"
-	"github.com/noesrafa/sunny/internal/terminal"
 )
 
-// updateKey is the tea.KeyMsg dispatcher: master shortcuts → pane-forwarding
-// → claude-session keys. Returns handled=true when the key was consumed; when
-// false, the dispatcher falls through to textarea/viewport so character input
+// updateKey is the tea.KeyMsg dispatcher: master shortcuts → session keys.
+// Returns handled=true when the key was consumed; when false, the
+// dispatcher falls through to textarea/viewport so character input
 // reaches the editor.
 func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
-	// MASTER shortcuts always take precedence — even when a pane is
-	// active they're how the user navigates back out / opens dialogs.
 	switch {
 	case key.Matches(msg, m.keymap.Quit):
 		return m, m.openQuitDialog(), true
@@ -33,11 +30,6 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, m.overlay.Open(NewMinigameDialog(m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
 		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)), true
-	case key.Matches(msg, m.keymap.Runs):
-		if m.runs == nil {
-			return m, nil, true
-		}
-		return m, tea.Batch(m.overlay.Open(NewRunsDialog(m.runs, m.styles)), m.spinner.Tick), true
 	case key.Matches(msg, m.keymap.NextSession):
 		m.cycleTab(1)
 		return m, nil, true
@@ -45,15 +37,6 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		m.cycleTab(-1)
 		return m, nil, true
 	case key.Matches(msg, m.keymap.CloseSession):
-		// Handled here (above the pane-forward block) so ctrl+w closes
-		// the active terminal pane instead of getting eaten by the shell
-		// inside it as a "delete word" keystroke. Panes close immediately;
-		// claude sessions go through a confirmation dialog so the user
-		// doesn't lose the transcript on a typo.
-		if m.activeKind == activePane {
-			m.handleCloseTab()
-			return m, nil, true
-		}
 		if cur := m.manager.Current(); cur != nil {
 			body := []string{"¿Cerrar la sesión \"" + cur.Title + "\"?"}
 			if cur.State == session.StateThinking {
@@ -64,24 +47,6 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			return m, m.overlay.Open(d), true
 		}
 		return m, nil, true
-	}
-
-	// If a terminal pane has focus, all other keys are forwarded to its
-	// PTY (translated to xterm bytes). The pane-only Esc/Ctrl+W still
-	// fall through master switch above.
-	if p := m.activePane(); p != nil {
-		if pk, ok := msg.(tea.KeyPressMsg); ok {
-			if b := terminal.KeyToBytes(pk); b != nil {
-				if err := p.Send(b); err != nil {
-					m.logger.Debug("pane send failed", "err", err, "pane", p.ID)
-				}
-			}
-		}
-		return m, nil, true
-	}
-
-	// Below: claude-session-only keys.
-	switch {
 	case key.Matches(msg, m.keymap.ClearOrCancel):
 		m.handleClearOrCancel()
 		return m, nil, true
@@ -103,7 +68,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.NewConv):
 		if cur := m.manager.Current(); cur != nil {
 			body := []string{
-				"¿Empezar una nueva conversación de claude?",
+				"¿Empezar una nueva conversación?",
 				"",
 				"Se mantendrá la pestaña (" + cur.Title + ") en " + prettyPath(cur.Cwd) + ",",
 				"pero el transcript actual se va a descartar.",
@@ -122,10 +87,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-// handlePaste runs the image-aware paste flow: image clipboard first
-// (saves + drops "[Image #N]" marker), then falls back to plain text via
-// atotto when there's no image. Triggered by Ctrl+V — terminals don't
-// forward Cmd+V as bracketed paste when the clipboard is image-only.
+// handlePaste runs the image-aware paste flow: image clipboard first, then
+// falls back to plain text via atotto when there's no image.
 func (m *Model) handlePaste() {
 	if m.tryImagePaste("") {
 		return
@@ -145,11 +108,8 @@ func (m *Model) handlePaste() {
 	m.layout()
 }
 
-// handleClearOrCancel: ctrl+c cancels the in-flight claude turn (SIGINT)
-// without touching the textarea draft or attachments — the user pressed
-// it because they changed their mind about the prompt and wants to type
-// a new one. When the session is idle, ctrl+c is a no-op (the user has
-// to clear the textarea explicitly to avoid losing typed text by mistake).
+// handleClearOrCancel: ctrl+c cancels the in-flight turn without touching
+// the textarea draft. When the session is idle, ctrl+c is a no-op.
 func (m *Model) handleClearOrCancel() {
 	cur := m.manager.Current()
 	if cur == nil || cur.State != session.StateThinking {
@@ -161,16 +121,6 @@ func (m *Model) handleClearOrCancel() {
 }
 
 func (m *Model) handleCloseTab() {
-	if m.activeKind == activePane && m.panes != nil {
-		if p := m.panes.Current(); p != nil {
-			m.panes.Close(p.ID)
-			if m.panes.Len() == 0 {
-				m.activeKind = activeClaude
-			}
-		}
-		m.saveState()
-		return
-	}
 	cur := m.manager.Current()
 	if cur != nil {
 		m.manager.Close(cur.ID)
@@ -186,14 +136,8 @@ func (m *Model) handleCloseTab() {
 	m.saveState()
 }
 
-// syncAttachmentMarkers reconciles the textarea against pending
-// attachments. If the user damaged a marker (e.g., backspaced over the
-// closing bracket of "[Image #2]"), we drop that attachment from the
-// pending list, scrub any orphan fragment from the textarea, and delete
-// the file from disk — it has never been sent and will never be sent.
-//
-// Called after every textarea-mutating keystroke. Cheap: O(pending
-// attachments × textarea length).
+// syncAttachmentMarkers reconciles the textarea against pending attachments.
+// If the user damaged a marker, we drop that attachment + clean the text.
 func (m *Model) syncAttachmentMarkers() {
 	cur := m.manager.Current()
 	if cur == nil || len(cur.Attachments) == 0 {
@@ -208,19 +152,12 @@ func (m *Model) syncAttachmentMarkers() {
 			kept = append(kept, a)
 			continue
 		}
-		// Marker broken. Strip whatever fragment of it is still hanging
-		// around so the textarea doesn't show "[Image #2" forever, then
-		// delete the unused file.
 		fragment := regexp.MustCompile(fmt.Sprintf(`\[?Image\s*#?\s*%d\b\]?`, a.Index))
 		cleaned = fragment.ReplaceAllString(cleaned, "")
 		if err := os.Remove(a.Path); err != nil && !os.IsNotExist(err) {
 			m.logger.Debug("remove orphan image", "path", a.Path, "err", err)
 		}
-		m.logger.Info("attachment dropped",
-			"session", cur.ID,
-			"idx", a.Index,
-			"path", a.Path,
-		)
+		m.logger.Info("attachment dropped", "session", cur.ID, "idx", a.Index)
 	}
 	cur.Attachments = kept
 	if cleaned != text {
@@ -231,14 +168,7 @@ func (m *Model) syncAttachmentMarkers() {
 }
 
 // tryImagePaste peeks at the system clipboard for image data. If found, it
-// saves the bytes under ~/.sunnytui/images/, registers an attachment on
-// the active session, and inserts the matching "[Image #N]" marker at the
-// textarea cursor. Any text that came along in the bracketed paste is
-// inserted right after the marker so users don't lose accompanying text.
-//
-// Returns true when the message has been fully handled (the caller MUST
-// skip forwarding the original PasteMsg to the textarea, or the binary
-// junk will land as garbled glyphs).
+// saves the bytes, registers an attachment, and inserts a marker.
 func (m *Model) tryImagePaste(text string) bool {
 	cur := m.manager.Current()
 	if cur == nil {
@@ -265,12 +195,7 @@ func (m *Model) tryImagePaste(text string) bool {
 	m.textarea.InsertString(insert)
 	cur.Draft = m.textarea.Value()
 	m.layout()
-	m.logger.Info("image pasted",
-		"session", cur.ID,
-		"idx", idx,
-		"path", path,
-		"bytes", len(data),
-	)
+	m.logger.Info("image pasted", "session", cur.ID, "idx", idx, "path", path, "bytes", len(data))
 	return true
 }
 
@@ -280,8 +205,7 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 		return m, nil
 	}
 	value := m.textarea.Value()
-	// Crush pattern: trailing backslash escapes Enter to a newline (so users
-	// can compose multiline messages without Shift+Enter).
+	// Trailing backslash escapes Enter to a newline.
 	if before, ok := strings.CutSuffix(value, "\\"); ok {
 		m.textarea.SetValue(before + "\n")
 		m.textarea.CursorEnd()
@@ -293,25 +217,6 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// If the previous stream died (typically because the user hit ctrl+c
-	// during a turn and claude exited instead of cleanly aborting), the
-	// session lives on in the manager with Stream == nil. Spawn a fresh
-	// claude --resume <session_id> so the conversation continues without
-	// the user having to recreate the tab.
-	var resumed tea.Cmd
-	if cur.Stream == nil {
-		if err := cur.Resume(m.ctx, m.skipPerms); err != nil {
-			cur.LastErr = err
-			cur.State = session.StateError
-			m.logger.Error("session resume failed", "err", err, "session", cur.ID)
-			m.refreshViewport()
-			return m, nil
-		}
-		// Re-arm the events reader against the new stream so its emitted
-		// events (and eventual close) get routed back into Update.
-		resumed = waitForSession(cur)
-	}
-
 	m.textarea.Reset()
 	cur.Draft = ""
 	if err := cur.Send(text); err != nil {
@@ -320,8 +225,5 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	m.layout()
 	m.refreshViewport()
 	m.chat.ScrollToBottom()
-	// Kick off the spinner tick chain and the morphing-string anim — both
-	// die when the session goes idle. The logo tick lives independently
-	// (always running) so we don't need to resurrect it here.
-	return m, tea.Batch(resumed, m.spinner.Tick, m.thinkingAnim.Step())
+	return m, m.thinkingAnim.Step()
 }

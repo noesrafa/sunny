@@ -15,18 +15,8 @@ import (
 
 	"github.com/noesrafa/sunny/internal/anim"
 	"github.com/noesrafa/sunny/internal/list"
-	"github.com/noesrafa/sunny/internal/runs"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/sysstats"
-	"github.com/noesrafa/sunny/internal/terminal"
-)
-
-// activeKind identifies which tab type is currently in focus.
-type activeKind int
-
-const (
-	activeClaude activeKind = iota
-	activePane
 )
 
 type Model struct {
@@ -40,9 +30,6 @@ type Model struct {
 	logger *log.Logger
 
 	manager       *session.Manager
-	runs          *runs.Manager
-	panes         *terminal.Manager
-	activeKind    activeKind
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -90,11 +77,6 @@ type Options struct {
 	DefaultModel             string
 	DefaultEffort            string
 	DangerousSkipPermissions bool
-	Runs                     *runs.Manager
-	Panes                    *terminal.Manager
-	// InitialActiveKind ("claude" | "pane") restores which kind of tab was
-	// focused at the previous shutdown. Empty defaults to claude.
-	InitialActiveKind string
 	// InitialTheme is the persisted theme ID from state.json. Empty falls
 	// back to the default (Themes[0]).
 	InitialTheme string
@@ -190,19 +172,12 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		defEffort = "max"
 	}
 
-	startKind := activeClaude
-	if opts.InitialActiveKind == "pane" && opts.Panes != nil && opts.Panes.Len() > 0 {
-		startKind = activePane
-	}
 	return Model{
 		ctx:           ctx,
 		styles:        st,
 		keymap:        km,
 		logger:        logger,
 		manager:       mgr,
-		runs:          opts.Runs,
-		panes:         opts.Panes,
-		activeKind:    startKind,
 		overlay:       &Overlay{},
 		chat:          chatVP,
 		textarea:      ta,
@@ -232,31 +207,7 @@ func (m Model) Init() tea.Cmd {
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
-	for _, s := range m.manager.Sessions {
-		cmds = append(cmds, waitForSession(s))
-	}
-	// CRITICAL: restored panes (loaded from ~/.sunnytui/panes.json) need
-	// their PTY-read loop kicked off too — otherwise the buffer fills, the
-	// child process blocks on write, and the pane appears dead.
-	if m.panes != nil {
-		for _, p := range m.panes.Panes {
-			cmds = append(cmds, readPaneCmd(p))
-		}
-	}
 	return tea.Batch(cmds...)
-}
-
-func waitForSession(sess *session.Session) tea.Cmd {
-	id := sess.ID
-	stream := sess.Stream
-	events := stream.Events()
-	return func() tea.Msg {
-		ev, ok := <-events
-		if !ok {
-			return sessionClosedMsg{SessionID: id, Stream: stream}
-		}
-		return sessionEventMsg{SessionID: id, Stream: stream, Event: ev}
-	}
 }
 
 func (m Model) anyThinking() bool {
@@ -268,37 +219,7 @@ func (m Model) anyThinking() bool {
 	return false
 }
 
-// paneSize returns the (cols, rows) the active pane should occupy in the
-// main column when it is the visible tab.
-func (m Model) paneSize() (int, int) {
-	w := m.width - sidebarWidth - sidebarGap - mainPadLeft
-	if w < 20 {
-		w = 20
-	}
-	h := m.height - statusHeight
-	if h < 5 {
-		h = 5
-	}
-	return w, h
-}
-
-// readPaneCmd reads one chunk from the pane's PTY (which feeds vt10x
-// internally) and returns a paneOutputMsg so the Update loop re-renders.
-// On EOF / error, returns paneClosedMsg.
-func readPaneCmd(p *terminal.Pane) tea.Cmd {
-	id := p.ID
-	return func() tea.Msg {
-		buf := make([]byte, 4096)
-		_, err := p.ReadOnce(buf)
-		if err != nil {
-			return paneClosedMsg{PaneID: id, Err: err}
-		}
-		return paneOutputMsg{PaneID: id}
-	}
-}
-
-// collectTiles assembles the picker entries: every claude session, then
-// every terminal pane. Marks the currently-focused one.
+// collectTiles assembles the picker entries: one per session.
 func (m Model) collectTiles() []TileItem {
 	var items []TileItem
 	for i, s := range m.manager.Sessions {
@@ -307,98 +228,30 @@ func (m Model) collectTiles() []TileItem {
 			Index:  i,
 			Label:  s.Title,
 			Detail: s.Cwd,
-			Active: m.activeKind == activeClaude && i == m.manager.Active,
+			Active: i == m.manager.Active,
 		})
-	}
-	if m.panes != nil {
-		for i, p := range m.panes.Panes {
-			items = append(items, TileItem{
-				Kind:   "pane",
-				Index:  i,
-				Label:  p.Title,
-				Detail: p.Command,
-				Active: m.activeKind == activePane && i == m.panes.Active,
-			})
-		}
 	}
 	return items
 }
 
-// activePane returns the currently focused pane, or nil if no pane tab is
-// active.
-func (m Model) activePane() *terminal.Pane {
-	if m.activeKind != activePane || m.panes == nil {
-		return nil
-	}
-	return m.panes.Current()
-}
-
-// cycleTab moves the focus to the next/prev tab in the unified flat list of
-// (claude sessions + panes). Wraps. Resizes the destination pane on entry.
+// cycleTab moves focus to the next/prev session. Wraps.
 func (m *Model) cycleTab(by int) {
-	clCount := m.manager.Len()
-	pnCount := 0
-	if m.panes != nil {
-		pnCount = m.panes.Len()
-	}
-	total := clCount + pnCount
+	total := m.manager.Len()
 	if total == 0 {
 		return
 	}
-	cur := m.flatTabIndex()
-	next := ((cur+by)%total + total) % total
-	m.setFlatTabIndex(next)
-	// On switching to a pane, ensure it matches current main dims and the
-	// child got SIGWINCH if anything changed.
-	if p := m.activePane(); p != nil {
-		w, h := m.paneSize()
-		p.Resize(w, h)
+	if cur := m.manager.Current(); cur != nil {
+		cur.Draft = m.textarea.Value()
 	}
-	// On switching to a claude session, restore its draft.
-	if m.activeKind == activeClaude {
-		if cur := m.manager.Current(); cur != nil {
-			m.textarea.SetValue(cur.Draft)
-			m.textarea.CursorEnd()
-			m.layout()
-			m.refreshViewport()
-			m.chat.ScrollToBottom()
-		}
+	next := ((m.manager.Active+by)%total + total) % total
+	m.manager.Active = next
+	if cur := m.manager.Current(); cur != nil {
+		m.textarea.SetValue(cur.Draft)
+		m.textarea.CursorEnd()
+		m.layout()
+		m.refreshViewport()
+		m.chat.ScrollToBottom()
 	}
-}
-
-func (m Model) flatTabIndex() int {
-	if m.activeKind == activeClaude {
-		return m.manager.Active
-	}
-	if m.panes == nil {
-		return 0
-	}
-	return m.manager.Len() + m.panes.Active
-}
-
-func (m *Model) setFlatTabIndex(i int) {
-	clCount := m.manager.Len()
-	if i < clCount {
-		// Save current draft before moving away from a claude session.
-		if m.activeKind == activeClaude {
-			if cur := m.manager.Current(); cur != nil {
-				cur.Draft = m.textarea.Value()
-			}
-		}
-		m.activeKind = activeClaude
-		m.manager.Active = i
-		return
-	}
-	if m.panes == nil {
-		return
-	}
-	if m.activeKind == activeClaude {
-		if cur := m.manager.Current(); cur != nil {
-			cur.Draft = m.textarea.Value()
-		}
-	}
-	m.activeKind = activePane
-	m.panes.SetActive(i - clCount)
 }
 
 // Update is the Bubble Tea entry point. It dispatches into focused
@@ -445,28 +298,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m = next
 		cmds = append(cmds, cmd)
-	case sessionEventMsg:
-		cmds = append(cmds, m.handleSessionEvent(msg))
-	case sessionClosedMsg:
-		// Drop close events from streams the session has already swapped out
-		// (e.g. after Ctrl+R reset the claude process). Otherwise the old
-		// goroutine would fire sessionClosedMsg when its channel drains and
-		// we'd incorrectly tear down the freshly-restarted session.
-		sess := m.manager.ByID(msg.SessionID)
-		if sess == nil || (msg.Stream != nil && sess.Stream != msg.Stream) {
-			break
-		}
-		// Stream died (claude exited from our SIGINT, EOF, or crash). Don't
-		// remove the session from the manager — only ctrl+w deletes a tab.
-		// We null out Stream so handleSend knows to Resume on the next turn.
-		// State drops to Idle (or stays Error if the stream errored out)
-		// so the textarea isn't locked.
-		sess.Stream = nil
-		if sess.State == session.StateThinking {
-			sess.State = session.StateIdle
-		}
-		m.refreshViewport()
-		m.saveState()
 	case spinner.TickMsg:
 		next, cmd := m.handleSpinnerTick(msg)
 		m = next
@@ -553,44 +384,7 @@ func (m *Model) applyResize(msg tea.WindowSizeMsg) {
 	m.md = nil
 	m.mdCache = nil
 	m.refreshViewport()
-	// Resize the active pane (if any) so the embedded child gets SIGWINCH.
-	if p := m.activePane(); p != nil {
-		w, h := m.paneSize()
-		p.Resize(w, h)
-	}
 	m.ready = true
-}
-
-func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
-	sess := m.manager.ByID(msg.SessionID)
-	if sess == nil {
-		return nil
-	}
-	// Drop events from streams the session has already swapped out (Ctrl+R
-	// reset). The new stream's waitForSession will keep the chain alive.
-	if msg.Stream != nil && sess.Stream != msg.Stream {
-		return nil
-	}
-	wasThinking := sess.State == session.StateThinking
-	sess.HandleEvent(msg.Event)
-	turnFinished := wasThinking && sess.State != session.StateThinking
-	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
-		m.refreshViewport()
-		// Only auto-scroll on the turn-complete edge — during streaming
-		// we leave the scroll alone so the user can read prior history
-		// without being yanked back to the bottom on every delta. The
-		// `end` key (or any scroll-to-bottom action they take) gets them
-		// to the latest content when they want it.
-		if turnFinished {
-			m.chat.ScrollToBottom()
-		}
-	}
-	// Persist after each turn so a crash mid-session doesn't lose the
-	// transcript. The turn boundary is the state.Idle transition.
-	if wasThinking && sess.State == session.StateIdle {
-		m.saveState()
-	}
-	return waitForSession(sess)
 }
 
 func (m *Model) layout() {
@@ -670,7 +464,7 @@ func (m *Model) welcomeText() string {
 		return bullet + " " + s.StatusKey.Render(k) + " " + s.Hint.Render(d)
 	}
 	return strings.Join([]string{
-		s.HeaderLogo.Render("☀ sunnytui"),
+		s.HeaderLogo.Render("☀ sunny"),
 		"",
 		s.AssistantText.Render("escribe un mensaje para empezar a chatear con claude code"),
 		"",
@@ -681,7 +475,7 @@ func (m *Model) welcomeText() string {
 		row("tab   ", "cambia entre sesiones"),
 		row("ctrl+w", "cierra la sesión actual"),
 		row("ctrl+c", "cancela el turno actual (no toca el input)"),
-		row("esc   ", "sale de sunnytui"),
+		row("esc   ", "sale de sunny"),
 		"",
 		row("ctrl+j / alt+enter", "nueva línea"),
 		row("ctrl+←/→", "saltar palabras"),

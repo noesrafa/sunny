@@ -12,18 +12,18 @@ import (
 
 // ErrAlreadyRunning is returned by Acquire when another sunnytui process
 // already holds the lock. The error message includes the live PID.
-var ErrAlreadyRunning = errors.New("sunnytui already running")
+var ErrAlreadyRunning = errors.New("sunny already running")
 
 // Lock is a held single-instance lock. Call Release on shutdown to free it.
 type Lock struct{ path string }
 
-// lockPath returns ~/.sunnytui/sunny.lock.
+// lockPath returns ~/.sunny/sunny.lock.
 func lockPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".sunnytui", "sunny.lock"), nil
+	return filepath.Join(home, ".sunny", "sunny.lock"), nil
 }
 
 // Acquire takes the global single-instance lock. Returns ErrAlreadyRunning

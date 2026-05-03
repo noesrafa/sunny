@@ -25,7 +25,7 @@ func ReadImage() (data []byte, mediaType string, ok bool, err error) {
 }
 
 func readDarwin() ([]byte, string, bool, error) {
-	tmp, err := os.MkdirTemp("", "sunnytui-clip-")
+	tmp, err := os.MkdirTemp("", "sunny-clip-")
 	if err != nil {
 		return nil, "", false, err
 	}
@@ -72,7 +72,7 @@ func ImagesDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".sunnytui", "images"), nil
+	return filepath.Join(home, ".sunny", "images"), nil
 }
 
 // PruneOrphans removes files in ImagesDir that aren't in `referenced`.
@@ -107,7 +107,7 @@ func PruneOrphans(referenced map[string]bool) (int, error) {
 	return removed, nil
 }
 
-// SaveImage persists clipboard image bytes under ~/.sunnytui/images/ and
+// SaveImage persists clipboard image bytes under ~/.sunny/images/ and
 // returns the absolute path. Filename includes a timestamp so multiple
 // pastes within the same session don't collide.
 func SaveImage(data []byte, mediaType string) (string, error) {

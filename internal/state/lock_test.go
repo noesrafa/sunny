@@ -13,7 +13,7 @@ import (
 func TestAcquire(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	lockFile := filepath.Join(tmp, ".sunnytui", "sunny.lock")
+	lockFile := filepath.Join(tmp, ".sunny", "sunny.lock")
 
 	// 1. Fresh: no file, Acquire succeeds and writes our PID.
 	l, err := Acquire()

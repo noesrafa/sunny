@@ -7,11 +7,8 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/noesrafa/sunny/internal/claude"
-	"github.com/noesrafa/sunny/internal/runs"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/sysstats"
-	"github.com/noesrafa/sunny/internal/terminal"
 	"github.com/noesrafa/sunny/internal/usage"
 )
 
@@ -23,19 +20,11 @@ const (
 	sidebarGap   = 3 // empty cols between main column and sidebar
 )
 
-func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
+func renderSidebar(mgr *session.Manager, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s, logoFrame), ""}
-	rows = append(rows, renderSessionsSection(mgr, activePaneActive, innerW, s)...)
-	if section := renderTermsSection(paneMgr, activePaneActive, innerW, s); len(section) > 0 {
-		rows = append(rows, "")
-		rows = append(rows, section...)
-	}
-	if section := renderRunsSection(runMgr, innerW, s); len(section) > 0 {
-		rows = append(rows, "")
-		rows = append(rows, section...)
-	}
+	rows = append(rows, renderSessionsSection(mgr, innerW, s)...)
 	if section := renderUsageSection(mgr, sys, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
@@ -60,7 +49,7 @@ func sectionHeader(title string, innerW int, s Styles) []string {
 	}
 }
 
-func renderSessionsSection(mgr *session.Manager, activePaneActive bool, innerW int, s Styles) []string {
+func renderSessionsSection(mgr *session.Manager, innerW int, s Styles) []string {
 	rows := sectionHeader("sessions", innerW, s)
 	if len(mgr.Sessions) == 0 {
 		return append(rows, s.Hint.Render("(none)"))
@@ -69,18 +58,7 @@ func renderSessionsSection(mgr *session.Manager, activePaneActive bool, innerW i
 		if i > 0 {
 			rows = append(rows, "")
 		}
-		rows = append(rows, renderSidebarRow(sess, !activePaneActive && i == mgr.Active, s)...)
-	}
-	return rows
-}
-
-func renderTermsSection(paneMgr *terminal.Manager, activePaneActive bool, innerW int, s Styles) []string {
-	if paneMgr == nil || paneMgr.Len() == 0 {
-		return nil
-	}
-	rows := sectionHeader("terminals", innerW, s)
-	for i, p := range paneMgr.Panes {
-		rows = append(rows, renderPaneRow(p, activePaneActive && i == paneMgr.Active, s))
+		rows = append(rows, renderSidebarRow(sess, i == mgr.Active, s)...)
 	}
 	return rows
 }
@@ -114,27 +92,7 @@ func buildSysStatsRows(st sysstats.Stats, innerW int, s Styles) []string {
 	}
 }
 
-// renderRunsSection always shows once a manager exists, so the "press ctrl+u"
-// hint surface is discoverable even with zero registered runs.
-func renderRunsSection(runMgr *runs.Manager, innerW int, s Styles) []string {
-	if runMgr == nil {
-		return nil
-	}
-	rows := sectionHeader("runs", innerW, s)
-	all := runMgr.All()
-	if len(all) == 0 {
-		return append(rows, s.Hint.Render("(none)"))
-	}
-	for _, r := range all {
-		rows = append(rows, renderRunSummary(r, innerW, s))
-	}
-	return rows
-}
-
 func renderShortcutsSection(innerW int, s Styles) []string {
-	// Whole row in `colMuted` (no bold, no italic) so the shortcuts read
-	// as a quiet reference panel instead of competing for attention with
-	// the active session/run/usage rows above.
 	g := s.HeaderDim
 	return []string{
 		s.HeaderSep.Render(strings.Repeat("─", innerW)),
@@ -142,7 +100,6 @@ func renderShortcutsSection(innerW int, s Styles) []string {
 		g.Render("ctrl+r  rename"),
 		g.Render("ctrl+l  reset chat"),
 		g.Render("ctrl+d  diff"),
-		g.Render("ctrl+u  runs"),
 		g.Render("ctrl+k  switch"),
 		g.Render("ctrl+s  settings"),
 		g.Render("end     bottom"),
@@ -223,47 +180,8 @@ func buildUsageWidget(mgr *session.Manager, innerW int, s Styles) []string {
 			return rows
 		}
 	}
-	if cur := mgr.Current(); cur != nil && cur.RateLimit != nil {
-		return renderRateLimitFallback(cur.RateLimit, innerW, s)
-	}
+	_ = mgr
 	return nil
-}
-
-// renderRateLimitFallback paints the in-stream rate_limit_event in the
-// same compact one-line style as the snapshot bars. We don't have a
-// percentage in this path, so the bar is replaced by a status pill +
-// reset hint:
-//
-//	5h ● ok · 55m
-//	7d ● ok · 156h
-func renderRateLimitFallback(rl *claude.RateLimitInfo, innerW int, s Styles) []string {
-	label := "5h"
-	switch rl.RateLimitType {
-	case "weekly":
-		label = "7d"
-	case "five_hour", "":
-		label = "5h"
-	}
-	dot := s.StatusIdle.Render("●")
-	statusText := "ok"
-	if rl.Status != "" && rl.Status != "allowed" {
-		dot = s.StatusBusy.Render("●")
-		statusText = rl.Status
-	}
-	parts := []string{
-		s.HeaderDim.Render(fmt.Sprintf("%-3s", label)),
-		dot,
-		s.HeaderDim.Render(statusText),
-	}
-	if rs := resetHint(rl.ResetsAt); rs != "" {
-		parts = append(parts, s.Hint.Render("· "+rs))
-	}
-	rows := []string{strings.Join(parts, " ")}
-	if rl.IsUsingOverage {
-		rows = append(rows, "    "+s.StatusBusy.Render("⚠ overage"))
-	}
-	_ = innerW // reserved for future bar-fitting; not used in fallback today
-	return rows
 }
 
 // barRamp caches the per-cell Blend1D ramp used by renderProgressBar.
@@ -394,48 +312,6 @@ func shortDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%ds", int(d.Seconds()))
-}
-
-func renderPaneRow(p *terminal.Pane, active bool, s Styles) string {
-	var icon string
-	if p.Alive() {
-		icon = s.StatusIdle.Render("▶")
-	} else {
-		icon = s.Hint.Render("□")
-	}
-	indicator := " "
-	titleStyle := s.AssistantText
-	if active {
-		indicator = s.UserPrompt.Render("▎")
-		titleStyle = s.AssistantText.Bold(true)
-	}
-	name := p.Title
-	maxLen := sidebarWidth - 8
-	if len(name) > maxLen && maxLen > 0 {
-		name = name[:maxLen-1] + "…"
-	}
-	return indicator + icon + " " + titleStyle.Render(name)
-}
-
-func renderRunSummary(r *runs.Run, innerW int, s Styles) string {
-	var icon string
-	switch r.Status {
-	case runs.StatusRunning:
-		icon = s.StatusIdle.Render("●")
-	case runs.StatusCrashed:
-		icon = s.ResultError.Render("✗")
-	default:
-		icon = s.Hint.Render("○")
-	}
-	name := r.Name
-	maxName := innerW - 6
-	if maxName < 4 {
-		maxName = 4
-	}
-	if len(name) > maxName {
-		name = name[:maxName-1] + "…"
-	}
-	return " " + icon + " " + s.AssistantText.Render(name)
 }
 
 func stateBadge(st session.State, s Styles) string {

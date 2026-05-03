@@ -17,11 +17,9 @@ import (
 	"github.com/noesrafa/sunny/internal/bootstrap"
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/logger"
-	"github.com/noesrafa/sunny/internal/runs"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/store"
-	"github.com/noesrafa/sunny/internal/terminal"
 	"github.com/noesrafa/sunny/internal/tui"
 )
 
@@ -105,29 +103,17 @@ func openTUI(args []string) error {
 	first, err := session.New(ctx, cwd, session.Options{
 		Logger: lg,
 		Title:  "sunny",
-		// Idle: stream does not spawn a claude CLI subprocess. Send returns
-		// claude.ErrIdle until the daemon's chat endpoint is wired up.
-		Idle: true,
 	})
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
 	mgr.Add(first)
 
-	paneMgr := terminal.NewManager()
-	defer paneMgr.CloseAll()
-
-	runMgr := &runs.Manager{}
-	defer runMgr.StopAll()
-
 	root := tui.NewModel(ctx, mgr, cwd, tui.Options{
 		Logger:                   lg,
 		DefaultModel:             first.Model,
 		DefaultEffort:            first.Effort,
 		DangerousSkipPermissions: true,
-		Runs:                     runMgr,
-		Panes:                    paneMgr,
-		InitialActiveKind:        "claude",
 	})
 	return root.Run(ctx)
 }

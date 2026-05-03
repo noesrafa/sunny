@@ -1,5 +1,5 @@
 // Package state persists/restores sunnytui's between-runs UI state in a
-// single ~/.sunnytui/state.json. Holds:
+// single ~/.sunny/state.json. Holds:
 //
 //   - Open Claude sessions (title, cwd, model, effort, draft, claude
 //     session_id used for `--resume`)
@@ -60,7 +60,7 @@ func path() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".sunnytui", "state.json"), nil
+	return filepath.Join(home, ".sunny", "state.json"), nil
 }
 
 // Load returns the persisted state, or a zero-value State with no error if
@@ -81,7 +81,7 @@ func Load() (*State, error) {
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return nil, err
 	}
-	// Backfill from legacy ~/.sunnytui/panes.json if v1 state doesn't have
+	// Backfill from legacy ~/.sunny/panes.json if v1 state doesn't have
 	// panes yet. After first Save() the legacy file becomes redundant.
 	if len(st.Panes) == 0 {
 		if legacy, lerr := loadLegacyPanes(); lerr == nil && len(legacy) > 0 {
@@ -123,14 +123,14 @@ func Path() string {
 	return p
 }
 
-// loadLegacyPanes reads the old standalone ~/.sunnytui/panes.json so users
+// loadLegacyPanes reads the old standalone ~/.sunny/panes.json so users
 // who had panes from a previous version don't lose them on upgrade.
 func loadLegacyPanes() ([]SavedPane, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(filepath.Join(home, ".sunnytui", "panes.json"))
+	raw, err := os.ReadFile(filepath.Join(home, ".sunny", "panes.json"))
 	if err != nil {
 		return nil, err
 	}

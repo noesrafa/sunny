@@ -9,6 +9,12 @@
 // Go SDK) — the surface is tiny, the SDK adds a dep + version
 // coupling, and our streaming/event mapping is provider-specific
 // anyway.
+//
+// What's NOT here yet:
+//   - Tool calling (`tools` request field, `message.tool_calls`
+//     response field). Sketch in CLAUDE.md; lands when sunny gets a
+//     real tool-execution layer.
+//   - `format` (JSON schema enforcement) — pair feature with tools.
 package ollama
 
 import (
@@ -21,12 +27,20 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/secrets"
 )
 
-const defaultBaseURL = "https://ollama.com"
+const (
+	defaultBaseURL = "https://ollama.com"
+	// defaultKeepAlive tells Ollama Cloud to keep the model warm for
+	// 10 minutes after the turn. Cold-loads on cloud are seconds-to-
+	// tens-of-seconds; this saves the second-turn cost in interactive
+	// chats while not hoarding GPU.
+	defaultKeepAlive = "10m"
+)
 
 // Driver streams Ollama Cloud completions. Holds the secrets store so
 // api_key + base_url can be rotated without restart.
@@ -45,34 +59,51 @@ func New(s *secrets.Store) (*Driver, error) {
 	if probe := s.GetOrEnv("ollama", "api_key", "OLLAMA_API_KEY"); probe == "" {
 		return nil, errors.New("ollama: api_key not configured (set via `sunny secrets ollama set api_key`)")
 	}
-	return &Driver{secrets: s, hc: &http.Client{}}, nil
+	// Streaming has no body timeout (turns can be long), but tune the
+	// transport so a wedged TCP connection doesn't hang forever. Cloud
+	// occasionally stalls during model load; ResponseHeaderTimeout
+	// catches that without affecting the streaming body.
+	transport := &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	return &Driver{secrets: s, hc: &http.Client{Transport: transport}}, nil
 }
 
 func (d *Driver) Name() string { return "ollama" }
 
-// chatRequest is what /api/chat expects. We send `stream: true` always
-// (engine expects deltas).
+// chatRequest is what /api/chat expects. We always set stream:true
+// (engine consumes deltas) and pass keep_alive so cloud models stay
+// warm between turns. Think tracks the engine's AdaptiveThinking
+// flag — Ollama emits content into message.thinking when this is on
+// for reasoning-capable models.
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model     string        `json:"model"`
+	Messages  []chatMessage `json:"messages"`
+	Stream    bool          `json:"stream"`
+	KeepAlive string        `json:"keep_alive,omitempty"`
+	Think     bool          `json:"think,omitempty"`
 }
 
+// chatMessage covers user/assistant/system + the optional thinking
+// channel that reasoning models (gpt-oss, deepseek-r1, qwen3 thinking
+// variants) emit on Ollama Cloud.
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role     string `json:"role"`
+	Content  string `json:"content"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
-// chatResponse is one JSONL line. For streamed turns, every line carries
-// a partial delta in `message.content` until `done: true`, where usage
-// counters land.
+// chatResponse is one JSONL line. For streamed turns, every line
+// carries a partial delta in `message.content` (and optionally
+// `message.thinking`) until `done: true`, where usage counters land.
 type chatResponse struct {
 	Model     string       `json:"model"`
 	CreatedAt string       `json:"created_at"`
 	Message   *chatMessage `json:"message,omitempty"`
 	Done      bool         `json:"done"`
-	// Usage counters appear on the final `done: true` line. Names mirror
-	// Ollama's wire format; we map them onto provider.Done.
+	// Usage counters appear on the final `done: true` line. Names
+	// mirror Ollama's wire format; we map them onto provider.Done.
 	PromptEvalCount int64  `json:"prompt_eval_count,omitempty"`
 	EvalCount       int64  `json:"eval_count,omitempty"`
 	DoneReason      string `json:"done_reason,omitempty"`
@@ -96,7 +127,8 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 
 	// Flatten system blocks into a single leading system message —
 	// Ollama doesn't have a separate "system" param like Anthropic;
-	// it expects role=system inside messages[].
+	// it expects role=system inside messages[]. CacheControl on the
+	// SystemBlocks is ignored: cloud doesn't expose a cache surface.
 	msgs := make([]chatMessage, 0, len(req.Messages)+1)
 	if sys := joinSystem(req.System); sys != "" {
 		msgs = append(msgs, chatMessage{Role: "system", Content: sys})
@@ -110,7 +142,13 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		}
 	}
 
-	body, err := json.Marshal(chatRequest{Model: model, Messages: msgs, Stream: true})
+	body, err := json.Marshal(chatRequest{
+		Model:     model,
+		Messages:  msgs,
+		Stream:    true,
+		KeepAlive: defaultKeepAlive,
+		Think:     req.AdaptiveThinking,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -150,8 +188,13 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 				out <- provider.Error{Err: fmt.Errorf("ollama: bad JSONL: %w", err)}
 				return
 			}
-			if ev.Message != nil && ev.Message.Content != "" {
-				out <- provider.TextDelta{Text: ev.Message.Content}
+			if ev.Message != nil {
+				if ev.Message.Thinking != "" {
+					out <- provider.ThinkingDelta{Text: ev.Message.Thinking}
+				}
+				if ev.Message.Content != "" {
+					out <- provider.TextDelta{Text: ev.Message.Content}
+				}
 			}
 			if ev.Done {
 				lastUsage = ev

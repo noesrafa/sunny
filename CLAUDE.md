@@ -158,6 +158,40 @@ ollama:
   opens a paste form. Values are not masked — paste verification
   matters more than shoulder-surfing in a single-user CLI app.
 
+## Ollama Cloud provider notes
+
+Driver at `internal/provider/ollama/`. We POST `/api/chat` with bearer
+auth (the `Authorization: Bearer $api_key` header). Streaming is
+JSONL — one JSON object per line, terminated by `{"done": true, ...}`.
+
+Wire shape sent:
+```json
+{"model":"…","messages":[…],"stream":true,"keep_alive":"10m","think":bool}
+```
+
+- `keep_alive`: 10 minutes default. Cold-loads on cloud are
+  expensive; this saves the second-turn cost in interactive chats.
+- `think`: mirrors the engine's `AdaptiveThinking`. Reasoning models
+  (gpt-oss, deepseek-r1, qwen3-thinking) emit content into
+  `message.thinking` when this is on; the driver maps it to
+  `provider.ThinkingDelta`.
+- HTTP transport sets `ResponseHeaderTimeout=30s` and
+  `IdleConnTimeout=90s`. Body has no timeout (streaming).
+
+Not yet implemented (sketches, not roadmap commitments):
+- **Tool calling.** Ollama's `tools` request field + `message.tool_calls`
+  response field. Lands when sunny gets a real tool-execution layer
+  (today skills are passive prompt content).
+- **Structured output (`format: "json"` or schema).** Pair feature
+  with tools.
+- **Per-request `options`** (temperature, top_p, num_predict).
+  `provider.Request` doesn't carry these today.
+
+Contrast with crush: they use Ollama via OpenAI-compat at `/v1/chat/
+completions` (which gets them tool calls "for free" via fantasy's
+abstraction). We use the native `/api/chat` because thinking deltas
+and Ollama-specific knobs come through cleaner.
+
 ## Provider routing
 
 `agent.yaml` carries an optional `provider:` field. When set, turns

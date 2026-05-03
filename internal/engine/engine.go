@@ -23,10 +23,21 @@ type Engine struct {
 
 func New(p provider.Provider) *Engine { return &Engine{provider: p} }
 
+// TurnOptions are per-call knobs that travel with the turn but aren't on
+// the agent definition.
+type TurnOptions struct {
+	// ProviderState is opaque token from the previous turn's Done event.
+	// Empty for first turn.
+	ProviderState string
+	// Cwd that file/bash tools should resolve against. Empty falls back
+	// to the user's home dir.
+	Cwd string
+}
+
 // Turn runs one user→assistant exchange against the given agent. messages
 // must include the new user turn at the end; prior turns supply
 // conversation history.
-func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provider.Message) (<-chan provider.Event, error) {
+func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provider.Message, opts TurnOptions) (<-chan provider.Event, error) {
 	if e.provider == nil {
 		return nil, fmt.Errorf("engine: no provider configured")
 	}
@@ -43,13 +54,23 @@ func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provid
 	}
 
 	req := provider.Request{
-		Model:     agent.Config.Model,
-		MaxTokens: 16000,
-		System:    system,
-		Messages:  messages,
-		Effort:    "high",
+		Model:         agent.Config.Model,
+		MaxTokens:     16000,
+		System:        system,
+		Messages:      messages,
+		Effort:        "high",
+		Cwd:           opts.Cwd,
+		ProviderState: opts.ProviderState,
 	}
 	return e.provider.Stream(ctx, req)
+}
+
+// ProviderName surfaces the active provider for logging / UI.
+func (e *Engine) ProviderName() string {
+	if e == nil || e.provider == nil {
+		return ""
+	}
+	return e.provider.Name()
 }
 
 // BuildSystemPrompt assembles the system prompt from the agent's on-disk

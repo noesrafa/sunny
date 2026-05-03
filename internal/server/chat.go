@@ -5,17 +5,29 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/provider"
 )
+
+func engineTurnOpts(req turnRequest) engine.TurnOptions {
+	return engine.TurnOptions{
+		ProviderState: req.ProviderState,
+		Cwd:           req.Cwd,
+	}
+}
 
 // turnRequest is the body of POST /agents/{slug}/turn.
 //
 // The client sends the full conversation transcript on every turn —
 // stateless on the server side. Skills, knowledge, and the system prompt
 // come from the agent's on-disk definition; the client only carries the
-// user/assistant exchange.
+// user/assistant exchange and an optional provider_state token (returned
+// in the previous turn's done event) so the claude-code provider can
+// --resume the same CLI session.
 type turnRequest struct {
-	Messages []provider.Message `json:"messages"`
+	Messages      []provider.Message `json:"messages"`
+	ProviderState string             `json:"provider_state,omitempty"`
+	Cwd           string             `json:"cwd,omitempty"`
 }
 
 // postTurn streams one assistant turn back as Server-Sent Events.
@@ -76,7 +88,7 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	events, err := s.engine.Turn(r.Context(), a, req.Messages)
+	events, err := s.engine.Turn(r.Context(), a, req.Messages, engineTurnOpts(req))
 	if err != nil {
 		writeSSEError(w, flusher, err)
 		return
@@ -88,14 +100,28 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 			writeSSE(w, flusher, "text_delta", map[string]string{"text": v.Text})
 		case provider.ThinkingDelta:
 			writeSSE(w, flusher, "thinking_delta", map[string]string{"text": v.Text})
+		case provider.ToolUse:
+			writeSSE(w, flusher, "tool_use", map[string]string{
+				"id":    v.ID,
+				"name":  v.Name,
+				"input": v.Input,
+			})
+		case provider.ToolResult:
+			writeSSE(w, flusher, "tool_result", map[string]any{
+				"tool_use_id": v.ToolUseID,
+				"content":     v.Content,
+				"is_error":    v.IsError,
+			})
 		case provider.Done:
 			writeSSE(w, flusher, "done", map[string]any{
-				"stop_reason": v.StopReason,
+				"stop_reason":    v.StopReason,
+				"provider_state": v.ProviderState,
+				"cost_usd":       v.CostUSD,
 				"usage": map[string]int64{
-					"input_tokens":           v.InputTokens,
-					"output_tokens":          v.OutputTokens,
-					"cache_creation_tokens":  v.CacheCreationTokens,
-					"cache_read_tokens":      v.CacheReadTokens,
+					"input_tokens":          v.InputTokens,
+					"output_tokens":         v.OutputTokens,
+					"cache_creation_tokens": v.CacheCreationTokens,
+					"cache_read_tokens":     v.CacheReadTokens,
 				},
 			})
 		case provider.Error:

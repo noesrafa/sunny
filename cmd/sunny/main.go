@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,7 +19,9 @@ import (
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/logger"
+	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
+	"github.com/noesrafa/sunny/internal/provider/claudecode"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/store"
@@ -87,8 +90,32 @@ common flags:
 func openTUI(args []string) error {
 	fs := flag.NewFlagSet("tui", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:7777", "daemon address to connect to")
+	root := fs.String("root", defaultRoot(), "sunny runtime directory")
+	noAutoStart := fs.Bool("no-auto-start", false, "skip auto-starting the daemon if it isn't running")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// Auto-start the daemon when it isn't already running. The TUI is
+	// useless without a daemon; making the user remember `sunny start`
+	// before `sunny` is the wrong default. --no-auto-start opts out for
+	// users who want the legacy behavior or who manage the daemon
+	// out-of-band (systemd, launchd, etc.).
+	if !*noAutoStart {
+		paths := lifecycle.PathsFor(*root)
+		alive := false
+		if s, err := paths.LoadState(); err == nil && lifecycle.IsAlive(s.PID) {
+			alive = true
+			*addr = s.Addr // honor whatever addr the running daemon is on
+		}
+		if !alive {
+			fmt.Fprintln(os.Stderr, "starting daemon…")
+			s, err := startDaemon(*addr, *root, true)
+			if err != nil {
+				return fmt.Errorf("auto-start: %w", err)
+			}
+			*addr = s.Addr
+		}
 	}
 	_ = *addr // TODO: pass to TUI options once chat is wired to the daemon
 
@@ -111,13 +138,13 @@ func openTUI(args []string) error {
 	}
 	mgr.Add(first)
 
-	root := tui.NewModel(ctx, mgr, cwd, tui.Options{
+	model := tui.NewModel(ctx, mgr, cwd, tui.Options{
 		Logger:                   lg,
 		DefaultModel:             first.Model,
 		DefaultEffort:            first.Effort,
 		DangerousSkipPermissions: true,
 	})
-	return root.Run(ctx)
+	return model.Run(ctx)
 }
 
 func defaultRoot() string {
@@ -127,6 +154,65 @@ func defaultRoot() string {
 	}
 	return filepath.Join(home, ".sunny")
 }
+
+// buildEngine picks a provider with this precedence:
+//
+//  1. SUNNY_PROVIDER env var if set ("claude-code" | "anthropic" | "off"),
+//  2. claude-code if the `claude` CLI is on PATH,
+//  3. anthropic API if ANTHROPIC_API_KEY is set,
+//  4. nothing — daemon serves read-only endpoints; chat returns 503.
+//
+// Order matters: claude-code wins by default because it inherits the
+// user's claude.ai login (no separate API key) AND brings claude code's
+// full toolset. The Anthropic API path needs a key but is the right
+// choice for headless / cheaper runs.
+func buildEngine(log *slog.Logger) *engine.Engine {
+	choice := strings.ToLower(strings.TrimSpace(os.Getenv("SUNNY_PROVIDER")))
+	switch choice {
+	case "off":
+		log.Info("engine disabled", "reason", "SUNNY_PROVIDER=off")
+		return nil
+	case "claude-code", "claude_code", "claudecode":
+		drv, err := claudecode.New()
+		if err != nil {
+			log.Warn("engine disabled", "reason", err.Error(), "wanted", choice)
+			return nil
+		}
+		log.Info("engine ready", "provider", drv.Name(), "source", "SUNNY_PROVIDER")
+		return engine.New(drv)
+	case "anthropic":
+		drv, err := anthropic.New("")
+		if err != nil {
+			log.Warn("engine disabled", "reason", err.Error(), "wanted", choice)
+			return nil
+		}
+		log.Info("engine ready", "provider", drv.Name(), "source", "SUNNY_PROVIDER")
+		return engine.New(drv)
+	}
+
+	// Auto: prefer claude-code, then anthropic.
+	if drv, err := claudecode.New(); err == nil {
+		log.Info("engine ready", "provider", drv.Name(), "source", "auto-detected")
+		return engine.New(drv)
+	} else {
+		log.Debug("claude-code unavailable", "reason", err.Error())
+	}
+	if drv, err := anthropic.New(""); err == nil {
+		log.Info("engine ready", "provider", drv.Name(), "source", "auto-detected")
+		return engine.New(drv)
+	} else {
+		log.Warn("engine disabled",
+			"reason", "no provider available — install Claude Code or set ANTHROPIC_API_KEY")
+		log.Debug("anthropic unavailable", "reason", err.Error())
+	}
+	return nil
+}
+
+// quiet compile-time check that both drivers satisfy provider.Provider.
+var (
+	_ provider.Provider = (*anthropic.Driver)(nil)
+	_ provider.Provider = (*claudecode.Driver)(nil)
+)
 
 // serve runs the daemon in the foreground. Used by `start` (re-exec'd as a
 // detached child) and directly when debugging.
@@ -156,16 +242,10 @@ func serve(args []string) error {
 	}
 	log.Info("store loaded", "agents", len(st.Agents()))
 
-	// Engine is optional: if ANTHROPIC_API_KEY is missing the daemon still
-	// boots and serves read-only endpoints; POST /agents/{slug}/turn
-	// returns 503 until a key is set.
-	var eng *engine.Engine
-	if drv, derr := anthropic.New(""); derr == nil {
-		eng = engine.New(drv)
-		log.Info("engine ready", "provider", drv.Name())
-	} else {
-		log.Warn("engine disabled", "reason", derr.Error())
-	}
+	// Engine is optional: the daemon still boots and serves read-only
+	// endpoints when no provider can be initialized; chat returns 503
+	// until one is available.
+	eng := buildEngine(log)
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -202,57 +282,71 @@ func start(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if _, err := startDaemon(*addr, *root, false); err != nil {
+		return err
+	}
+	return nil
+}
 
-	paths := lifecycle.PathsFor(*root)
+// startDaemon spawns the daemon detached and waits for healthz. When
+// ifNotRunning is true and the daemon is already alive at the recorded
+// addr, it returns the existing state without spawning. Used by `sunny
+// start` (ifNotRunning=false → errors on duplicate) and the no-arg
+// auto-start flow (ifNotRunning=true → silently reuses).
+func startDaemon(addr, root string, ifNotRunning bool) (*lifecycle.State, error) {
+	paths := lifecycle.PathsFor(root)
 
 	if s, err := paths.LoadState(); err == nil {
 		if lifecycle.IsAlive(s.PID) {
-			return fmt.Errorf("already running (pid=%d, addr=%s) — `sunny stop` first", s.PID, s.Addr)
+			if ifNotRunning {
+				return s, nil
+			}
+			return nil, fmt.Errorf("already running (pid=%d, addr=%s) — `sunny stop` first", s.PID, s.Addr)
 		}
 		_ = paths.ClearState()
 	}
 
 	if err := os.MkdirAll(paths.Run, 0o755); err != nil {
-		return fmt.Errorf("create run dir: %w", err)
+		return nil, fmt.Errorf("create run dir: %w", err)
 	}
 
 	logFile, err := os.OpenFile(paths.Log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
-		return fmt.Errorf("open log: %w", err)
+		return nil, fmt.Errorf("open log: %w", err)
 	}
 	defer logFile.Close()
 
 	binary, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("resolve self: %w", err)
+		return nil, fmt.Errorf("resolve self: %w", err)
 	}
 
-	cmd := exec.Command(binary, "serve", "--addr", *addr, "--root", *root)
+	cmd := exec.Command(binary, "serve", "--addr", addr, "--root", root)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("spawn: %w", err)
+		return nil, fmt.Errorf("spawn: %w", err)
 	}
 
 	state := &lifecycle.State{
 		PID:       cmd.Process.Pid,
-		Addr:      *addr,
+		Addr:      addr,
 		StartedAt: time.Now(),
 		Binary:    binary,
 	}
 	if err := paths.SaveState(state); err != nil {
 		_ = cmd.Process.Kill()
-		return fmt.Errorf("save state: %w", err)
+		return nil, fmt.Errorf("save state: %w", err)
 	}
 
-	if err := waitHealthy(*addr, 3*time.Second); err != nil {
+	if err := waitHealthy(addr, 3*time.Second); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: started but not yet healthy: %v\n", err)
 		fmt.Fprintf(os.Stderr, "         tail %s for details\n", paths.Log)
 	}
 
-	fmt.Printf("started  pid=%d  addr=%s  log=%s\n", state.PID, *addr, paths.Log)
-	return nil
+	fmt.Printf("started  pid=%d  addr=%s  log=%s\n", state.PID, addr, paths.Log)
+	return state, nil
 }
 
 func stop(args []string) error {

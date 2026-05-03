@@ -34,6 +34,15 @@ type Request struct {
 	// thinking content is also requested as "summarized" so the engine
 	// can surface it.
 	AdaptiveThinking bool
+	// Cwd is the working directory the provider should execute in. Used by
+	// the claude-code provider to scope file/bash tools; the anthropic
+	// provider ignores it.
+	Cwd string
+	// ProviderState is opaque token returned by a previous Done event,
+	// passed back so the provider can resume conversation context.
+	// claude-code: --resume <session_id>. anthropic API: ignored (the
+	// caller carries the full Messages slice instead).
+	ProviderState string
 }
 
 // Event is one item in the streamed response.
@@ -52,12 +61,38 @@ func (ThinkingDelta) providerEvent() {}
 
 // Done marks the end of the assistant turn.
 type Done struct {
-	StopReason            string
-	InputTokens           int64
-	OutputTokens          int64
-	CacheCreationTokens   int64
-	CacheReadTokens       int64
+	StopReason          string
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	// ProviderState is the token the caller should pass on the next Turn
+	// to continue this conversation. Empty when the provider is stateless.
+	ProviderState string
+	// CostUSD is the wire-reported cost of the turn (claude-code only;
+	// anthropic API does not surface it directly).
+	CostUSD float64
 }
+
+// ToolUse is emitted when the provider's underlying engine starts a tool
+// call. The claude-code provider surfaces these for visibility; the
+// anthropic API provider does not yet (tools land in v0.4).
+type ToolUse struct {
+	ID    string
+	Name  string
+	Input string // serialized JSON of the input
+}
+
+func (ToolUse) providerEvent() {}
+
+// ToolResult is emitted when a tool call finishes.
+type ToolResult struct {
+	ToolUseID string
+	Content   string
+	IsError   bool
+}
+
+func (ToolResult) providerEvent() {}
 
 func (Done) providerEvent() {}
 

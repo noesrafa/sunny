@@ -273,7 +273,7 @@ func withWidth(ctx RenderContext, w int) RenderContext {
 }
 
 // chatItemID composes a stable id for a session item at index idx in a
-// session — uses session.RemoteID + idx so wrapper reuse works across rebuilds.
+// session — uses session.ID + idx so wrapper reuse works across rebuilds.
 func chatItemID(sessionID string, idx int) string {
 	return fmt.Sprintf("%s:%d", sessionID, idx)
 }

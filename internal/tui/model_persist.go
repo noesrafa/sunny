@@ -46,7 +46,7 @@ func (m *Model) flushStateNow() {
 			Model:     s.Model,
 			Effort:    eff,
 			Draft:     s.Draft,
-			RemoteID:  s.RemoteID,
+			ConvID:    s.ConvID,
 			Items:     raw,
 			TotalCost: s.TotalCost,
 			Turns:     s.Turns,

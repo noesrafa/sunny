@@ -1,4 +1,5 @@
-// Package server exposes a small read-only HTTP API for introspecting the store.
+// Package server exposes the daemon's HTTP API: read-only metadata over
+// the agent store, plus per-conversation chat turns over SSE.
 package server
 
 import (
@@ -10,24 +11,41 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/store"
 )
 
-// New builds the daemon's HTTP handler. token is the bearer token clients
-// must send in `Authorization: Bearer <token>`; only /healthz is exempt
-// (so external probes can verify liveness without credentials). Empty
-// token disables auth — useful for tests, never for production.
-func New(s *store.Store, eng *engine.Engine, log *slog.Logger, token string) http.Handler {
-	srv := &server{store: s, engine: eng, log: log}
+// Options bundles everything New needs. Grouping these keeps the
+// constructor stable as we add subsystems.
+type Options struct {
+	Store         *store.Store
+	Conversations *conversation.Store
+	Engine        *engine.Engine
+	Log           *slog.Logger
+	// Token is the bearer credential clients must send. Empty disables
+	// auth (test/dev only).
+	Token string
+}
+
+// New builds the daemon's HTTP handler.
+//
+// Auth: every route requires `Authorization: Bearer <token>` except
+// /healthz (so liveness probes work without credentials).
+func New(opts Options) http.Handler {
+	srv := &server{store: opts.Store, conv: opts.Conversations, engine: opts.Engine, log: opts.Log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /agents", srv.listAgents)
 	mux.HandleFunc("GET /agents/{slug}", srv.getAgent)
 	mux.HandleFunc("GET /agents/{slug}/skills/{name}", srv.getSkill)
 	mux.HandleFunc("GET /agents/{slug}/knowledge/{file...}", srv.getKnowledge)
-	mux.HandleFunc("POST /agents/{slug}/turn", srv.postTurn)
-	return logging(log, requireBearer(token, mux))
+	mux.HandleFunc("GET /agents/{slug}/conversations", srv.listConversations)
+	mux.HandleFunc("POST /agents/{slug}/conversations", srv.createConversation)
+	mux.HandleFunc("GET /agents/{slug}/conversations/{id}", srv.getConversation)
+	mux.HandleFunc("DELETE /agents/{slug}/conversations/{id}", srv.deleteConversation)
+	mux.HandleFunc("POST /agents/{slug}/conversations/{id}/turn", srv.postTurn)
+	return logging(opts.Log, requireBearer(opts.Token, mux))
 }
 
 // requireBearer enforces `Authorization: Bearer <token>` on every route
@@ -54,6 +72,7 @@ func requireBearer(token string, h http.Handler) http.Handler {
 
 type server struct {
 	store  *store.Store
+	conv   *conversation.Store
 	engine *engine.Engine
 	log    *slog.Logger
 }

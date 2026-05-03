@@ -112,7 +112,7 @@ func (s State) String() string {
 
 type Session struct {
 	ID        string // local UI id
-	RemoteID  string // engine-assigned conversation id (set by /chat once it lands)
+	ConvID    string // server-assigned conversation id (~/.sunny/agents/<slug>/conversations/<id>/)
 	Cwd       string
 	Title     string
 	Model     string
@@ -179,9 +179,12 @@ type Options struct {
 	Model                    string
 	Effort                   string
 	DangerousSkipPermissions bool
-	ResumeID                 string // engine conversation id to resume
-	Title                    string
-	Draft                    string
+	// ConvID, when non-empty, restores a session bound to an existing
+	// server-side conversation. SendBegin reuses it instead of creating
+	// a new one. Empty on fresh sessions.
+	ConvID string
+	Title  string
+	Draft  string
 
 	// State-restore extras. Only consumed when reopening a previously-open
 	// session — fresh sessions leave them zero.
@@ -215,7 +218,7 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 		Effort:    opts.Effort,
 		Branch:    gitBranch(cwd),
 		Changes:   gitChangeStats(cwd),
-		RemoteID:  opts.ResumeID,
+		ConvID:    opts.ConvID,
 		Draft:     opts.Draft,
 		Items:     opts.Items,
 		TotalCost: opts.TotalCost,
@@ -259,18 +262,26 @@ func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, e
 		return nil, ErrSessionBusy
 	}
 
-	// Build wire messages from local transcript. We send all user/
-	// assistant text turns; tool blocks are claude-internal and the daemon
-	// rebuilds them via --resume. ProviderState (set on the second turn
-	// onward) is what actually gives claude its context — this list is
-	// just the conversation surface.
+	// Lazily create the server-side conversation on first send. Subsequent
+	// turns reuse the same ConvID. Server tracks claude-code's
+	// ProviderState in meta.json so we don't carry it on the wire.
+	if s.ConvID == "" {
+		meta, err := s.c.CreateConversation(ctx, s.agentSlug, s.Title, s.Model)
+		if err != nil {
+			return nil, fmt.Errorf("create conversation: %w", err)
+		}
+		s.ConvID = meta.ID
+		if s.logger != nil {
+			s.logger.Debug("conversation created", "session", s.ID, "conv_id", s.ConvID)
+		}
+	}
+
 	wire := buildWireMessages(s.Items, text)
 
 	turnCtx, cancel := context.WithCancel(ctx)
-	stream, err := s.c.Turn(turnCtx, s.agentSlug, client.TurnRequest{
-		Messages:      wire,
-		ProviderState: s.RemoteID,
-		Cwd:           s.Cwd,
+	stream, err := s.c.Turn(turnCtx, s.agentSlug, s.ConvID, client.TurnRequest{
+		Messages: wire,
+		Cwd:      s.Cwd,
 	})
 	if err != nil {
 		cancel()
@@ -286,7 +297,7 @@ func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, e
 	s.streamCancel = cancel
 
 	if s.logger != nil {
-		s.logger.Debug("turn started", "session", s.ID, "remote_id", s.RemoteID)
+		s.logger.Debug("turn started", "session", s.ID, "conv_id", s.ConvID)
 	}
 	return stream, nil
 }
@@ -323,7 +334,6 @@ func (s *Session) ApplyEvent(ev client.Event) (terminal bool) {
 			CostUSD:    e.CostUSD,
 			NumTurns:   1,
 		})
-		s.RemoteID = e.ProviderState
 		s.TotalCost += e.CostUSD
 		s.Turns++
 		s.State = StateIdle

@@ -68,6 +68,28 @@ survive the daemon restarting under it.
   by checking for `~/.sunny/agents/` (the real "fresh install"
   marker). Once seeded, the directory belongs to the user.
 
+## Conversation persistence
+
+Every chat lives under its agent:
+
+```
+~/.sunny/agents/<slug>/conversations/<conv_id>/
+  meta.json     — title, timestamps, msg_count, model, provider_state
+  events.jsonl  — append-only journal (user, text_delta, thinking_delta,
+                  tool_use, tool_result, done, error, cancelled)
+```
+
+- `conv_id` shape: `conv_<unix_ms>_<8hex>` — sortable by creation time,
+  collision-resistant.
+- Journal is the truth; `meta.json` is a rollup for cheap listing.
+- `provider_state` (claude-code's `--resume` session id) lives in
+  `meta.json` so it survives daemon restarts. The wire protocol no
+  longer carries it; clients only send `messages[]` + `cwd`.
+- Deleting a conversation moves the directory to `~/.sunny/.trash/`.
+  No automatic emptying — the user controls the trash.
+- The TUI lazily creates a server-side conversation on the first user
+  message of a session and reuses the id for subsequent turns.
+
 ## Auth contract
 
 - `~/.sunny/token` (32 random bytes, base64url, mode 0600) is generated

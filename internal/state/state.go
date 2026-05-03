@@ -1,12 +1,16 @@
-// Package state persists/restores sunnytui's between-runs UI state in a
+// Package state persists/restores the TUI's between-runs UI state in a
 // single ~/.sunny/state.json. Holds:
 //
-//   - Open Claude sessions (title, cwd, model, effort, draft, claude
-//     session_id used for `--resume`)
+//   - Open chat sessions (title, cwd, model, effort, draft, conv_id
+//     pointing at the server-side conversation that owns the journal)
 //   - Open terminal panes (title, command, cwd)
 //   - Which tab was active (kind + index)
+//   - Selected theme
 //
-// Runs and favorites live in their own files (different concerns).
+// The TUI is the source of truth for *layout* (which sessions are
+// open in tabs, which is active). The daemon is the source of truth
+// for the *content* of those sessions (transcripts persisted under
+// agents/<slug>/conversations/<id>/).
 package state
 
 import (
@@ -15,19 +19,26 @@ import (
 	"path/filepath"
 )
 
-const Version = 3 // bumped when Items (transcript persistence) was added
+const Version = 4 // bumped when remote_id became conv_id (server-side conversations)
 
 type SavedSession struct {
-	Title    string `json:"title"`
-	Cwd      string `json:"cwd"`
-	Model    string `json:"model,omitempty"`
-	Effort   string `json:"effort,omitempty"`
-	Draft    string `json:"draft,omitempty"`
-	RemoteID string `json:"remote_id,omitempty"` // claude session_id, used with --resume
+	Title  string `json:"title"`
+	Cwd    string `json:"cwd"`
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	Draft  string `json:"draft,omitempty"`
+	// ConvID points at ~/.sunny/agents/<slug>/conversations/<id>/ which
+	// owns the persistent transcript. Empty for sessions that haven't
+	// sent any message yet.
+	ConvID string `json:"conv_id,omitempty"`
 
 	// Items is the JSON-encoded transcript for this session
 	// (session.MarshalItems / UnmarshalItems). Stored as raw bytes so the
 	// state package stays decoupled from the session item types.
+	//
+	// This is a UI-side cache so the chat re-renders immediately on TUI
+	// restart, before any GET /conversations/{id} round-trip. The journal
+	// on disk is canonical; if it disagrees, the journal wins on reload.
 	Items json.RawMessage `json:"items,omitempty"`
 
 	// Cumulative cost + turn counter, persisted so the sidebar stays

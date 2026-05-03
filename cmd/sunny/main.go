@@ -17,6 +17,7 @@ import (
 
 	"github.com/noesrafa/sunny/internal/auth"
 	"github.com/noesrafa/sunny/internal/bootstrap"
+	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/logger"
@@ -266,10 +267,17 @@ func serve(args []string) error {
 	// endpoints when no provider can be initialized; chat returns 503
 	// until one is available.
 	eng := buildEngine(log)
+	convs := conversation.NewStore(*root)
 
 	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           server.New(st, eng, log, tok),
+		Addr: *addr,
+		Handler: server.New(server.Options{
+			Store:         st,
+			Conversations: convs,
+			Engine:        eng,
+			Log:           log,
+			Token:         tok,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

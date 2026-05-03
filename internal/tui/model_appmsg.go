@@ -38,7 +38,7 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		cur.Items = nil
 		cur.State = session.StateIdle
 		cur.LastErr = nil
-		cur.RemoteID = ""
+		cur.ConvID = "" // detach from prior conversation; next send creates a new one
 		cur.Turns = 0
 		cur.TotalCost = 0
 		m.textarea.Reset()

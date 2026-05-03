@@ -42,9 +42,14 @@ type Stream struct {
 
 func NewStream(ctx context.Context, opts StreamOpts) (*Stream, error) {
 	if opts.Idle {
-		closed := make(chan Event)
-		close(closed)
-		return &Stream{events: closed, idle: true, closed: true}, nil
+		// Idle streams never emit events. The channel must NOT be closed —
+		// the TUI's waitForSession reads from this channel and treats a close
+		// as "subprocess died", which would null out s.Stream and cause the
+		// next Send to spawn a real claude process via Resume(). Returning a
+		// blocked-forever channel keeps Stream alive so SendBlocks can return
+		// ErrIdle on every turn.
+		blocked := make(chan Event)
+		return &Stream{events: blocked, idle: true}, nil
 	}
 	args := []string{
 		"-p",

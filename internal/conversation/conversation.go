@@ -162,8 +162,9 @@ func (s *Store) Get(agentSlug, convID string) (*Meta, []Event, error) {
 	return m, events, nil
 }
 
-// Delete moves a conversation directory to ~/.sunny/.trash/. Idempotent
-// for missing conversations (no-op).
+// Delete archives a conversation directory under ~/.sunny/.archive/.
+// Idempotent for missing conversations (no-op). Restoration is manual:
+// move the timestamped folder back into the agent's conversations/ dir.
 func (s *Store) Delete(agentSlug, convID string) error {
 	dir, err := s.requireConv(agentSlug, convID)
 	if err != nil {
@@ -172,12 +173,12 @@ func (s *Store) Delete(agentSlug, convID string) error {
 		}
 		return err
 	}
-	trashDir := filepath.Join(s.root, ".trash")
-	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+	archiveDir := filepath.Join(s.root, ".archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 		return err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
-	target := filepath.Join(trashDir, fmt.Sprintf("%s__%s__%s", agentSlug, convID, stamp))
+	target := filepath.Join(archiveDir, fmt.Sprintf("%s__%s__%s", agentSlug, convID, stamp))
 	return os.Rename(dir, target)
 }
 

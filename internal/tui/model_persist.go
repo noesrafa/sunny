@@ -46,6 +46,7 @@ func (m *Model) flushStateNow() {
 			Model:     s.Model,
 			Effort:    eff,
 			Draft:     s.Draft,
+			AgentSlug: s.AgentSlug(),
 			ConvID:    s.ConvID,
 			Items:     raw,
 			TotalCost: s.TotalCost,
@@ -53,9 +54,10 @@ func (m *Model) flushStateNow() {
 		})
 	}
 	st := &state.State{
-		Sessions:  sessions,
-		ActiveIdx: m.manager.Active,
-		Theme:     m.themeID,
+		Sessions:   sessions,
+		ActiveIdx:  m.manager.Active,
+		ActiveKind: "claude",
+		Theme:      m.themeID,
 	}
 	if err := state.Save(st); err != nil {
 		m.logger.Error("save state failed", "err", err)

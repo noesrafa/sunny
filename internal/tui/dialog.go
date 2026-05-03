@@ -91,11 +91,13 @@ func (o *Overlay) RefreshBgIsLight(bgIsLight bool) {
 // CloseDialogMsg dismisses the top dialog.
 type CloseDialogMsg struct{}
 
-// CreateSessionMsg requests the root model to spawn a new session at cwd.
+// CreateSessionMsg requests the root model to spawn a new session at cwd
+// bound to AgentSlug. AgentSlug empty falls back to the model's default.
 type CreateSessionMsg struct {
-	Cwd    string
-	Model  string
-	Effort string
+	Cwd       string
+	Model     string
+	Effort    string
+	AgentSlug string
 }
 
 // RenameSessionMsg requests the root model to rename the current session.

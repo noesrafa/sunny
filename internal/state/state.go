@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 )
 
-const Version = 4 // bumped when remote_id became conv_id (server-side conversations)
+const Version = 5 // bumped when AgentSlug was added (multi-agent sessions)
 
 type SavedSession struct {
 	Title  string `json:"title"`
@@ -27,6 +27,9 @@ type SavedSession struct {
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`
 	Draft  string `json:"draft,omitempty"`
+	// AgentSlug binds the session to one agent in ~/.sunny/agents/.
+	// Empty (legacy state files) restores as "sunny".
+	AgentSlug string `json:"agent_slug,omitempty"`
 	// ConvID points at ~/.sunny/agents/<slug>/conversations/<id>/ which
 	// owns the persistent transcript. Empty for sessions that haven't
 	// sent any message yet.

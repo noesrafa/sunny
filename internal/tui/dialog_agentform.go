@@ -27,7 +27,8 @@ const (
 // AgentFormDialog is the create/edit form for an agent.
 //
 // Modes:
-//   - editSlug == "" → create mode. Slug input is editable.
+//   - editSlug == "" → create mode. Slug input is editable AND
+//     auto-derived from Name until the user touches it.
 //   - editSlug != "" → edit mode. Slug is read-only; prompt is fetched
 //     async via GetAgent (AgentSummary doesn't carry it).
 type AgentFormDialog struct {
@@ -42,6 +43,10 @@ type AgentFormDialog struct {
 	err       string
 	saving    bool
 	loading   bool // true while we fetch the existing agent's prompt for edit mode
+	// slugDirty flips true the first time the user edits the slug field
+	// directly. Until then, slug auto-syncs to a slugified Name. After
+	// that, the field is sticky.
+	slugDirty bool
 	styles    Styles
 }
 
@@ -107,6 +112,9 @@ func NewAgentFormDialog(c *client.Client, m OpenAgentFormMsg, s Styles) *AgentFo
 		model:    mk("model", defaultModel, 64, false),
 		prompt:   ta,
 		styles:   s,
+		// In edit mode the slug is immutable, so it's always "dirty"
+		// from the form's perspective — no auto-sync.
+		slugDirty: m.EditSlug != "",
 	}
 	if m.EditSlug != "" {
 		d.loading = true // fetch full prompt async
@@ -182,12 +190,22 @@ func (d *AgentFormDialog) Update(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	switch d.focus {
 	case agFocusName:
+		prevName := d.name.Value()
 		d.name, cmd = d.name.Update(msg)
+		// Auto-sync slug from name until the user takes ownership of
+		// the slug field. Sticky after that.
+		if !d.slugDirty && d.name.Value() != prevName {
+			d.slug.SetValue(slugify(d.name.Value()))
+		}
 	case agFocusSlug:
 		if d.editSlug != "" {
 			// read-only in edit mode
 		} else {
+			before := d.slug.Value()
 			d.slug, cmd = d.slug.Update(msg)
+			if d.slug.Value() != before {
+				d.slugDirty = true
+			}
 		}
 	case agFocusDescription:
 		d.desc, cmd = d.desc.Update(msg)
@@ -197,6 +215,29 @@ func (d *AgentFormDialog) Update(msg tea.Msg) tea.Cmd {
 		d.prompt, cmd = d.prompt.Update(msg)
 	}
 	return cmd
+}
+
+// slugify turns "My Cool Agent" into "my-cool-agent". Strips characters
+// outside [a-z0-9-], collapses runs of dashes, trims leading/trailing
+// dashes. Empty input → empty output.
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		case r == ' ' || r == '-' || r == '_' || r == '.':
+			if !prevDash && b.Len() > 0 {
+				b.WriteRune('-')
+				prevDash = true
+			}
+		}
+	}
+	out := strings.TrimRight(b.String(), "-")
+	return out
 }
 
 func (d *AgentFormDialog) focusNext(delta int) {

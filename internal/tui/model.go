@@ -196,11 +196,16 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		defaultAgent = "sunny"
 	}
 	if cli != nil {
-		// Attach every existing session (today: just the bootstrapped one)
-		// to the same client + slug. Session-per-agent picking is a v0.4
-		// concern.
+		// Attach every existing session to the daemon. Each session
+		// keeps its own agent binding (set when it was created or
+		// restored from state.json); fall back to the default only for
+		// sessions that don't carry one yet.
 		for _, s := range mgr.Sessions {
-			s.AttachClient(cli, defaultAgent)
+			slug := s.AgentSlug()
+			if slug == "" {
+				slug = defaultAgent
+			}
+			s.AttachClient(cli, slug)
 		}
 	}
 

@@ -155,9 +155,10 @@ func (s *Store) Update(slug string, patch AgentPatch) (*Agent, error) {
 	return a, nil
 }
 
-// Delete moves an agent's entire directory (including its conversations
-// and skills) to ~/.sunny/.trash/. Idempotent — missing slug is not an
-// error.
+// Delete archives an agent: moves its directory (including conversations
+// and skills) to ~/.sunny/.archive/. Idempotent — missing slug is not an
+// error. Restoration is manual: move the timestamped folder back under
+// ~/.sunny/agents/ and reload the daemon.
 func (s *Store) Delete(slug string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -165,14 +166,14 @@ func (s *Store) Delete(slug string) error {
 	if !ok {
 		return nil
 	}
-	trashDir := filepath.Join(s.Root, ".trash")
-	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+	archiveDir := filepath.Join(s.Root, ".archive")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 		return err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
-	target := filepath.Join(trashDir, fmt.Sprintf("agent__%s__%s", slug, stamp))
+	target := filepath.Join(archiveDir, fmt.Sprintf("agent__%s__%s", slug, stamp))
 	if err := os.Rename(cur.Dir, target); err != nil {
-		return fmt.Errorf("move to trash: %w", err)
+		return fmt.Errorf("move to archive: %w", err)
 	}
 	delete(s.agents, slug)
 	return nil

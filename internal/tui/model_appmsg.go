@@ -257,23 +257,31 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 	if v.Effort != "" {
 		m.defaultEffort = v.Effort
 	}
-	// Save current draft before switching to the new session.
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
+	}
+	slug := v.AgentSlug
+	if slug == "" {
+		slug = m.defaultAgent
 	}
 	s, err := session.New(m.ctx, v.Cwd, session.Options{
 		Logger:                   m.logger,
 		Model:                    v.Model,
 		Effort:                   v.Effort,
 		DangerousSkipPermissions: m.skipPerms,
+		AgentSlug:                slug,
+		Title:                    slug,
 	})
 	if err != nil {
 		m.lastErr = err
 		m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
 		return m, nil, true
 	}
+	if m.client != nil {
+		s.AttachClient(m.client, slug)
+	}
 	m.manager.Add(s)
-	m.textarea.Reset() // new session starts with empty draft
+	m.textarea.Reset()
 	m.layout()
 	m.refreshViewport()
 	m.saveState()

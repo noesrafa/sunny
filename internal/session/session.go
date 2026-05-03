@@ -181,6 +181,10 @@ type Options struct {
 	Model                    string
 	Effort                   string
 	DangerousSkipPermissions bool
+	// AgentSlug binds the session to a specific agent. AttachClient
+	// will be called with this slug. Empty falls back to whatever the
+	// caller passes to AttachClient.
+	AgentSlug string
 	// ConvID, when non-empty, restores a session bound to an existing
 	// server-side conversation. SendBegin reuses it instead of creating
 	// a new one. Empty on fresh sessions.
@@ -226,6 +230,7 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 		TotalCost: opts.TotalCost,
 		Turns:     opts.Turns,
 		State:     StateIdle,
+		agentSlug: opts.AgentSlug,
 		logger:    logger,
 	}, nil
 }

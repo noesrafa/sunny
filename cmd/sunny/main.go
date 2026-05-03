@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	charmlog "charm.land/log/v2"
+
 	"github.com/noesrafa/sunny/internal/auth"
 	"github.com/noesrafa/sunny/internal/bootstrap"
 	"github.com/noesrafa/sunny/internal/conversation"
@@ -26,6 +28,7 @@ import (
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/session"
+	uistate "github.com/noesrafa/sunny/internal/state"
 	"github.com/noesrafa/sunny/internal/store"
 	"github.com/noesrafa/sunny/internal/tui"
 )
@@ -141,15 +144,34 @@ func openTUI(args []string) error {
 	lg.Info("tui starting", "cwd", cwd, "log", logger.LogPath())
 
 	mgr := session.NewManager()
-	first, err := session.New(ctx, cwd, session.Options{
-		Logger: lg,
-		Title:  "sunny",
-	})
-	if err != nil {
-		return fmt.Errorf("create session: %w", err)
+	saved, themeID, activeIdx := loadSavedState(lg)
+	if len(saved) > 0 {
+		for _, ss := range saved {
+			restored, err := restoreSession(ctx, lg, ss)
+			if err != nil {
+				lg.Warn("restore session failed; skipping", "title", ss.Title, "err", err)
+				continue
+			}
+			mgr.Add(restored)
+		}
 	}
-	mgr.Add(first)
+	if mgr.Len() == 0 {
+		// First launch (or all restores failed) — bootstrap one fresh
+		// session bound to the default agent.
+		first, err := session.New(ctx, cwd, session.Options{
+			Logger:    lg,
+			Title:     "sunny",
+			AgentSlug: "sunny",
+		})
+		if err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+		mgr.Add(first)
+	} else if activeIdx >= 0 && activeIdx < mgr.Len() {
+		mgr.Active = activeIdx
+	}
 
+	first := mgr.Sessions[0]
 	model := tui.NewModel(ctx, mgr, cwd, tui.Options{
 		Logger:                   lg,
 		DefaultModel:             first.Model,
@@ -158,8 +180,48 @@ func openTUI(args []string) error {
 		DaemonAddr:               *addr,
 		DaemonToken:              tok,
 		DefaultAgent:             "sunny",
+		InitialTheme:             themeID,
 	})
 	return model.Run(ctx)
+}
+
+// loadSavedState reads ~/.sunny/state.json and returns the sessions to
+// restore plus the theme id. Failures fall back to a fresh launch with
+// no sessions; the caller will bootstrap one.
+func loadSavedState(lg *charmlog.Logger) ([]uistate.SavedSession, string, int) {
+	st, err := uistate.Load()
+	if err != nil {
+		lg.Warn("load state failed; starting fresh", "err", err)
+		return nil, "", 0
+	}
+	return st.Sessions, st.Theme, st.ActiveIdx
+}
+
+// restoreSession rebuilds a Session from its saved form. The transcript
+// is decoded from the cached Items blob; ConvID and AgentSlug are
+// preserved so the next send hits the same server-side conversation.
+// AgentSlug falls back to "sunny" for legacy state files without it.
+func restoreSession(ctx context.Context, lg *charmlog.Logger, ss uistate.SavedSession) (*session.Session, error) {
+	items, err := session.UnmarshalItems(ss.Items)
+	if err != nil {
+		return nil, fmt.Errorf("decode items: %w", err)
+	}
+	slug := ss.AgentSlug
+	if slug == "" {
+		slug = "sunny"
+	}
+	return session.New(ctx, ss.Cwd, session.Options{
+		Logger:    lg,
+		Title:     ss.Title,
+		Model:     ss.Model,
+		Effort:    ss.Effort,
+		Draft:     ss.Draft,
+		AgentSlug: slug,
+		ConvID:    ss.ConvID,
+		Items:     items,
+		TotalCost: ss.TotalCost,
+		Turns:     ss.Turns,
+	})
 }
 
 func defaultRoot() string {

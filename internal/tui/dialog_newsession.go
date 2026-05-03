@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,8 @@ import (
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/noesrafa/sunny/internal/client"
 )
 
 var modelChoices = []string{"opus", "sonnet", "haiku"}
@@ -18,7 +21,8 @@ var effortChoices = []string{"low", "medium", "high", "xhigh", "max"}
 type newSessionFocus int
 
 const (
-	focusPicker newSessionFocus = iota
+	focusAgent newSessionFocus = iota
+	focusPicker
 	focusModel
 	focusEffort
 	numNewSessionFocus
@@ -35,9 +39,19 @@ type NewSessionDialog struct {
 	modelIdx  int
 	effortIdx int
 	err       string
+
+	// Agent picker — loaded async via Init(). Until the load returns,
+	// the row shows "(loading…)" and Enter is allowed to fall back to
+	// the default agent so the dialog never blocks the user.
+	client       *client.Client
+	defaultAgent string
+	agents       []client.AgentSummary
+	agentIdx     int
+	agentLoading bool
+	agentLoadErr string
 }
 
-func NewNewSessionDialog(defaultCwd, defaultModel, defaultEffort string, s Styles) *NewSessionDialog {
+func NewNewSessionDialog(c *client.Client, defaultCwd, defaultModel, defaultEffort, defaultAgent string, s Styles) *NewSessionDialog {
 	cwd := defaultCwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
@@ -47,15 +61,21 @@ func NewNewSessionDialog(defaultCwd, defaultModel, defaultEffort string, s Style
 	ti.Prompt = "› "
 	ti.CharLimit = 0
 	ti.SetWidth(50)
+	// Initial focus is the directory picker so the original ergonomics
+	// are preserved — if you only have one agent, you blow past that
+	// row instantly with shift+tab anyway.
 	ti.Focus()
 
 	d := &NewSessionDialog{
-		cwd:       cwd,
-		search:    ti,
-		styles:    s,
-		focus:     focusPicker,
-		modelIdx:  max0(slices.Index(modelChoices, defaultModel)),
-		effortIdx: max0(slices.Index(effortChoices, defaultEffort)),
+		cwd:          cwd,
+		search:       ti,
+		styles:       s,
+		focus:        focusPicker,
+		modelIdx:     max0(slices.Index(modelChoices, defaultModel)),
+		effortIdx:    max0(slices.Index(effortChoices, defaultEffort)),
+		client:       c,
+		defaultAgent: defaultAgent,
+		agentLoading: c != nil,
 	}
 	d.loadDir()
 	return d
@@ -137,10 +157,48 @@ func (d *NewSessionDialog) ascend() {
 func (d *NewSessionDialog) SetStyles(s Styles) { d.styles = s }
 
 func (d *NewSessionDialog) Init() tea.Cmd {
-	return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	if d.client != nil {
+		cmds = append(cmds, d.loadAgentsCmd())
+	}
+	return tea.Batch(cmds...)
+}
+
+// newSessionAgentsLoadedMsg carries the agent list once the async fetch
+// returns. Distinct type from AgentsLoadedMsg so it doesn't accidentally
+// get consumed by the agent picker if both are open.
+type newSessionAgentsLoadedMsg struct {
+	Agents []client.AgentSummary
+	Err    error
+}
+
+func (d *NewSessionDialog) loadAgentsCmd() tea.Cmd {
+	c := d.client
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ag, err := c.ListAgents(ctx)
+		return newSessionAgentsLoadedMsg{Agents: ag, Err: err}
+	}
 }
 
 func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
+	if m, ok := msg.(newSessionAgentsLoadedMsg); ok {
+		d.agentLoading = false
+		if m.Err != nil {
+			d.agentLoadErr = m.Err.Error()
+			return nil
+		}
+		d.agents = m.Agents
+		// Snap selection to the default agent if visible.
+		for i, a := range d.agents {
+			if a.Slug == d.defaultAgent {
+				d.agentIdx = i
+				break
+			}
+		}
+		return nil
+	}
 	if k, ok := msg.(tea.KeyMsg); ok {
 		switch k.String() {
 		case "esc":
@@ -192,6 +250,20 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 			return cmd
 		}
 
+		if d.focus == focusAgent {
+			switch k.String() {
+			case "left", "h":
+				if d.agentIdx > 0 {
+					d.agentIdx--
+				}
+				return nil
+			case "right", "l", " ":
+				if d.agentIdx < len(d.agents)-1 {
+					d.agentIdx++
+				}
+				return nil
+			}
+		}
 		if d.focus == focusModel {
 			switch k.String() {
 			case "left", "h":
@@ -250,8 +322,12 @@ func (d *NewSessionDialog) confirm() tea.Cmd {
 	}
 	model := modelChoices[d.modelIdx]
 	effort := effortChoices[d.effortIdx]
+	agentSlug := d.defaultAgent
+	if len(d.agents) > 0 && d.agentIdx >= 0 && d.agentIdx < len(d.agents) {
+		agentSlug = d.agents[d.agentIdx].Slug
+	}
 	return func() tea.Msg {
-		return CreateSessionMsg{Cwd: abs, Model: model, Effort: effort}
+		return CreateSessionMsg{Cwd: abs, Model: model, Effort: effort, AgentSlug: agentSlug}
 	}
 }
 
@@ -275,6 +351,10 @@ func (d *NewSessionDialog) View(width, height int) string {
 	}
 
 	title := HatchedTitle("New Session", innerW, colPrimary, colAccent, d.styles.DialogTitle)
+
+	agentLabel := d.fieldLabel("agent", d.focus == focusAgent)
+	agentRow := d.renderAgentRow(d.focus == focusAgent)
+
 	pickerLabel := d.fieldLabel("directorio · "+d.cwd, d.focus == focusPicker)
 	searchView := "  " + d.search.View()
 	listView := d.renderList(listH, innerW)
@@ -293,6 +373,9 @@ func (d *NewSessionDialog) View(width, height int) string {
 
 	lines := []string{
 		title, "",
+		agentLabel,
+		agentRow,
+		"",
 		pickerLabel,
 		searchView,
 		listView,
@@ -356,6 +439,26 @@ func (d *NewSessionDialog) fieldLabel(text string, focused bool) string {
 		return d.styles.UserPrompt.Render("▸ ") + d.styles.HeaderTitle.Render(text)
 	}
 	return "  " + d.styles.HeaderDim.Render(text)
+}
+
+// renderAgentRow renders the agent picker as a horizontal radio.
+// While loading shows a hint; on error shows the message; on success
+// uses the same radio styling as model/effort.
+func (d *NewSessionDialog) renderAgentRow(focused bool) string {
+	if d.agentLoading {
+		return "  " + d.styles.Hint.Render("loading agents…")
+	}
+	if d.agentLoadErr != "" {
+		return "  " + d.styles.ResultError.Render("✗ "+d.agentLoadErr)
+	}
+	if len(d.agents) == 0 {
+		return "  " + d.styles.Hint.Render("(no agents — use ctrl+a to create one first)")
+	}
+	opts := make([]string, len(d.agents))
+	for i, a := range d.agents {
+		opts[i] = a.Slug
+	}
+	return d.radioRow(opts, d.agentIdx, focused)
 }
 
 func (d *NewSessionDialog) radioRow(opts []string, sel int, focused bool) string {

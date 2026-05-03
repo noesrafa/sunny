@@ -140,17 +140,21 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 					// AgentSummary doesn't carry it.
 				}
 			}
-		case "d":
+		case "d", "a":
+			// Both 'd' (legacy "delete") and 'a' (archive) trigger the
+			// archive flow. The action is reversible by moving the
+			// directory back, so "archive" is the honest verb.
 			if len(d.agents) == 0 {
 				return nil
 			}
 			pick := d.agents[d.selected]
 			body := []string{
-				"¿Borrar agente \"" + pick.Name + "\" (slug " + pick.Slug + ")?",
+				"Archive agent \"" + pick.Name + "\" (slug " + pick.Slug + ")?",
 				"",
-				"Se mueve a ~/.sunny/.trash/. Sus conversaciones se van con él.",
+				"Moved to ~/.sunny/.archive/. Conversations go with it.",
+				"Restore later by moving the folder back under ~/.sunny/agents/.",
 			}
-			confirm := NewConfirmDialog(d.styles, "Borrar agente", body, DeleteAgentMsg{Slug: pick.Slug})
+			confirm := NewConfirmDialog(d.styles, "Archive agent", body, DeleteAgentMsg{Slug: pick.Slug})
 			return func() tea.Msg { return OpenSubDialogMsg{Dialog: confirm} }
 		}
 	}
@@ -192,7 +196,7 @@ func (d *AgentPickerDialog) View(width, height int) string {
 	hints := d.styles.StatusKey.Render("enter") + d.styles.Hint.Render(" use  ") +
 		d.styles.StatusKey.Render("n") + d.styles.Hint.Render(" new  ") +
 		d.styles.StatusKey.Render("e") + d.styles.Hint.Render(" edit  ") +
-		d.styles.StatusKey.Render("d") + d.styles.Hint.Render(" delete  ") +
+		d.styles.StatusKey.Render("a") + d.styles.Hint.Render(" archive  ") +
 		d.styles.StatusKey.Render("esc") + d.styles.Hint.Render(" close")
 	lines = append(lines, "", hints)
 	return d.styles.DialogBox.Width(boxW).Render(strings.Join(lines, "\n"))

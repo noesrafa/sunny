@@ -35,7 +35,11 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.Game):
 		return m, m.overlay.Open(NewMinigameDialog(m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
-		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)), true
+		curAgent := m.defaultAgent
+		if cur := m.manager.Current(); cur != nil && cur.AgentSlug() != "" {
+			curAgent = cur.AgentSlug()
+		}
+		return m, m.overlay.Open(NewNewSessionDialog(m.client, m.initialCwd, m.defaultModel, m.defaultEffort, curAgent, m.styles)), true
 	case key.Matches(msg, m.keymap.NextSession):
 		m.cycleTab(1)
 		return m, nil, true

@@ -68,6 +68,19 @@ survive the daemon restarting under it.
   by checking for `~/.sunny/agents/` (the real "fresh install"
   marker). Once seeded, the directory belongs to the user.
 
+## State restore
+
+The TUI persists its layout (open tabs, active idx, drafts, theme) to
+`~/.sunny/state.json`. On startup, sessions are rebuilt from this file:
+agent slug, conv id, model, effort, draft, and the cached transcript
+items. `~/.sunny/agents/<slug>/conversations/<id>/events.jsonl` remains
+the canonical source for chat content; the cached items are a UI
+optimization so the chat re-renders instantly without an HTTP round-trip.
+
+If the agent referenced by a saved session no longer exists (was
+archived), the session restores anyway — `SendBegin` will surface the
+error on the next attempt.
+
 ## Multi-agent
 
 - Agents live at `~/.sunny/agents/<slug>/`. Each owns its skills,

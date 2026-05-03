@@ -1,15 +1,48 @@
-// Package provider abstracts the LLM backend. v0.3.0 ships one driver
-// (anthropic). The interface is small on purpose — sunny is opinionated
-// toward streaming, system-prompt-with-cache, and assistant-text deltas.
-// Tools land in v0.4.
+// Package provider abstracts the LLM backend. The interface is small
+// on purpose — sunny is opinionated toward streaming, system-prompt-
+// with-cache, and assistant-text deltas. Driver implementations
+// translate this neutral shape into each backend's wire format.
 package provider
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Message is a single conversational turn passed to the provider.
+//
+// For plain text turns, only Role + Content are set. Tool round-trips
+// use the extended fields:
+//
+//   - Role="assistant" + ToolCalls non-nil: model invoked tools.
+//     Content may also carry the assistant's free text from the same
+//     turn. Drivers translate this to the provider's tool-use block
+//     shape (Anthropic content[] with tool_use; Ollama tool_calls inline).
+//
+//   - Role="tool" + ToolUseID set: a tool's result. Drivers translate
+//     to Anthropic tool_result blocks or Ollama role:"tool" messages.
+//     Content carries the rendered output; IsError surfaces failures.
 type Message struct {
-	Role    string `json:"role"` // "user" or "assistant"
-	Content string `json:"content"`
+	Role      string         `json:"role"`
+	Content   string         `json:"content,omitempty"`
+	ToolCalls []ToolCall     `json:"tool_calls,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"` // role=tool only
+	IsError   bool           `json:"is_error,omitempty"`    // role=tool only
+}
+
+// ToolCall is one tool invocation inside an assistant message.
+type ToolCall struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+// ToolDef is the schema sent to the provider so the model can decide
+// to call it. Generated from internal/tools.Tool at request time.
+type ToolDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
 }
 
 // SystemBlock is one chunk of the system prompt. Marking CacheControl=true
@@ -27,6 +60,12 @@ type Request struct {
 	MaxTokens int
 	System    []SystemBlock
 	Messages  []Message
+	// Tools, if non-empty, advertise tool definitions to the
+	// provider so the model can request invocations. Drivers
+	// translate to each backend's wire format. The engine collects
+	// tool_use events from the stream, runs them, and re-issues
+	// Stream with appended tool_result messages.
+	Tools []ToolDef
 	// Effort controls overall token spend ("low" | "medium" | "high" | "xhigh" | "max").
 	// Defaults to "high" if empty.
 	Effort string

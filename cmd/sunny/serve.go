@@ -25,6 +25,7 @@ import (
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
+	"github.com/noesrafa/sunny/internal/tools"
 )
 
 // serve runs the daemon in the foreground. Used by `start` (re-exec'd
@@ -129,10 +130,11 @@ func serve(args []string) error {
 // Returning a zero-engine (no providers) is OK — chat returns 503
 // until at least one driver is configured.
 func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
+	toolReg := tools.Default()
 	choice := strings.ToLower(strings.TrimSpace(os.Getenv("SUNNY_PROVIDER")))
 	if choice == "off" {
 		log.Info("engine disabled", "reason", "SUNNY_PROVIDER=off")
-		return engine.New(nil, "")
+		return engine.New(nil, "", toolReg)
 	}
 
 	registry := map[string]provider.Provider{}
@@ -156,7 +158,7 @@ func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
 	if defaultName == "" {
 		log.Warn("no providers available — configure one via `sunny secrets <provider> set api_key` or install claude code")
 	}
-	return engine.New(registry, defaultName)
+	return engine.New(registry, defaultName, toolReg)
 }
 
 // pickDefaultProvider honors SUNNY_PROVIDER if it points at a

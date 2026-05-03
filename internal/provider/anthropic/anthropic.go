@@ -4,6 +4,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -69,16 +70,9 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		system = append(system, blk)
 	}
 
-	msgs := make([]anthropic.MessageParam, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		switch m.Role {
-		case "user":
-			msgs = append(msgs, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
-		case "assistant":
-			msgs = append(msgs, anthropic.NewAssistantMessage(anthropic.NewTextBlock(m.Content)))
-		default:
-			return nil, fmt.Errorf("anthropic: unknown role %q", m.Role)
-		}
+	msgs, err := buildMessages(req.Messages)
+	if err != nil {
+		return nil, err
 	}
 
 	params := anthropic.MessageNewParams{
@@ -86,6 +80,27 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		MaxTokens: int64(maxTok),
 		System:    system,
 		Messages:  msgs,
+	}
+
+	// Tools: translate sunny's neutral schema into the SDK's
+	// ToolUnionParam shape. JSON schema goes through verbatim — the
+	// SDK marshals it back out to wire format.
+	if len(req.Tools) > 0 {
+		tools := make([]anthropic.ToolUnionParam, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			schemaParam, err := unmarshalSchema(t.InputSchema)
+			if err != nil {
+				return nil, fmt.Errorf("anthropic: tool %q schema: %w", t.Name, err)
+			}
+			tools = append(tools, anthropic.ToolUnionParam{
+				OfTool: &anthropic.ToolParam{
+					Name:        t.Name,
+					Description: anthropic.String(t.Description),
+					InputSchema: schemaParam,
+				},
+			})
+		}
+		params.Tools = tools
 	}
 
 	if req.AdaptiveThinking {
@@ -134,6 +149,20 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			out <- provider.Error{Err: err}
 			return
 		}
+		// Tool use surfaces only after the full block is accumulated
+		// (Anthropic streams Input as JSON deltas; the SDK rebuilds
+		// the complete object). Emit one ToolUse per block, in
+		// declaration order, just before Done so the engine can run
+		// them and re-stream.
+		for _, block := range acc.Content {
+			if t, ok := block.AsAny().(anthropic.ToolUseBlock); ok {
+				out <- provider.ToolUse{
+					ID:    t.ID,
+					Name:  t.Name,
+					Input: string(t.Input),
+				}
+			}
+		}
 		out <- provider.Done{
 			StopReason:          string(acc.StopReason),
 			InputTokens:         acc.Usage.InputTokens,
@@ -143,4 +172,74 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		}
 	}()
 	return out, nil
+}
+
+// buildMessages translates sunny's neutral Message slice into the
+// SDK's MessageParam shape. The interesting cases are role=assistant
+// with ToolCalls (becomes content blocks: text + tool_use blocks)
+// and role=tool (becomes a user message with a single tool_result
+// block, since Anthropic doesn't have a "tool" role on the wire).
+func buildMessages(msgs []provider.Message) ([]anthropic.MessageParam, error) {
+	out := make([]anthropic.MessageParam, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			out = append(out, anthropic.NewUserMessage(anthropic.NewTextBlock(m.Content)))
+		case "assistant":
+			blocks := make([]anthropic.ContentBlockParamUnion, 0, 1+len(m.ToolCalls))
+			if m.Content != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
+			}
+			for _, tc := range m.ToolCalls {
+				var input any
+				if len(tc.Input) > 0 {
+					if err := json.Unmarshal(tc.Input, &input); err != nil {
+						// Fall back to passing the raw string — better
+						// than dropping the call entirely.
+						input = string(tc.Input)
+					}
+				}
+				blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, input, tc.Name))
+			}
+			if len(blocks) == 0 {
+				continue
+			}
+			out = append(out, anthropic.NewAssistantMessage(blocks...))
+		case "tool":
+			out = append(out, anthropic.NewUserMessage(
+				anthropic.NewToolResultBlock(m.ToolUseID, m.Content, m.IsError),
+			))
+		default:
+			return nil, fmt.Errorf("anthropic: unknown role %q", m.Role)
+		}
+	}
+	return out, nil
+}
+
+// unmarshalSchema reads the JSON Schema we hand drivers and reshapes
+// it into the SDK's ToolInputSchemaParam (which expects properties +
+// required as separate fields). Most schemas we generate are
+// `{"type":"object","properties":{...},"required":[...]}` so the
+// translation is mechanical.
+func unmarshalSchema(raw json.RawMessage) (anthropic.ToolInputSchemaParam, error) {
+	var blob struct {
+		Type       string                     `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(raw, &blob); err != nil {
+		return anthropic.ToolInputSchemaParam{}, err
+	}
+	props := make(map[string]any, len(blob.Properties))
+	for k, v := range blob.Properties {
+		var any any
+		if err := json.Unmarshal(v, &any); err != nil {
+			return anthropic.ToolInputSchemaParam{}, fmt.Errorf("property %q: %w", k, err)
+		}
+		props[k] = any
+	}
+	return anthropic.ToolInputSchemaParam{
+		Properties: props,
+		Required:   blob.Required,
+	}, nil
 }

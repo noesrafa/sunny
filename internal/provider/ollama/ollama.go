@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,10 @@ import (
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/secrets"
 )
+
+// randRead is a thin alias so synthesizeID is testable in isolation
+// without exposing crypto/rand to the test surface.
+var randRead = rand.Read
 
 const (
 	defaultBaseURL = "https://ollama.com"
@@ -76,22 +81,56 @@ func (d *Driver) Name() string { return "ollama" }
 // (engine consumes deltas) and pass keep_alive so cloud models stay
 // warm between turns. Think tracks the engine's AdaptiveThinking
 // flag — Ollama emits content into message.thinking when this is on
-// for reasoning-capable models.
+// for reasoning-capable models. Tools (when non-nil) advertise
+// invokable functions; the model emits tool_calls in the final
+// streamed message when it wants to invoke them.
 type chatRequest struct {
 	Model     string        `json:"model"`
 	Messages  []chatMessage `json:"messages"`
 	Stream    bool          `json:"stream"`
 	KeepAlive string        `json:"keep_alive,omitempty"`
 	Think     bool          `json:"think,omitempty"`
+	Tools     []toolDef     `json:"tools,omitempty"`
 }
 
-// chatMessage covers user/assistant/system + the optional thinking
-// channel that reasoning models (gpt-oss, deepseek-r1, qwen3 thinking
-// variants) emit on Ollama Cloud.
+// toolDef matches Ollama's tool advertisement shape (which mirrors
+// OpenAI's). Function.Parameters carries our raw JSON Schema.
+type toolDef struct {
+	Type     string       `json:"type"`
+	Function toolFunction `json:"function"`
+}
+
+type toolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// chatMessage covers user/assistant/system/tool + the optional
+// thinking channel that reasoning models (gpt-oss, deepseek-r1,
+// qwen3 thinking variants) emit on Ollama Cloud.
 type chatMessage struct {
-	Role     string `json:"role"`
-	Content  string `json:"content"`
-	Thinking string `json:"thinking,omitempty"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content,omitempty"`
+	Thinking  string     `json:"thinking,omitempty"`
+	ToolCalls []toolCall `json:"tool_calls,omitempty"`
+	// ToolName mirrors OpenAI's `name` field on tool messages —
+	// Ollama is OpenAI-compatible here. Some servers also echo it,
+	// some don't; we send it for safety.
+	ToolName string `json:"name,omitempty"`
+}
+
+// toolCall is what the model emits when invoking a tool. ID groups
+// the request with its eventual `role:"tool"` response.
+type toolCall struct {
+	ID       string             `json:"id,omitempty"`
+	Type     string             `json:"type,omitempty"`
+	Function toolCallInvocation `json:"function"`
+}
+
+type toolCallInvocation struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 // chatResponse is one JSONL line. For streamed turns, every line
@@ -136,7 +175,24 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	for _, m := range req.Messages {
 		switch m.Role {
 		case "user", "assistant", "system":
-			msgs = append(msgs, chatMessage{Role: m.Role, Content: m.Content})
+			cm := chatMessage{Role: m.Role, Content: m.Content}
+			for _, tc := range m.ToolCalls {
+				cm.ToolCalls = append(cm.ToolCalls, toolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: toolCallInvocation{
+						Name:      tc.Name,
+						Arguments: tc.Input,
+					},
+				})
+			}
+			msgs = append(msgs, cm)
+		case "tool":
+			msgs = append(msgs, chatMessage{
+				Role:     "tool",
+				Content:  m.Content,
+				ToolName: m.ToolUseID, // older servers echo `name`; harmless extra
+			})
 		default:
 			return nil, fmt.Errorf("ollama: unknown role %q", m.Role)
 		}
@@ -148,6 +204,7 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		Stream:    true,
 		KeepAlive: defaultKeepAlive,
 		Think:     req.AdaptiveThinking,
+		Tools:     buildOllamaTools(req.Tools),
 	})
 	if err != nil {
 		return nil, err
@@ -195,6 +252,22 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 				if ev.Message.Content != "" {
 					out <- provider.TextDelta{Text: ev.Message.Content}
 				}
+				// Tool calls arrive on a single line (Ollama doesn't
+				// split arguments across deltas the way Anthropic
+				// does). Emit one ToolUse per call, in order.
+				for _, tc := range ev.Message.ToolCalls {
+					id := tc.ID
+					if id == "" {
+						// Some servers omit IDs; synthesize one so the
+						// engine's request/response pairing still works.
+						id = synthesizeID(tc.Function.Name)
+					}
+					out <- provider.ToolUse{
+						ID:    id,
+						Name:  tc.Function.Name,
+						Input: string(tc.Function.Arguments),
+					}
+				}
 			}
 			if ev.Done {
 				lastUsage = ev
@@ -220,6 +293,40 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		}
 	}()
 	return out, nil
+}
+
+// chatResponse needs ToolCalls on its embedded Message — extend.
+// (We declare it on chatMessage above; this comment exists so the
+// reader notices the Message struct is shared on both directions.)
+
+// buildOllamaTools translates sunny's neutral ToolDef shape into
+// what /api/chat accepts. nil-safe so callers don't have to branch.
+func buildOllamaTools(in []provider.ToolDef) []toolDef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]toolDef, len(in))
+	for i, t := range in {
+		out[i] = toolDef{
+			Type: "function",
+			Function: toolFunction{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.InputSchema,
+			},
+		}
+	}
+	return out
+}
+
+// synthesizeID generates a stable-enough id when the server omits
+// one. Format: `<name>_<8hex>`. The engine pairs request→response by
+// id, so collisions inside a turn would cross wires; rand suffixes
+// make that vanishingly unlikely.
+func synthesizeID(name string) string {
+	var b [4]byte
+	_, _ = randRead(b[:])
+	return fmt.Sprintf("%s_%x", name, b)
 }
 
 // joinSystem flattens system blocks into one string. CacheControl on

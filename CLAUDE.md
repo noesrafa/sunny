@@ -81,6 +81,46 @@ If the agent referenced by a saved session no longer exists (was
 archived), the session restores anyway — `SendBegin` will surface the
 error on the next attempt.
 
+## Tools
+
+The agent has four read-only tools, registered in
+`internal/tools/`:
+
+- **view** — read a file with line numbers, offset/limit support.
+- **ls** — directory tree with depth + ignore (skips dotfiles +
+  node_modules/.git/vendor/etc.).
+- **grep** — regex search; uses `rg` if on PATH, else Go-native walker.
+- **glob** — find files by `**` pattern.
+
+All four are bounded to the session's cwd via `tools.resolveInside`,
+which evaluates symlinks on both sides (important on macOS where
+`/tmp` is `/private/tmp`). Outside-cwd reads hard-deny — no
+permission UI yet; that's the gating dependency for write/exec
+tools (edit, write, bash) which land in a follow-up PR.
+
+The engine runs the round-trip loop in `engine.runTurnLoop`: when
+the provider emits ToolUse, the engine executes via the registry,
+appends the assistant + tool messages to the running conversation,
+and re-streams. Cap of 25 iterations to prevent runaway loops. Tool
+events are also forwarded to the SSE stream so the TUI shows the
+tool-use spinner.
+
+Provider routing for tools:
+- **claude-code**: skip — it has its own native toolset (Read,
+  Glob, Grep, Bash, …) registered internally. Advertising sunny's
+  tools would create duplicate names and confuse the model.
+- **anthropic**: full tool support via `MessageNewParams.Tools`
+  + `ContentBlockParamUnion` for tool_use/tool_result.
+- **ollama**: full tool support via OpenAI-style `tools[]` in
+  `/api/chat` body + `message.tool_calls` parsing. Synthesizes
+  call IDs when the server omits them.
+
+The neutral wire format (in `provider.Message`) is OpenAI-shaped:
+- `Role:"assistant" + ToolCalls:[…]` for the model's tool invocation
+- `Role:"tool" + ToolUseID + Content + IsError` for the result
+
+Each driver translates this to its native shape.
+
 ## Multi-agent
 
 - Agents live at `~/.sunny/agents/<slug>/`. Each owns its skills,

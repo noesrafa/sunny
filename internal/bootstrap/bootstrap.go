@@ -1,5 +1,5 @@
 // Package bootstrap seeds the runtime directory from the embedded defaults
-// on first run. Once the directory exists, the user owns it.
+// on first run. Once the agents tree exists the user owns it.
 package bootstrap
 
 import (
@@ -10,11 +10,16 @@ import (
 	"github.com/noesrafa/sunny/defaults"
 )
 
-// EnsureRuntime creates root and copies the embedded default tree into it
-// if root does not yet exist. Returns true if a fresh seed happened.
-// If root already exists (any contents), it is left untouched.
+// EnsureRuntime copies the embedded default tree into root the first time
+// the daemon boots. Returns true if a fresh seed happened.
+//
+// We gate on the existence of root/agents, not root itself: `sunny start`
+// creates root/run/ before spawning the daemon, so root is already present
+// by the time serve calls EnsureRuntime. The agents/ subtree is the real
+// "fresh install" marker.
 func EnsureRuntime(root string) (seeded bool, err error) {
-	if _, err := os.Stat(root); err == nil {
+	agentsDir := filepath.Join(root, "agents")
+	if _, err := os.Stat(agentsDir); err == nil {
 		return false, nil
 	} else if !os.IsNotExist(err) {
 		return false, err

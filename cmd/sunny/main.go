@@ -109,7 +109,7 @@ func openTUI(args []string) error {
 			*addr = s.Addr // honor whatever addr the running daemon is on
 		}
 		if !alive {
-			fmt.Fprintln(os.Stderr, "starting daemon…")
+			fmt.Fprintf(os.Stderr, "sunny: daemon not running — starting it on %s…\n", *addr)
 			s, err := startDaemon(*addr, *root, true)
 			if err != nil {
 				return fmt.Errorf("auto-start: %w", err)
@@ -117,7 +117,6 @@ func openTUI(args []string) error {
 			*addr = s.Addr
 		}
 	}
-	_ = *addr // TODO: pass to TUI options once chat is wired to the daemon
 
 	cwd, _ := os.Getwd()
 
@@ -342,9 +341,19 @@ func startDaemon(addr, root string, ifNotRunning bool) (*lifecycle.State, error)
 		return nil, fmt.Errorf("save state: %w", err)
 	}
 
-	if err := waitHealthy(addr, 3*time.Second); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: started but not yet healthy: %v\n", err)
-		fmt.Fprintf(os.Stderr, "         tail %s for details\n", paths.Log)
+	if err := waitHealthy(addr, cmd.Process.Pid, 3*time.Second); err != nil {
+		// Daemon failed to come up. Reap and clean state so the next
+		// invocation gets a fresh attempt instead of inheriting stale
+		// state.json. Surface the tail of the log so the caller can
+		// diagnose without grepping by hand.
+		if lifecycle.IsAlive(cmd.Process.Pid) {
+			_ = cmd.Process.Kill()
+		}
+		_ = paths.ClearState()
+		if tail := tailLog(paths.Log, 20); tail != "" {
+			return nil, fmt.Errorf("%w\n--- last lines of %s ---\n%s", err, paths.Log, tail)
+		}
+		return nil, fmt.Errorf("%w (see %s)", err, paths.Log)
 	}
 
 	fmt.Printf("started  pid=%d  addr=%s  log=%s\n", state.PID, addr, paths.Log)
@@ -437,15 +446,37 @@ func status(args []string) error {
 	return nil
 }
 
-func waitHealthy(addr string, timeout time.Duration) error {
+// waitHealthy polls /healthz until it returns OK or until the spawned
+// daemon process exits. The PID check shortcuts the timeout when the
+// daemon crashes during boot — without it, callers waste 3s waiting on a
+// corpse.
+func waitHealthy(addr string, pid int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := pingHealth(addr, 200*time.Millisecond); err == nil {
 			return nil
 		}
+		if !lifecycle.IsAlive(pid) {
+			return fmt.Errorf("daemon process exited before becoming healthy")
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	return fmt.Errorf("not healthy after %s", timeout)
+}
+
+// tailLog returns the last n lines of the file at path, or "" if the
+// file can't be read. Best-effort — bounded by reading the whole file
+// since sunny.log stays small in practice.
+func tailLog(path string, n int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func pingHealth(addr string, timeout time.Duration) error {

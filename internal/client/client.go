@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
 
 type Client struct {
@@ -294,9 +293,3 @@ func decodeEvent(name, data string) (Event, error) {
 	return nil, fmt.Errorf("unknown SSE event %q", name)
 }
 
-// reasonable default backoff between connection attempts when the daemon
-// isn't yet listening (auto-start race). Currently unused at the API
-// surface; kept as a reference for future Retry helpers.
-const defaultRetryDelay = 100 * time.Millisecond
-
-var _ = defaultRetryDelay

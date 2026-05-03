@@ -5,22 +5,23 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.12.0`** (Phase 1 of multi-client mesh: peers
-roster + federated agent listing in the TUI). Brew `sunny version`
-should match.
+**Latest release: `v0.13.0`** (Phase 2a of multi-client mesh:
+one-time-code pairing dance — `sunny pair offer` / `sunny pair
+claim` — so adding a peer no longer requires SSH-then-copy-paste).
+Brew `sunny version` should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
 actual". The short version: chat works end-to-end across four
-backends (claude-code, anthropic, ollama, opencode); the TUI now
-spans multiple sunny daemons (local + ~/.sunny/peers.yaml entries)
-and the agent picker shows `host/slug` rows when more than one peer
-is configured. Conversations stay on the engine they were created
-on — data per location.
+backends (claude-code, anthropic, ollama, opencode); the TUI spans
+multiple sunny daemons (local + ~/.sunny/peers.yaml entries); peers
+are added either with `sunny pair claim <url> <code>` (recommended)
+or `sunny peers add <name> <url>` (manual). Conversations stay on
+the engine they were created on — data per location.
 
-**Single most likely next thing to pick up**: Phase 2 of the mesh —
-daemon multi-bind (tailnet IP) + `tailscale status` discovery + a
-proper handshake to swap tokens. Design notes are in PLAN.md →
-"Lo que sigue". Read that first; the path is laid out.
+**Single most likely next thing to pick up**: Phase 2b of the mesh —
+daemon multi-bind (tailnet IP), `tailscale status --json` discovery
+in `sunny peers scan`. Design notes are in PLAN.md → "Lo que sigue".
+Read that first; the path is laid out.
 
 ### How to verify things quickly
 
@@ -35,18 +36,20 @@ TOK=$(sunny token)
 curl -s -H "Authorization: Bearer $TOK" localhost:7777/agents | jq
 ```
 
-### How to verify the mesh (Phase 1)
+### How to verify the mesh (Phase 2a)
 
-Spin a second daemon on another port and add it as a peer:
+Spin a second daemon on another port and pair it:
 
 ```bash
 # second daemon, isolated root
 sunny start --addr 127.0.0.1:7778 --root /tmp/sunny-vps
-TOK2=$(sunny token --root /tmp/sunny-vps)
 
-# register it with the local TUI roster
-echo "$TOK2" | sunny peers add vps http://127.0.0.1:7778
-sunny peers          # → local + vps
+# generate a code (on the "remote")
+CODE=$(sunny pair offer --root /tmp/sunny-vps --addr 127.0.0.1:7778 \
+       | grep "Pair code" | awk '{print $3}')
+
+# claim it (from the "client")
+sunny pair claim http://127.0.0.1:7778 $CODE --name vps
 sunny doctor         # → Peers section shows vps reachable
 ```
 
@@ -97,6 +100,10 @@ flow with grep / glob / ls.
 - `internal/peers/` — load/save `~/.sunny/peers.yaml`. The local
   daemon is always the implicit `name: local` entry and never appears
   in the file.
+- `internal/pairing/` — in-memory short-code service powering the
+  pair offer/claim dance. Codes are 6 chars from a no-ambiguity
+  alphabet, single-use, 5min TTL. The daemon's bearer is shared
+  as-is on claim (per-pairing tokens are a future improvement).
 - `internal/client/federation.go` — wraps N `*Client` keyed by peer
   name. `ListAgents` fan-outs in parallel; per-peer failures don't
   fail the whole call. The TUI's `Model.fed` always exists (single-

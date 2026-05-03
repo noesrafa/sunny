@@ -14,6 +14,7 @@ import (
 
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
+	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/store"
 )
@@ -38,6 +39,9 @@ type Options struct {
 	// against the new file. Optional — if nil, secret writes still
 	// succeed but won't take effect until the daemon restarts.
 	RebuildEngine func()
+	// Pairs handles the `sunny pair offer` / `sunny pair claim`
+	// dance. Optional: if nil, the pairing endpoints return 503.
+	Pairs *pairing.Service
 }
 
 // New builds the daemon's HTTP handler.
@@ -52,6 +56,7 @@ func New(opts Options) http.Handler {
 		engine:        opts.Engine,
 		log:           opts.Log,
 		rebuildEngine: opts.RebuildEngine,
+		pairs:         opts.Pairs,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -70,6 +75,8 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("GET /secrets", srv.listSecrets)
 	mux.HandleFunc("PUT /secrets/{provider}", srv.putSecrets)
 	mux.HandleFunc("DELETE /secrets/{provider}", srv.deleteSecrets)
+	mux.HandleFunc("POST /pairing/offer", srv.offerPairing)
+	mux.HandleFunc("POST /pairing/claim", srv.claimPairing)
 	return logging(opts.Log, requireBearer(opts.Token, mux))
 }
 
@@ -83,7 +90,11 @@ func requireBearer(token string, h http.Handler) http.Handler {
 	}
 	expected := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		// /healthz must be reachable for liveness probes; pairing
+		// /claim carries its own credential (the one-shot code) and
+		// must reject the bearer header — a pairing client legitimately
+		// has no token yet.
+		if r.URL.Path == "/healthz" || pairingExempt(r.URL.Path) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -103,6 +114,7 @@ type server struct {
 	engine        *atomic.Pointer[engine.Engine]
 	log           *slog.Logger
 	rebuildEngine func()
+	pairs         *pairing.Service
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

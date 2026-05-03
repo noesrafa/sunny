@@ -2,12 +2,14 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.12.0 — chat works end-to-end across four backends
-> (claude-code, Anthropic API, Ollama Cloud, opencode). Phase 1 of the
-> mesh has landed: one TUI can talk to multiple sunny daemons via
-> `~/.sunny/peers.yaml` — the agent picker shows `host/slug` rows and
-> conversations stay on the engine they were created on. Tailscale
-> auto-discovery and real-time cross-client sync are next.
+> **Status:** v0.13.0 — chat works end-to-end across four backends
+> (claude-code, Anthropic API, Ollama Cloud, opencode). Phase 2a of the
+> mesh: one TUI can talk to multiple sunny daemons via
+> `~/.sunny/peers.yaml`, paired over a one-time code (`sunny pair
+> offer` / `sunny pair claim`) — no more SSH-then-copy-paste. The agent
+> picker shows `host/slug` rows; conversations stay on the engine they
+> were created on. Tailscale auto-discovery and real-time cross-client
+> sync are next.
 
 ## Install
 
@@ -54,24 +56,35 @@ running them — handy over SSH or in CI.
 ## Multi-machine mesh
 
 One TUI can drive several sunny daemons. The local daemon is always
-implicit; remote daemons live in `~/.sunny/peers.yaml`:
+implicit; remote daemons live in `~/.sunny/peers.yaml`. The recommended
+way to add one is the pairing dance:
 
 ```bash
 # on the remote host (VPS, raspberry pi, …)
-sunny start
-sunny token          # copy this somewhere safe
+sunny pair offer
+→ Pair code: A4F7K2 (valid 5 min)
 
 # on your laptop
+sunny pair claim http://100.64.0.5:7777 A4F7K2
+→ ✓ paired 100-64-0-5 → http://100.64.0.5:7777
+sunny doctor          # → Peers section shows the new peer reachable
+sunny                 # → ctrl+a shows local/* and 100-64-0-5/* agents in one list
+```
+
+Codes are 6 alphanumerics, single-use, and expire after 5 minutes.
+Pass `--name vps` to `pair claim` if you want a friendlier label
+than the auto-derived host slug.
+
+If you'd rather wire it up by hand (you already have the token from
+`sunny token`):
+
+```bash
 echo "<token>" | sunny peers add vps http://100.64.0.5:7777
-sunny peers          # → local · vps
-sunny doctor         # → Peers section shows vps reachable
-sunny                # → ctrl+a shows local/* and vps/* agents in one list
 ```
 
 Conversations stay on the engine that owns the agent — sunny does
-not replicate data across hosts. Today peers must be addressable by
-URL (hostname/IP your laptop can reach); Tailscale auto-discovery
-ships in v0.13.
+not replicate data across hosts. Tailscale auto-discovery + daemon
+multi-bind are coming in v0.14.
 
 Or daemon-only:
 

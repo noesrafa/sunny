@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.12.0)
+## Estado actual (v0.13.0)
 
 ### Lo que funciona end-to-end
 
@@ -191,31 +191,36 @@ sobrescribe.
   el binario apropiado (brew/curl con confirmación) o pide la API
   key, según el provider. `--print-only` para flujos no-
   interactivos (CI, SSH).
-- **Mesh (Fase 1)**: `~/.sunny/peers.yaml` opcional con `name`,
-  `url`, `token` por peer remoto; `local` es implícito. `sunny peers
-  add/remove/list` para CRUD. `client.Federation` fan-outs el listing
-  de agentes en paralelo, errores per-peer aislados. La TUI muestra
-  agentes con prefijo `host/slug` cuando hay >1 peer; conversaciones
-  viven en el engine de origen (data por ubicación). CRUD de agentes
-  (create/edit/archive) sólo funciona contra local en v0.12 —
-  federation de escritura viene en Fase 2.
+- **Mesh (Fase 1 + 2a)**: `~/.sunny/peers.yaml` opcional con `name`,
+  `url`, `token` por peer remoto; `local` es implícito. `client.
+  Federation` fan-outs el listing de agentes en paralelo, errores
+  per-peer aislados. La TUI muestra agentes con prefijo `host/slug`
+  cuando hay >1 peer; conversaciones viven en el engine de origen
+  (data por ubicación). CRUD de agentes (create/edit/archive) sólo
+  funciona contra local en v0.13 — federation de escritura viene
+  más adelante.
+
+  **Pairing (Fase 2a)**: dos endpoints HTTP nuevos en el daemon —
+  `POST /pairing/offer` (auth) emite un código alfanumérico de 6
+  chars con TTL 5 min, `POST /pairing/claim` (no auth — el código
+  ES el credential) lo intercambia por el bearer del daemon. CLI
+  `sunny pair offer` (en remoto) y `sunny pair claim <url> <code>`
+  (en cliente) automatiza todo, derivando un nombre de peer del
+  hostname. Sin SSH ni copy-paste de tokens.
 - **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
   tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.12.0)
+### Lo que sigue (post-v0.13.0)
 
-**Fase 2 del mesh — Tailscale + ergonomía de auth**:
+**Fase 2b del mesh — Tailscale + multi-bind**:
 
 - [ ] **Daemon escucha en tailnet IP** además de 127.0.0.1.
       `tailscale ip` al boot; bind extra si hay éxito.
-- [ ] **Discovery**: `sunny peers scan` lee `tailscale status --json`
-      y prueba `:7777/healthz` en cada peer; los que responden los
-      añade a `peers.yaml`.
-- [ ] **Handshake automático de tokens**: `sunny peer add <url>` que
-      negocia el bearer en lugar de pedírselo al usuario por SSH.
-      Endpoint nuevo `POST /peers/handshake`.
+- [ ] **`sunny peers scan`** lee `tailscale status --json` y prueba
+      `:7777/healthz` en cada peer; los que responden ofrece pairing
+      automático (paired flow detrás).
 - [ ] **mDNS/Bonjour fallback** para LAN sin Tailscale (nice-to-have).
 
 **Fase 3 del mesh — tiempo real cross-cliente**:

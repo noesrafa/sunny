@@ -19,6 +19,7 @@ import (
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/provider"
+	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
 	"github.com/noesrafa/sunny/internal/provider/ollama"
@@ -82,6 +83,8 @@ func serve(args []string) error {
 		enginePtr.Store(buildEngine(log, secretsStore))
 	}
 
+	pairs := pairing.NewService(tok)
+
 	srv := &http.Server{
 		Addr: *addr,
 		Handler: server.New(server.Options{
@@ -92,6 +95,7 @@ func serve(args []string) error {
 			Log:           log,
 			Token:         tok,
 			RebuildEngine: rebuild,
+			Pairs:         pairs,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}

@@ -5,31 +5,55 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.11.0`** (opencode driver + `sunny doctor` +
-`sunny setup`). Brew `sunny version` should match.
+**Latest release: `v0.12.0`** (Phase 1 of multi-client mesh: peers
+roster + federated agent listing in the TUI). Brew `sunny version`
+should match.
 
 Everything that works today is enumerated in PLAN.md → "Estado
-actual". The short version: chat works end-to-end across **four**
-backends (claude-code, anthropic, ollama, opencode), conversations
-persist per-agent, the agent has read-only filesystem access tools,
-the TUI restores its layout on restart, and onboarding is now a
-single `sunny doctor` + `sunny setup <provider>`.
+actual". The short version: chat works end-to-end across four
+backends (claude-code, anthropic, ollama, opencode); the TUI now
+spans multiple sunny daemons (local + ~/.sunny/peers.yaml entries)
+and the agent picker shows `host/slug` rows when more than one peer
+is configured. Conversations stay on the engine they were created
+on — data per location.
 
-**Single most likely next thing to pick up**: write/exec tools
-(`edit`, `write`, `bash`) + their permission flow. Design notes are
-in PLAN.md → "Lo que sigue". Read that first; the path is laid out.
+**Single most likely next thing to pick up**: Phase 2 of the mesh —
+daemon multi-bind (tailnet IP) + `tailscale status` discovery + a
+proper handshake to swap tokens. Design notes are in PLAN.md →
+"Lo que sigue". Read that first; the path is laid out.
 
 ### How to verify things quickly
 
 ```bash
-sunny doctor                               # one-screen checklist
+sunny doctor                               # one-screen checklist (incl. peers)
 sunny start && sunny status                # daemon up, healthz ok
 sunny token                                # bearer token (mode 0600)
+sunny peers                                # list local + remote daemons
 
 # end-to-end smoke
 TOK=$(sunny token)
 curl -s -H "Authorization: Bearer $TOK" localhost:7777/agents | jq
 ```
+
+### How to verify the mesh (Phase 1)
+
+Spin a second daemon on another port and add it as a peer:
+
+```bash
+# second daemon, isolated root
+sunny start --addr 127.0.0.1:7778 --root /tmp/sunny-vps
+TOK2=$(sunny token --root /tmp/sunny-vps)
+
+# register it with the local TUI roster
+echo "$TOK2" | sunny peers add vps http://127.0.0.1:7778
+sunny peers          # → local + vps
+sunny doctor         # → Peers section shows vps reachable
+```
+
+Then open the TUI (`sunny`), `ctrl+a` → the picker shows agents from
+both daemons prefixed with `local/…` or `vps/…`. Pressing enter on a
+remote row spawns a session bound to that peer; the conversation
+journal lives on the remote daemon.
 
 ### How to verify the tools
 
@@ -67,10 +91,21 @@ flow with grep / glob / ls.
   for CLIs that bring their own toolset. opencode also writes a
   per-agent file at `~/.config/opencode/agent/sunny-<slug>.md` to
   carry the system prompt (opencode has no `--append-system-prompt`).
-- `internal/doctor/` — probes for `sunny doctor` and `sunny setup`.
+- `internal/doctor/` — probes for `sunny doctor` and `sunny setup`,
+  including `CheckPeers` which hits `GET /agents` against each remote
+  to detect bad/expired tokens.
+- `internal/peers/` — load/save `~/.sunny/peers.yaml`. The local
+  daemon is always the implicit `name: local` entry and never appears
+  in the file.
+- `internal/client/federation.go` — wraps N `*Client` keyed by peer
+  name. `ListAgents` fan-outs in parallel; per-peer failures don't
+  fail the whole call. The TUI's `Model.fed` always exists (single-
+  peer when there's no peers.yaml) so all chat paths route through
+  `fed.For(host)`.
 - `cmd/sunny/serve.go` `buildEngine` — auto-detection chain. If a
   provider doesn't show up, this is where to log-trace.
-- `cmd/sunny/tui.go` `openTUI` — state restore + bootstrap session.
+- `cmd/sunny/tui.go` `openTUI` — state restore + bootstrap session +
+  loads peers.yaml and constructs the Federation passed to the model.
 - `internal/server/chat.go` `postTurn` — SSE writer + journal append.
 
 ## Code principles (in priority order)

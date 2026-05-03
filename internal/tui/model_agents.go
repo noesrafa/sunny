@@ -14,13 +14,18 @@ import (
 // itself lives in updateAppMsg (model_appmsg.go); these are the
 // helpers it routes to.
 
-// switchAgent spawns a new session bound to slug. Existing sessions
-// are not modified — agent binding is per-session and immutable for
-// that session's lifetime, so "switch agent" really means "open a
-// new tab on the chosen agent."
-func (m Model) switchAgent(slug string) (Model, tea.Cmd, bool) {
-	if cur := m.manager.Current(); cur != nil && cur.AgentSlug() == slug {
-		return m, nil, true // already on this agent — picker just closes
+// switchAgent spawns a new session bound to (slug, host). Existing
+// sessions are not modified — agent binding is per-session and
+// immutable for that session's lifetime, so "switch agent" really
+// means "open a new tab on the chosen agent."
+func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
+	slug := req.Slug
+	host := req.Host
+	if host == "" {
+		host = "local"
+	}
+	if cur := m.manager.Current(); cur != nil && cur.AgentSlug() == slug && cur.Host() == host {
+		return m, nil, true // already on this agent on this peer — picker just closes
 	}
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
@@ -31,15 +36,17 @@ func (m Model) switchAgent(slug string) (Model, tea.Cmd, bool) {
 		Effort:                   m.defaultEffort,
 		DangerousSkipPermissions: m.skipPerms,
 		AgentSlug:                slug,
+		Host:                     host,
 		Title:                    slug,
 	})
 	if err != nil {
 		m.lastErr = err
-		m.logger.Error("switch agent failed", "err", err, "slug", slug)
+		m.logger.Error("switch agent failed", "err", err, "slug", slug, "host", host)
 		return m, nil, true
 	}
-	if m.client != nil {
-		s.AttachClient(m.client, slug)
+	peerClient := m.clientFor(host)
+	if peerClient != nil {
+		s.AttachClient(peerClient, slug, host)
 	}
 	m.manager.Add(s)
 	m.textarea.Reset()

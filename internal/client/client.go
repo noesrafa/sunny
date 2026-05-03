@@ -28,19 +28,31 @@ type Client struct {
 	hc    *http.Client
 }
 
-// New constructs a daemon HTTP client. token is sent in
+// New constructs a daemon HTTP client from an "host:port" address
+// (the local daemon shape). token is sent in
 // `Authorization: Bearer <token>` on every request — empty token
 // skips the header (only useful when talking to an unauth'd dev
 // daemon).
 func New(addr, token string) *Client {
+	return NewFromBase("http://"+addr, token)
+}
+
+// NewFromBase constructs a client from a fully-qualified base URL
+// (scheme://host:port). Used for federated peers whose URL lives in
+// peers.yaml and may use a tailnet IP, hostname, etc.
+func NewFromBase(base, token string) *Client {
 	return &Client{
-		base:  "http://" + addr,
+		base:  base,
 		token: token,
 		// No global timeout — turns can be long. The caller's context
 		// owns lifetime.
 		hc: &http.Client{},
 	}
 }
+
+// Base returns the daemon URL this client targets. Useful for
+// rendering "you're talking to X" hints in the UI.
+func (c *Client) Base() string { return c.base }
 
 // auth attaches the bearer header when one is configured. Called by
 // every request method before c.hc.Do.

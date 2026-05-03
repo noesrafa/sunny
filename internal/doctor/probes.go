@@ -1,12 +1,16 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/noesrafa/sunny/internal/lifecycle"
+	"github.com/noesrafa/sunny/internal/peers"
 	"github.com/noesrafa/sunny/internal/secrets"
 )
 
@@ -117,6 +121,59 @@ func CheckDaemon(root string) Result {
 	uptime := time.Since(state.StartedAt).Round(time.Second)
 	r.Status = StatusOK
 	r.Detail = fmt.Sprintf("pid %d, %s, up %s", state.PID, state.Addr, humanDuration(uptime))
+	return r
+}
+
+// CheckPeers reads ~/.sunny/peers.yaml and probes each remote with a
+// short-timeout GET /agents (which doubles as an auth check —
+// /healthz is unauthenticated and would only prove the URL resolves).
+// Returns one Result per remote peer, empty when no peers.yaml.
+func CheckPeers(root string) []Result {
+	r, err := peers.Load(root, "127.0.0.1:7777", "")
+	if err != nil {
+		return []Result{{Name: "peers", Status: StatusFail, Detail: err.Error(), Hint: "fix ~/.sunny/peers.yaml"}}
+	}
+	out := make([]Result, 0, len(r.Remote))
+	for _, p := range r.Remote {
+		out = append(out, probePeer(p))
+	}
+	return out
+}
+
+func probePeer(p peers.Peer) Result {
+	r := Result{Name: p.Name}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(p.URL, "/")+"/agents", nil)
+	if err != nil {
+		r.Status = StatusFail
+		r.Detail = err.Error()
+		return r
+	}
+	if p.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.Token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		r.Status = StatusFail
+		r.Detail = fmt.Sprintf("%s — %s", p.URL, err.Error())
+		r.Hint = "is the remote daemon running?"
+		return r
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		r.Status = StatusFail
+		r.Detail = fmt.Sprintf("%s — 401 Unauthorized (token rejected)", p.URL)
+		r.Hint = "sunny peers remove " + p.Name + " && sunny peers add " + p.Name + " " + p.URL
+		return r
+	}
+	if resp.StatusCode != http.StatusOK {
+		r.Status = StatusWarn
+		r.Detail = fmt.Sprintf("%s — HTTP %d", p.URL, resp.StatusCode)
+		return r
+	}
+	r.Status = StatusOK
+	r.Detail = fmt.Sprintf("%s — reachable", p.URL)
 	return r
 }
 

@@ -12,8 +12,10 @@ import (
 	charmlog "charm.land/log/v2"
 
 	"github.com/noesrafa/sunny/internal/auth"
+	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/lifecycle"
 	"github.com/noesrafa/sunny/internal/logger"
+	"github.com/noesrafa/sunny/internal/peers"
 	"github.com/noesrafa/sunny/internal/session"
 	uistate "github.com/noesrafa/sunny/internal/state"
 	"github.com/noesrafa/sunny/internal/tui"
@@ -72,6 +74,17 @@ func openTUI(args []string) error {
 	// doesn't double up.
 	tui.Version = strings.TrimPrefix(version, "v")
 
+	// Load the peer roster (local + everything in ~/.sunny/peers.yaml)
+	// so the TUI can fan out agent listings across the federation.
+	// Failure here is non-fatal: degrade to a single-peer roster so
+	// the TUI still opens against the local daemon.
+	roster, perr := peers.Load(*root, *addr, tok)
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "sunny: peers.yaml: %v (continuing with local only)\n", perr)
+		roster = peers.Roster{Local: peers.Peer{Name: peers.LocalName, URL: "http://" + *addr, Token: tok}}
+	}
+	fed := client.NewFederation(roster)
+
 	cwd, _ := os.Getwd()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -116,6 +129,7 @@ func openTUI(args []string) error {
 		DaemonToken:              tok,
 		DefaultAgent:             "sunny",
 		InitialTheme:             themeID,
+		Federation:               fed,
 	})
 	return model.Run(ctx)
 }
@@ -144,6 +158,10 @@ func restoreSession(ctx context.Context, lg *charmlog.Logger, ss uistate.SavedSe
 	if slug == "" {
 		slug = "sunny"
 	}
+	host := ss.Host
+	if host == "" {
+		host = peers.LocalName
+	}
 	return session.New(ctx, ss.Cwd, session.Options{
 		Logger:    lg,
 		Title:     ss.Title,
@@ -151,6 +169,7 @@ func restoreSession(ctx context.Context, lg *charmlog.Logger, ss uistate.SavedSe
 		Effort:    ss.Effort,
 		Draft:     ss.Draft,
 		AgentSlug: slug,
+		Host:      host,
 		ConvID:    ss.ConvID,
 		Items:     items,
 		TotalCost: ss.TotalCost,

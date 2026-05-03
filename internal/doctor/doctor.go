@@ -47,11 +47,13 @@ type Result struct {
 
 // Report bundles every probe so the renderer can lay them out in one
 // pass. Providers are kept in declaration order; daemon and runtime
-// each surface independently.
+// each surface independently. Peers is one row per remote daemon
+// configured in ~/.sunny/peers.yaml — empty for solo installs.
 type Report struct {
 	Providers []Result
 	Daemon    Result
 	Runtime   Result
+	Peers     []Result
 }
 
 // Run executes every probe against the given runtime root. A missing
@@ -68,5 +70,6 @@ func Run(root string) Report {
 		},
 		Daemon:  CheckDaemon(root),
 		Runtime: CheckRuntime(root),
+		Peers:   CheckPeers(root),
 	}
 }

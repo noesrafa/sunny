@@ -97,7 +97,7 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	// --- agent CRUD (handlers in model_agents.go) ---
 	case SwitchAgentMsg:
 		m.overlay.CloseTop()
-		return m.switchAgent(v.Slug)
+		return m.switchAgent(v)
 	case OpenAgentFormMsg:
 		// Replace the picker with the form (no nested stack — the picker
 		// will be re-opened by AgentSavedMsg if needed).
@@ -112,11 +112,12 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		// Close the form, reopen the picker so the user sees the change.
 		m.overlay.CloseTop()
-		curSlug := ""
+		curSlug, curHost := "", ""
 		if cur := m.manager.Current(); cur != nil {
 			curSlug = cur.AgentSlug()
+			curHost = cur.Host()
 		}
-		return m, m.overlay.Open(NewAgentPickerDialog(m.client, curSlug, m.styles)), true
+		return m, m.overlay.Open(NewAgentPickerDialog(m.fed, curSlug, curHost, m.styles)), true
 	case DeleteAgentMsg:
 		// Confirm dialog approved; close confirm, archive async.
 		m.overlay.CloseTop()
@@ -195,8 +196,13 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 		m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
 		return m, nil, true
 	}
-	if m.client != nil {
-		s.AttachClient(m.client, slug)
+	host := v.Host
+	if host == "" {
+		host = "local"
+	}
+	peerClient := m.clientFor(host)
+	if peerClient != nil {
+		s.AttachClient(peerClient, slug, host)
 	}
 	m.manager.Add(s)
 	m.textarea.Reset()

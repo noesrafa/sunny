@@ -93,11 +93,13 @@ type CloseDialogMsg struct{}
 
 // CreateSessionMsg requests the root model to spawn a new session at cwd
 // bound to AgentSlug. AgentSlug empty falls back to the model's default.
+// Host is the federation peer the agent lives on; empty means "local".
 type CreateSessionMsg struct {
 	Cwd       string
 	Model     string
 	Effort    string
 	AgentSlug string
+	Host      string
 }
 
 // RenameSessionMsg requests the root model to rename the current session.

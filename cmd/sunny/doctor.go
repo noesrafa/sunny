@@ -42,6 +42,13 @@ func renderReport(w io.Writer, r doctor.Report) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Runtime")
 	writeBareRow(w, r.Runtime)
+	if len(r.Peers) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Peers")
+		for _, p := range r.Peers {
+			writeRow(w, p)
+		}
+	}
 
 	if pending := nextSteps(r); len(pending) > 0 {
 		fmt.Fprintln(w)
@@ -104,6 +111,11 @@ func nextSteps(r doctor.Report) []string {
 	}
 	if r.Runtime.Status != doctor.StatusOK {
 		add(r.Runtime.Hint)
+	}
+	for _, p := range r.Peers {
+		if p.Status != doctor.StatusOK {
+			add(p.Hint)
+		}
 	}
 	return out
 }

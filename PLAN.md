@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.11.0)
+## Estado actual (v0.12.0)
 
 ### Lo que funciona end-to-end
 
@@ -187,34 +187,50 @@ sobrescribe.
   demasiado fácil de tirar por accidente). NewSession dialog
   reducido a agent + cwd; model + effort viven en `agent.yaml`.
 - **Onboarding**: `sunny doctor` imprime checklist (✓/⚠/✗) de
-  providers, daemon y runtime; `sunny setup [provider]` instala
+  providers, daemon, runtime y peers; `sunny setup [provider]` instala
   el binario apropiado (brew/curl con confirmación) o pide la API
   key, según el provider. `--print-only` para flujos no-
   interactivos (CI, SSH).
+- **Mesh (Fase 1)**: `~/.sunny/peers.yaml` opcional con `name`,
+  `url`, `token` por peer remoto; `local` es implícito. `sunny peers
+  add/remove/list` para CRUD. `client.Federation` fan-outs el listing
+  de agentes en paralelo, errores per-peer aislados. La TUI muestra
+  agentes con prefijo `host/slug` cuando hay >1 peer; conversaciones
+  viven en el engine de origen (data por ubicación). CRUD de agentes
+  (create/edit/archive) sólo funciona contra local en v0.12 —
+  federation de escritura viene en Fase 2.
 - **Release**: GoReleaser → linux/amd64 + darwin/arm64, Homebrew
   tap auto-actualizado por tag.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.11.0)
+### Lo que sigue (post-v0.12.0)
 
-**El siguiente bloque grande — multi-cliente sobre Tailscale**:
-
-Es el feature flagship descrito arriba (sección "Modelo de mesh
-con Tailscale"). Cada host corre su propio `sunny start`; el TUI
-los descubre y los unifica visualmente sin replicar data.
+**Fase 2 del mesh — Tailscale + ergonomía de auth**:
 
 - [ ] **Daemon escucha en tailnet IP** además de 127.0.0.1.
       `tailscale ip` al boot; bind extra si hay éxito.
-- [ ] **Discovery**: TUI lee `tailscale status --json` y prueba
-      `:7777/healthz` en cada peer. Cache en `~/.sunny/peers.yaml`.
-- [ ] **Auth entre peers**: bearer token compartido vs trust-by-
-      tailnet (la red ya autenticó). Decidir.
-- [ ] **Federation en TUI**: lista unificada de agentes con prefijo
-      `host/slug` (`mac/zoro`, `vps/sunny`). Filtro por host.
-- [ ] **Cliente HTTP multi-engine**: fan-out a N daemons al listar;
-      una sola conv siempre vive en su engine de origen.
+- [ ] **Discovery**: `sunny peers scan` lee `tailscale status --json`
+      y prueba `:7777/healthz` en cada peer; los que responden los
+      añade a `peers.yaml`.
+- [ ] **Handshake automático de tokens**: `sunny peer add <url>` que
+      negocia el bearer en lugar de pedírselo al usuario por SSH.
+      Endpoint nuevo `POST /peers/handshake`.
 - [ ] **mDNS/Bonjour fallback** para LAN sin Tailscale (nice-to-have).
+
+**Fase 3 del mesh — tiempo real cross-cliente**:
+
+- [ ] **`GET /events` SSE general** en el daemon: emite `agent_*` y
+      `conversation_*` para que clientes federados se sincronicen.
+- [ ] **TUI subscribe a /events de cada peer** al boot; refresca
+      sidebar y agent picker al recibir eventos remotos.
+
+**Federation de escritura** (paralelo a Fase 2/3):
+- [ ] **CRUD de agentes contra remoto** desde la TUI. Hoy solo
+      local. El picker emite el host correcto pero el form de edit/
+      create siempre va al daemon local.
+- [ ] **`sunny peer scan-agents`** para hot-cache la lista de
+      agentes remotos cuando el daemon remoto está caído.
 
 **Después del mesh** (orden negociable):
 

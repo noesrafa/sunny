@@ -31,8 +31,9 @@ type Model struct {
 	logger *log.Logger
 
 	manager       *session.Manager
-	client        *client.Client
-	defaultAgent  string // slug to send turns at (v0.3.x: hardcoded "sunny")
+	client        *client.Client       // local daemon client; CRUD ops still go here
+	fed           *client.Federation   // peer roster — chat routing flows through For(host)
+	defaultAgent  string               // slug to send turns at (v0.3.x: hardcoded "sunny")
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -95,6 +96,13 @@ type Options struct {
 	// DefaultAgent is the slug to send turns at. v0.3.x hardcodes "sunny";
 	// session-vs-agent picking lands later.
 	DefaultAgent string
+
+	// Federation, when set, is used for chat routing in place of the
+	// single DaemonAddr/DaemonToken pair. Pass one when the TUI should
+	// see agents from multiple peers (the local daemon plus anyone
+	// configured in ~/.sunny/peers.yaml). Nil falls back to a
+	// single-peer "local" federation built from DaemonAddr/Token.
+	Federation *client.Federation
 }
 
 const (
@@ -195,17 +203,37 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	if defaultAgent == "" {
 		defaultAgent = "sunny"
 	}
-	if cli != nil {
-		// Attach every existing session to the daemon. Each session
-		// keeps its own agent binding (set when it was created or
-		// restored from state.json); fall back to the default only for
-		// sessions that don't carry one yet.
+	fed := opts.Federation
+	if fed == nil && cli != nil {
+		// No federation supplied → build a single-peer one so all
+		// downstream code paths can route through fed.For(host)
+		// uniformly. The implicit local entry uses the same client
+		// the legacy path would have used.
+		fed = client.NewFederationFromClient("local", cli)
+	}
+
+	if fed != nil {
+		// Attach every existing session to its peer's client. Each
+		// session keeps its own agent binding (set when it was
+		// created or restored from state.json); fall back to the
+		// default only for sessions that don't carry one yet.
 		for _, s := range mgr.Sessions {
 			slug := s.AgentSlug()
 			if slug == "" {
 				slug = defaultAgent
 			}
-			s.AttachClient(cli, slug)
+			host := s.Host()
+			peerClient := fed.For(host)
+			if peerClient == nil {
+				// Saved session pointed at a peer no longer in the
+				// roster; degrade to local so the session opens
+				// instead of dropping silently. SendBegin will
+				// surface a clear error if the agent doesn't exist
+				// locally.
+				peerClient = fed.Local()
+				host = "local"
+			}
+			s.AttachClient(peerClient, slug, host)
 		}
 	}
 
@@ -216,6 +244,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		logger:        logger,
 		manager:       mgr,
 		client:        cli,
+		fed:           fed,
 		defaultAgent:  defaultAgent,
 		overlay:       &Overlay{},
 		chat:          chatVP,
@@ -228,6 +257,20 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		themeID:       themeID,
 		skipPerms:     opts.DangerousSkipPermissions,
 	}
+}
+
+// clientFor returns the daemon client for the named federation peer.
+// Falls back to the local client when the peer isn't in the roster
+// (the saved session may reference a peer that was removed since).
+// Returns nil only when the federation itself is missing.
+func (m *Model) clientFor(host string) *client.Client {
+	if m.fed == nil {
+		return m.client
+	}
+	if c := m.fed.For(host); c != nil {
+		return c
+	}
+	return m.fed.Local()
 }
 
 // waitForChatEvent reads one event off the SSE stream and surfaces it as

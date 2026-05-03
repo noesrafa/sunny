@@ -2,12 +2,12 @@
 
 Self-hosted personal agent. One binary, your data, your rules.
 
-> **Status:** v0.11.0 — chat works end-to-end across four backends:
-> claude-code, Anthropic API, Ollama Cloud, and opencode. Conversations
-> persist per-agent on disk; the agent has read-only filesystem tools
-> (view, ls, grep, glob); `sunny doctor` and `sunny setup` walk you
-> through getting any provider ready. Write/exec tools and a permission
-> flow are next.
+> **Status:** v0.12.0 — chat works end-to-end across four backends
+> (claude-code, Anthropic API, Ollama Cloud, opencode). Phase 1 of the
+> mesh has landed: one TUI can talk to multiple sunny daemons via
+> `~/.sunny/peers.yaml` — the agent picker shows `host/slug` rows and
+> conversations stay on the engine they were created on. Tailscale
+> auto-discovery and real-time cross-client sync are next.
 
 ## Install
 
@@ -34,7 +34,7 @@ Requires Go 1.26+.
 ## Quick start
 
 ```bash
-sunny doctor         # checklist: providers, daemon, runtime
+sunny doctor         # checklist: providers, daemon, runtime, peers
 sunny setup          # interactive walk-through of whatever isn't ready
 sunny                # auto-starts daemon if needed; opens TUI
 ```
@@ -50,6 +50,28 @@ sunny setup ollama        # same, for Ollama Cloud
 
 Pass `--print-only` to any of those to see the commands without
 running them — handy over SSH or in CI.
+
+## Multi-machine mesh
+
+One TUI can drive several sunny daemons. The local daemon is always
+implicit; remote daemons live in `~/.sunny/peers.yaml`:
+
+```bash
+# on the remote host (VPS, raspberry pi, …)
+sunny start
+sunny token          # copy this somewhere safe
+
+# on your laptop
+echo "<token>" | sunny peers add vps http://100.64.0.5:7777
+sunny peers          # → local · vps
+sunny doctor         # → Peers section shows vps reachable
+sunny                # → ctrl+a shows local/* and vps/* agents in one list
+```
+
+Conversations stay on the engine that owns the agent — sunny does
+not replicate data across hosts. Today peers must be addressable by
+URL (hostname/IP your laptop can reach); Tailscale auto-discovery
+ships in v0.13.
 
 Or daemon-only:
 
@@ -152,9 +174,10 @@ sunny/
 │   │   ├── ollama/              # Ollama Cloud /api/chat
 │   │   └── opencode/            # subprocess wrapper for `opencode run`
 │   ├── tools/                   # view, ls, grep, glob (read-only)
-│   ├── doctor/                  # probes: provider binaries, keys, daemon, runtime
+│   ├── doctor/                  # probes: provider binaries, keys, daemon, runtime, peers
+│   ├── peers/                   # ~/.sunny/peers.yaml: federation roster
 │   ├── server/                  # HTTP API: chat, agents, conversations, secrets
-│   ├── client/                  # daemon HTTP client used by TUI
+│   ├── client/                  # daemon HTTP client + Federation (fan-out across peers)
 │   ├── session/                 # in-process session state for TUI tabs
 │   ├── state/                   # ~/.sunny/state.json (TUI layout cache)
 │   └── tui/                     # Bubble Tea client
@@ -168,6 +191,7 @@ sunny/
 ~/.sunny/
 ├── token                            # bearer token (mode 0600)
 ├── secrets.yaml                     # provider keys (mode 0600)
+├── peers.yaml                       # remote daemons for the TUI (mode 0600, optional)
 ├── state.json                       # TUI layout cache
 ├── run/                             # pid, log (managed by sunny)
 ├── agents/

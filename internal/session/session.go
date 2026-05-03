@@ -140,22 +140,40 @@ type Session struct {
 
 	// Engine wiring. The session points at a daemon-bound client; SendBegin
 	// uses it to open an SSE stream. activeStream is non-nil while a turn
-	// is in flight so Cancel can interrupt it.
-	c           *client.Client
-	agentSlug   string
+	// is in flight so Cancel can interrupt it. host is the federation peer
+	// name (`local`, `vps`, …) — used by the UI for display and by state
+	// persistence to re-bind the session to the right peer on restart.
+	c            *client.Client
+	agentSlug    string
+	host         string
 	activeStream *client.Stream
 	streamCancel context.CancelFunc
 }
 
 // AttachClient binds the session to a daemon. Call once at construction.
-// The slug identifies which agent the daemon should run.
-func (s *Session) AttachClient(c *client.Client, slug string) {
+// `slug` identifies which agent the daemon should run; `host` is the
+// federation peer name (use "local" or peers.LocalName for the local
+// daemon).
+func (s *Session) AttachClient(c *client.Client, slug, host string) {
 	s.c = c
 	s.agentSlug = slug
+	if host == "" {
+		host = "local"
+	}
+	s.host = host
 }
 
 // AgentSlug returns the slug of the agent this session is bound to.
 func (s *Session) AgentSlug() string { return s.agentSlug }
+
+// Host returns the federation peer name this session lives on
+// ("local" by default).
+func (s *Session) Host() string {
+	if s.host == "" {
+		return "local"
+	}
+	return s.host
+}
 
 // AddAttachment registers a clipboard image with the session and returns
 // the 1-based marker index the caller should embed in the textarea draft.
@@ -185,6 +203,9 @@ type Options struct {
 	// will be called with this slug. Empty falls back to whatever the
 	// caller passes to AttachClient.
 	AgentSlug string
+	// Host is the federation peer name this session lives on. Empty
+	// defaults to "local" (the daemon on the same machine).
+	Host string
 	// ConvID, when non-empty, restores a session bound to an existing
 	// server-side conversation. SendBegin reuses it instead of creating
 	// a new one. Empty on fresh sessions.
@@ -231,8 +252,16 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 		Turns:     opts.Turns,
 		State:     StateIdle,
 		agentSlug: opts.AgentSlug,
+		host:      defaultHost(opts.Host),
 		logger:    logger,
 	}, nil
+}
+
+func defaultHost(h string) string {
+	if h == "" {
+		return "local"
+	}
+	return h
 }
 
 // RefreshBranch re-reads the cwd's git branch and dirty state. Returns

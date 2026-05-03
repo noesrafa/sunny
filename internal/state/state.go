@@ -19,7 +19,7 @@ import (
 	"path/filepath"
 )
 
-const Version = 5 // bumped when AgentSlug was added (multi-agent sessions)
+const Version = 6 // bumped when Host was added (federated sessions)
 
 type SavedSession struct {
 	Title  string `json:"title"`
@@ -30,6 +30,10 @@ type SavedSession struct {
 	// AgentSlug binds the session to one agent in ~/.sunny/agents/.
 	// Empty (legacy state files) restores as "sunny".
 	AgentSlug string `json:"agent_slug,omitempty"`
+	// Host is the federation peer name this session lives on. Empty
+	// (legacy state files) restores as "local" (the daemon on the same
+	// host as the TUI).
+	Host string `json:"host,omitempty"`
 	// ConvID points at ~/.sunny/agents/<slug>/conversations/<id>/ which
 	// owns the persistent transcript. Empty for sessions that haven't
 	// sent any message yet.

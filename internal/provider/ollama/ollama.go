@@ -65,12 +65,15 @@ func New(s *secrets.Store) (*Driver, error) {
 		return nil, errors.New("ollama: api_key not configured (set via `sunny secrets ollama set api_key`)")
 	}
 	// Streaming has no body timeout (turns can be long), but tune the
-	// transport so a wedged TCP connection doesn't hang forever. Cloud
-	// occasionally stalls during model load; ResponseHeaderTimeout
-	// catches that without affecting the streaming body.
+	// transport so a wedged TCP connection doesn't hang forever.
+	// Cloud occasionally stalls during model load; the previous 30s
+	// budget on response headers turned out to be tight when feeding
+	// big tool results back in (the second iteration of a round-trip
+	// can carry a multi-KB ls/grep result and processing latency
+	// scales with context). 90s is a more honest ceiling.
 	transport := &http.Transport{
-		ResponseHeaderTimeout: 30 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 90 * time.Second,
+		IdleConnTimeout:       120 * time.Second,
 	}
 	return &Driver{secrets: s, hc: &http.Client{Transport: transport}}, nil
 }

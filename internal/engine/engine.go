@@ -160,9 +160,14 @@ func (e *Engine) runTurnLoop(
 			case provider.ToolResult:
 				out <- ev
 			case provider.Done:
+				// Hold on to Done until we know whether this is the
+				// final iteration. If tool calls are pending, the
+				// engine swallows this Done and re-streams; emitting
+				// it now would tell the SSE client "turn over" while
+				// the engine keeps going, and the client would stop
+				// reading mid-stream.
 				done = v
 				sawDone = true
-				out <- ev
 			case provider.Error:
 				out <- ev
 				return
@@ -178,12 +183,14 @@ func (e *Engine) runTurnLoop(
 			return
 		}
 
-		// No tool calls → turn is over. Anthropic sets
-		// stop_reason="tool_use" reliably, but Ollama Cloud sometimes
-		// returns done_reason="stop" alongside tool_calls — treat the
-		// presence of pending calls as the source of truth and ignore
-		// stop_reason for the loop decision.
+		// No tool calls → final iteration. Forward the Done now and
+		// terminate. Anthropic sets stop_reason="tool_use" reliably,
+		// but Ollama Cloud sometimes returns done_reason="stop"
+		// alongside tool_calls — treat the presence of pending calls
+		// as the source of truth and ignore stop_reason for the loop
+		// decision.
 		if len(pendingCalls) == 0 {
+			out <- done
 			return
 		}
 

@@ -68,6 +68,27 @@ survive the daemon restarting under it.
   by checking for `~/.sunny/agents/` (the real "fresh install"
   marker). Once seeded, the directory belongs to the user.
 
+## Multi-agent
+
+- Agents live at `~/.sunny/agents/<slug>/`. Each owns its skills,
+  knowledge, conversations, and persona.
+- CRUD over HTTP:
+  - `GET /agents` — list summaries
+  - `POST /agents` — create (`{slug,name,description,model,prompt}`)
+  - `GET /agents/{slug}` — full detail (now includes `prompt`)
+  - `PATCH /agents/{slug}` — partial update; nil fields untouched
+  - `DELETE /agents/{slug}` — moves dir to `~/.sunny/.trash/`,
+    idempotent
+- Slug shape: `[a-z0-9][a-z0-9-]*`. Immutable after creation. To
+  rename an agent, copy/move on disk and reload the daemon — the
+  HTTP API doesn't support rename in v0.6.
+- TUI: `ctrl+a` opens the agent picker. Enter spawns a new session
+  bound to the chosen agent; `n` opens the create form, `e` edits,
+  `d` deletes (with confirm). Each TUI session is bound to one
+  agent for its lifetime — switching means a new session/tab.
+- The in-memory `store.Store` is mutated atomically with the
+  filesystem on every CRUD op. No fsnotify (yet).
+
 ## Conversation persistence
 
 Every chat lives under its agent:

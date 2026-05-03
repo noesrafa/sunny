@@ -16,6 +16,7 @@ type KeyMap struct {
 	Diff          key.Binding // ctrl+d — open the git diff viewer
 	Runs          key.Binding // open the runs manager modal
 	TilePicker    key.Binding // ctrl+k — searchable tab switcher
+	Agents        key.Binding // ctrl+a — agent picker / manager
 	Settings      key.Binding // ctrl+s — open settings modal (theme picker)
 	Game          key.Binding // ctrl+g — open minigames modal (snake)
 	ScrollUp      key.Binding
@@ -40,6 +41,7 @@ func DefaultKeyMap() KeyMap {
 		Diff:          key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diff")),
 		Runs:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "runs")),
 		TilePicker:    key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "switch tab")),
+		Agents:        key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "agents")),
 		Settings:      key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "settings")),
 		Game:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "game")),
 		ScrollUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),

@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"context"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/session"
 )
 
@@ -79,9 +82,146 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.overlay.CloseTop()
 		m.repaint(v.OriginalID)
 		return m, nil, true
+
+	// --- agent CRUD flow ---
+
+	case OpenSubDialogMsg:
+		// A dialog is launching another dialog (e.g. picker → confirm).
+		return m, m.overlay.Open(v.Dialog), true
+
+	case SwitchAgentMsg:
+		m.overlay.CloseTop()
+		return m.switchAgent(v.Slug)
+
+	case OpenAgentFormMsg:
+		// Replace the picker with the form (no nested stack — the picker
+		// will be re-opened by AgentSavedMsg if needed).
+		m.overlay.CloseTop()
+		return m, m.overlay.Open(NewAgentFormDialog(m.client, v, m.styles)), true
+
+	case SubmitAgentFormMsg:
+		return m, m.submitAgentForm(v), true
+
+	case AgentSavedMsg:
+		if v.Err != nil {
+			// Form already shows the error; do nothing else.
+			return m, nil, true
+		}
+		// Close the form, reopen the picker so the user sees the change.
+		m.overlay.CloseTop()
+		curSlug := ""
+		if cur := m.manager.Current(); cur != nil {
+			curSlug = cur.AgentSlug()
+		}
+		return m, m.overlay.Open(NewAgentPickerDialog(m.client, curSlug, m.styles)), true
+
+	case DeleteAgentMsg:
+		// Confirm dialog approved; close confirm, run delete async.
+		m.overlay.CloseTop()
+		return m, m.deleteAgentCmd(v.Slug), true
+
+	case AgentChangedMsg:
+		// Bubbles down to the open picker (if any) so it refreshes.
+		// CloseTop already ran in the upstream handler; nothing else.
+		return m, m.overlay.UpdateTop(v), true
 	}
 	return m, nil, false
 }
+
+// switchAgent spawns a new session bound to slug. Existing sessions are
+// not modified — agent binding is per-session and immutable for that
+// session's lifetime.
+func (m Model) switchAgent(slug string) (Model, tea.Cmd, bool) {
+	if cur := m.manager.Current(); cur != nil && cur.AgentSlug() == slug {
+		return m, nil, true // already on this agent — picker just closes
+	}
+	if cur := m.manager.Current(); cur != nil {
+		cur.Draft = m.textarea.Value()
+	}
+	s, err := session.New(m.ctx, m.initialCwd, session.Options{
+		Logger:                   m.logger,
+		Model:                    m.defaultModel,
+		Effort:                   m.defaultEffort,
+		DangerousSkipPermissions: m.skipPerms,
+		Title:                    slug,
+	})
+	if err != nil {
+		m.lastErr = err
+		m.logger.Error("switch agent failed", "err", err, "slug", slug)
+		return m, nil, true
+	}
+	if m.client != nil {
+		s.AttachClient(m.client, slug)
+	}
+	m.manager.Add(s)
+	m.textarea.Reset()
+	m.layout()
+	m.refreshViewport()
+	m.saveState()
+	return m, nil, true
+}
+
+// submitAgentForm runs the create/update API call asynchronously and
+// emits AgentSavedMsg with the result.
+func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
+	c := m.client
+	if c == nil {
+		return func() tea.Msg {
+			return AgentSavedMsg{EditSlug: req.EditSlug, Err: errNoClient}
+		}
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if req.EditSlug == "" {
+			a, err := c.CreateAgent(ctx, client.AgentCreate{
+				Slug:        req.Slug,
+				Name:        req.Name,
+				Description: req.Description,
+				Model:       req.Model,
+				Prompt:      req.Prompt,
+			})
+			if err != nil {
+				return AgentSavedMsg{Err: err}
+			}
+			return AgentSavedMsg{Slug: a.Slug}
+		}
+		_, err := c.UpdateAgent(ctx, req.EditSlug, client.AgentPatch{
+			Name:        &req.Name,
+			Description: &req.Description,
+			Model:       &req.Model,
+			Prompt:      &req.Prompt,
+		})
+		if err != nil {
+			return AgentSavedMsg{EditSlug: req.EditSlug, Err: err}
+		}
+		return AgentSavedMsg{EditSlug: req.EditSlug, Slug: req.EditSlug}
+	}
+}
+
+func (m Model) deleteAgentCmd(slug string) tea.Cmd {
+	c := m.client
+	if c == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := c.DeleteAgent(ctx, slug); err != nil {
+			return AgentChangedMsg{Status: "delete failed: " + err.Error()}
+		}
+		return AgentChangedMsg{Status: "deleted " + slug}
+	}
+}
+
+// errNoClient is returned by agent CRUD commands when the TUI was
+// launched without a daemon connection. Should be unreachable in
+// practice (auto-start makes one).
+var errNoClient = clientErr("no daemon connection")
+
+type clientErr string
+
+func (e clientErr) Error() string { return string(e) }
 
 // repaint swaps the active palette and re-applies it everywhere a Style
 // got copied at construction time. Called by all three settings flows

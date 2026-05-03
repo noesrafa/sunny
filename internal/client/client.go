@@ -155,6 +155,143 @@ type Stream struct {
 	closed bool
 }
 
+// AgentCreate is the body of POST /agents.
+type AgentCreate struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Model       string `json:"model"`
+	Prompt      string `json:"prompt,omitempty"`
+}
+
+// AgentPatch is the body of PATCH /agents/{slug}. nil pointers leave
+// the corresponding field untouched.
+type AgentPatch struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Model       *string `json:"model,omitempty"`
+	Prompt      *string `json:"prompt,omitempty"`
+}
+
+// CreateAgent scaffolds a new agent on the daemon. Returns the new
+// summary on success.
+func (c *Client) CreateAgent(ctx context.Context, body AgentCreate) (*AgentSummary, error) {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/agents", strings.NewReader(string(buf)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("POST /agents: %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out AgentSummary
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// UpdateAgent patches an existing agent. nil fields in patch are left
+// untouched.
+func (c *Client) UpdateAgent(ctx context.Context, slug string, patch AgentPatch) (*AgentSummary, error) {
+	buf, err := json.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.base+"/agents/"+slug, strings.NewReader(string(buf)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("PATCH /agents/%s: %d: %s", slug, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out AgentSummary
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteAgent moves the agent's directory to the trash. Idempotent.
+func (c *Client) DeleteAgent(ctx context.Context, slug string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+slug, nil)
+	if err != nil {
+		return err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("DELETE /agents/%s: %d: %s", slug, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return nil
+}
+
+// AgentDetail is GET /agents/{slug}: full config + skill + knowledge metadata.
+type AgentDetail struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Model       string `json:"model"`
+	Prompt      string `json:"prompt,omitempty"`
+	Skills      []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	} `json:"skills"`
+	Knowledge []struct {
+		Name string `json:"name"`
+	} `json:"knowledge"`
+}
+
+// GetAgent fetches the full detail for one agent.
+func (c *Client) GetAgent(ctx context.Context, slug string) (*AgentDetail, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+slug, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("agent %q not found", slug)
+	}
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GET /agents/%s: %d: %s", slug, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var out AgentDetail
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CreateConversation allocates a new conversation under an agent. Title
 // and model are optional — empty falls back to "untitled" / the agent's
 // default model.

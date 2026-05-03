@@ -37,7 +37,10 @@ func New(opts Options) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /agents", srv.listAgents)
+	mux.HandleFunc("POST /agents", srv.createAgent)
 	mux.HandleFunc("GET /agents/{slug}", srv.getAgent)
+	mux.HandleFunc("PATCH /agents/{slug}", srv.updateAgent)
+	mux.HandleFunc("DELETE /agents/{slug}", srv.deleteAgent)
 	mux.HandleFunc("GET /agents/{slug}/skills/{name}", srv.getSkill)
 	mux.HandleFunc("GET /agents/{slug}/knowledge/{file...}", srv.getKnowledge)
 	mux.HandleFunc("GET /agents/{slug}/conversations", srv.listConversations)
@@ -135,6 +138,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Name        string          `json:"name"`
 		Description string          `json:"description,omitempty"`
 		Model       string          `json:"model"`
+		Prompt      string          `json:"prompt,omitempty"`
 		Skills      []skillItem     `json:"skills"`
 		Knowledge   []knowledgeItem `json:"knowledge"`
 	}{
@@ -142,6 +146,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Name:        a.Config.Name,
 		Description: a.Config.Description,
 		Model:       a.Config.Model,
+		Prompt:      a.Prompt,
 		Skills:      []skillItem{},
 		Knowledge:   []knowledgeItem{},
 	}

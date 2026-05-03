@@ -24,6 +24,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, m.openQuitDialog(), true
 	case key.Matches(msg, m.keymap.TilePicker):
 		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles)), true
+	case key.Matches(msg, m.keymap.Agents):
+		curSlug := ""
+		if cur := m.manager.Current(); cur != nil {
+			curSlug = cur.AgentSlug()
+		}
+		return m, m.overlay.Open(NewAgentPickerDialog(m.client, curSlug, m.styles)), true
 	case key.Matches(msg, m.keymap.Settings):
 		return m, m.overlay.Open(NewSettingsDialog(m.themeID, m.bgIsLight, m.styles)), true
 	case key.Matches(msg, m.keymap.Game):

@@ -144,21 +144,24 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 			s.finalizeTurn(slug, convID, v)
 			terminated = true
 		case provider.Error:
-			s.journal(slug, convID, "error", map[string]string{"message": v.Err.Error()})
-			writeSSEError(w, flusher, v.Err)
+			// Distinguish "user cancelled" from "real error". Provider
+			// drivers surface ctx cancellation as Error{Err: ctx.Err()};
+			// we re-classify those so the journal reflects intent and
+			// the UI can render them differently.
+			if errors.Is(v.Err, context.Canceled) || r.Context().Err() != nil {
+				s.journal(slug, convID, "cancelled", map[string]string{"reason": "client disconnected"})
+			} else {
+				s.journal(slug, convID, "error", map[string]string{"message": v.Err.Error()})
+				writeSSEError(w, flusher, v.Err)
+			}
 			terminated = true
 		}
 	}
 
-	// Stream ended without a terminal event → caller hung up before the
-	// turn completed (or the engine closed the channel mid-flight). Mark
-	// it cancelled so reload from disk reflects reality.
+	// Stream ended without any terminal event — the engine closed the
+	// channel without a Done/Error. Treat as cancelled.
 	if !terminated {
-		reason := "stream closed"
-		if err := r.Context().Err(); err != nil && errors.Is(err, context.Canceled) {
-			reason = "client disconnected"
-		}
-		s.journal(slug, convID, "cancelled", map[string]string{"reason": reason})
+		s.journal(slug, convID, "cancelled", map[string]string{"reason": "stream closed"})
 	}
 }
 

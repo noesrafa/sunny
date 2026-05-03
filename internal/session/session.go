@@ -148,12 +148,14 @@ type Session struct {
 }
 
 // AttachClient binds the session to a daemon. Call once at construction.
-// The slug identifies which agent the daemon should run; for v0.3.x it's
-// the default ("sunny") since multi-agent picking lands later.
+// The slug identifies which agent the daemon should run.
 func (s *Session) AttachClient(c *client.Client, slug string) {
 	s.c = c
 	s.agentSlug = slug
 }
+
+// AgentSlug returns the slug of the agent this session is bound to.
+func (s *Session) AgentSlug() string { return s.agentSlug }
 
 // AddAttachment registers a clipboard image with the session and returns
 // the 1-based marker index the caller should embed in the textarea draft.

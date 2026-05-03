@@ -1,4 +1,4 @@
-// Package agent loads and validates an agent's `agent.yaml`.
+// Package agent loads, validates, and writes an agent's `agent.yaml`.
 package agent
 
 import (
@@ -11,7 +11,7 @@ import (
 
 type Config struct {
 	Name        string `yaml:"name"`
-	Description string `yaml:"description"`
+	Description string `yaml:"description,omitempty"`
 	Model       string `yaml:"model"`
 }
 
@@ -39,4 +39,22 @@ func LoadConfig(dir string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &c, nil
+}
+
+// SaveConfig writes c to dir/agent.yaml after validating. Atomic-ish via
+// .tmp + rename so a crash mid-write doesn't leave a half-written file.
+func SaveConfig(dir string, c *Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal agent.yaml: %w", err)
+	}
+	target := filepath.Join(dir, "agent.yaml")
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write agent.yaml: %w", err)
+	}
+	return os.Rename(tmp, target)
 }

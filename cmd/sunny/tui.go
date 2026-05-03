@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	charmlog "charm.land/log/v2"
 
@@ -106,8 +107,13 @@ func openTUI(args []string) error {
 	//
 	// peers.yaml entries take precedence over both — operator
 	// config wins.
+	//
+	// Runs ASYNC in a goroutine so a slow / hung discovery never
+	// blocks TUI startup. Discovered peers join the federation as
+	// they're found; the agent picker re-queries on open so they
+	// surface naturally.
 	if tsnet.Available() {
-		discoverTailnetPeers(ctx, fed, *root, lg)
+		go discoverTailnetPeers(ctx, fed, *root, lg)
 	}
 
 	mgr := session.NewManager()
@@ -159,9 +165,19 @@ func openTUI(args []string) error {
 //	2. Our local mesh.key matches their fingerprint → AddMeshPeer.
 //	3. Otherwise skip — daemon belongs to someone else's mesh.
 //
-// Bounded by tsnet.FetchStatus (5s) + per-peer FetchIdentity (3s
-// each, parallel), so a tailnet of dozens completes in seconds.
+// Hard 5-second budget for the whole pass. Per-peer probes run in
+// parallel; a tailnet of dozens completes well within budget.
+// When the budget expires we add whatever responded and walk away
+// — better to show the federation we have than to block forever
+// on one stuck peer.
 func discoverTailnetPeers(ctx context.Context, fed *client.Federation, root string, lg *charmlog.Logger) {
+	// Total wall-clock budget. Belt-and-suspenders: per-peer
+	// FetchIdentity already has its own 3s timeout, but if every
+	// peer in a 50-node tailnet stalled at the SYN, summing those
+	// timeouts could still take longer than anybody's patience.
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	st, err := tsnet.FetchStatus()
 	if err != nil {
 		lg.Debug("tailnet discovery: status", "err", err.Error())
@@ -175,15 +191,24 @@ func discoverTailnetPeers(ctx context.Context, fed *client.Federation, root stri
 	port := "7777"
 
 	type result struct {
-		name        string
-		base        string
-		path        string // "identity" | "mesh" | ""
+		name string
+		base string
+		path string // "identity" | "mesh" | ""
 	}
 	resCh := make(chan result, len(st.Peers))
+
+	// Count what we ACTUALLY launch, not what's in st.Peers — a
+	// tailnet with offline / IP-less peers (iPhone in a pocket,
+	// retired node, etc.) makes len(st.Peers) > the number of
+	// goroutines that send on resCh. Waiting for len(st.Peers)
+	// recvs deadlocks the loop and, when discovery is synchronous,
+	// freezes TUI boot. The launched counter is the bug fix.
+	launched := 0
 	for _, p := range st.Peers {
 		if !p.Online || p.IP == "" {
 			continue
 		}
+		launched++
 		go func(p tsnet.Peer) {
 			base := "http://" + p.IP + ":" + port
 			id, err := client.FetchIdentity(ctx, base)
@@ -203,7 +228,7 @@ func discoverTailnetPeers(ctx context.Context, fed *client.Federation, root stri
 	}
 
 	added := 0
-	for range st.Peers {
+	for i := 0; i < launched; i++ {
 		select {
 		case r := <-resCh:
 			switch r.path {
@@ -217,6 +242,7 @@ func discoverTailnetPeers(ctx context.Context, fed *client.Federation, root stri
 				lg.Info("tailnet peer discovered (shared mesh key)", "name", r.name, "url", r.base)
 			}
 		case <-ctx.Done():
+			lg.Debug("tailnet discovery: budget exceeded", "completed", i, "expected", launched)
 			return
 		}
 	}

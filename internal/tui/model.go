@@ -14,6 +14,7 @@ import (
 	"charm.land/log/v2"
 
 	"github.com/noesrafa/sunny/internal/anim"
+	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/list"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/sysstats"
@@ -30,6 +31,8 @@ type Model struct {
 	logger *log.Logger
 
 	manager       *session.Manager
+	client        *client.Client
+	defaultAgent  string // slug to send turns at (v0.3.x: hardcoded "sunny")
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -80,6 +83,14 @@ type Options struct {
 	// InitialTheme is the persisted theme ID from state.json. Empty falls
 	// back to the default (Themes[0]).
 	InitialTheme string
+
+	// DaemonAddr is "host:port" of the sunny daemon. Required for chat —
+	// without it submitting a message returns ErrNoEngine. main.go
+	// auto-starts the daemon and passes its addr here.
+	DaemonAddr string
+	// DefaultAgent is the slug to send turns at. v0.3.x hardcodes "sunny";
+	// session-vs-agent picking lands later.
+	DefaultAgent string
 }
 
 const (
@@ -172,12 +183,31 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		defEffort = "max"
 	}
 
+	var cli *client.Client
+	if opts.DaemonAddr != "" {
+		cli = client.New(opts.DaemonAddr)
+	}
+	defaultAgent := opts.DefaultAgent
+	if defaultAgent == "" {
+		defaultAgent = "sunny"
+	}
+	if cli != nil {
+		// Attach every existing session (today: just the bootstrapped one)
+		// to the same client + slug. Session-per-agent picking is a v0.4
+		// concern.
+		for _, s := range mgr.Sessions {
+			s.AttachClient(cli, defaultAgent)
+		}
+	}
+
 	return Model{
 		ctx:           ctx,
 		styles:        st,
 		keymap:        km,
 		logger:        logger,
 		manager:       mgr,
+		client:        cli,
+		defaultAgent:  defaultAgent,
 		overlay:       &Overlay{},
 		chat:          chatVP,
 		textarea:      ta,
@@ -188,6 +218,23 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		defaultEffort: defEffort,
 		themeID:       themeID,
 		skipPerms:     opts.DangerousSkipPermissions,
+	}
+}
+
+// waitForChatEvent reads one event off the SSE stream and surfaces it as
+// a tea.Msg. The Update handler applies it back to the session, then
+// re-arms the next wait via this same helper. On EOF or error the
+// stream emits chatStreamDoneMsg instead.
+func waitForChatEvent(sessionID string, stream *client.Stream) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok, err := stream.Next()
+		if err != nil {
+			return chatStreamDoneMsg{SessionID: sessionID, Stream: stream, Err: err}
+		}
+		if !ok {
+			return chatStreamDoneMsg{SessionID: sessionID, Stream: stream}
+		}
+		return chatEventMsg{SessionID: sessionID, Stream: stream, Event: ev}
 	}
 }
 
@@ -298,6 +345,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m = next
 		cmds = append(cmds, cmd)
+	case chatEventMsg:
+		cmds = append(cmds, m.handleChatEvent(msg))
+	case chatStreamDoneMsg:
+		m.handleChatStreamDone(msg)
 	case spinner.TickMsg:
 		next, cmd := m.handleSpinnerTick(msg)
 		m = next

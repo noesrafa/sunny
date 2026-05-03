@@ -154,6 +154,49 @@ func (m *Model) switchToTab(kind string, index int) {
 	}
 }
 
+// handleChatEvent applies one SSE event to the matching session and
+// returns the next read tea.Cmd. Drops events from streams the session
+// has already replaced (e.g. a stale read landing after Cancel + a
+// fresh turn started). Persists the transcript on the terminal event.
+func (m *Model) handleChatEvent(msg chatEventMsg) tea.Cmd {
+	sess := m.manager.ByID(msg.SessionID)
+	if sess == nil {
+		return nil
+	}
+	terminal := sess.ApplyEvent(msg.Event)
+	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
+		m.refreshViewport()
+		if terminal {
+			m.chat.ScrollToBottom()
+		}
+	}
+	if terminal {
+		m.saveState()
+		return nil
+	}
+	return waitForChatEvent(sess.ID, msg.Stream)
+}
+
+// handleChatStreamDone fires on EOF or transport error. If the daemon
+// closed cleanly without a Done event (rare — usually means context was
+// cancelled mid-turn), fall the session back to Idle so the textarea
+// unlocks.
+func (m *Model) handleChatStreamDone(msg chatStreamDoneMsg) {
+	sess := m.manager.ByID(msg.SessionID)
+	if sess == nil {
+		return
+	}
+	if sess.State == session.StateThinking {
+		sess.State = session.StateIdle
+	}
+	if msg.Err != nil {
+		sess.LastErr = msg.Err
+		m.logger.Warn("chat stream ended", "session", sess.ID, "err", msg.Err)
+	}
+	m.refreshViewport()
+	m.saveState()
+}
+
 func (m Model) openQuitDialog() tea.Cmd {
 	anyThinking := false
 	for _, s := range m.manager.Sessions {

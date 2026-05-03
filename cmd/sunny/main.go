@@ -143,6 +143,8 @@ func openTUI(args []string) error {
 		DefaultModel:             first.Model,
 		DefaultEffort:            first.Effort,
 		DangerousSkipPermissions: true,
+		DaemonAddr:               *addr,
+		DefaultAgent:             "sunny",
 	})
 	return model.Run(ctx)
 }

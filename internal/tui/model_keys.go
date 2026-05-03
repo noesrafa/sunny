@@ -219,11 +219,27 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 
 	m.textarea.Reset()
 	cur.Draft = ""
-	if err := cur.Send(text); err != nil {
+
+	stream, err := cur.SendBegin(m.ctx, text)
+	if err != nil {
 		cur.LastErr = err
+		cur.State = session.StateError
+		m.logger.Error("send failed", "err", err, "session", cur.ID)
+		m.layout()
+		m.refreshViewport()
+		m.chat.ScrollToBottom()
+		return m, nil
 	}
+
 	m.layout()
 	m.refreshViewport()
 	m.chat.ScrollToBottom()
-	return m, m.thinkingAnim.Step()
+	// Kick off the spinner + morphing-thinking animation alongside the
+	// SSE event pump. All three live until the session goes idle on the
+	// terminal Done event.
+	return m, tea.Batch(
+		waitForChatEvent(cur.ID, stream),
+		m.spinner.Tick,
+		m.thinkingAnim.Step(),
+	)
 }

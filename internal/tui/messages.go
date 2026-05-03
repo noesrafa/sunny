@@ -1,8 +1,29 @@
 package tui
 
 import (
+	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/sysstats"
 )
+
+// chatEventMsg carries one event from the daemon's SSE stream. Pumped
+// by waitForChatEvent and consumed by Update, which applies it to the
+// matching session and re-arms the next read.
+type chatEventMsg struct {
+	SessionID string
+	Stream    *client.Stream
+	Event     client.Event
+}
+
+// chatStreamDoneMsg fires when the SSE stream ends — either cleanly
+// (Err == nil) or with an error (transport / cancel / decode). If the
+// session's activeStream still matches Stream we clear it; otherwise
+// the stream was already replaced (e.g. user fired a second turn) and
+// we ignore.
+type chatStreamDoneMsg struct {
+	SessionID string
+	Stream    *client.Stream
+	Err       error
+}
 
 // branchTickMsg is fired every few seconds so the input-hint row can pick up
 // branch changes (e.g. user ran `git checkout` in another terminal).

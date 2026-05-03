@@ -19,14 +19,17 @@ import (
 	"time"
 
 	"charm.land/log/v2"
+
+	"github.com/noesrafa/sunny/internal/client"
 )
 
-// ErrNoEngine is returned by Send while the daemon's chat endpoint isn't
-// wired up. v0.3 replaces this with a real HTTP call.
+// ErrNoEngine is returned by SendBegin when the session has no client
+// configured (daemon unreachable, addr unset).
 var ErrNoEngine = errors.New("session: no engine connected")
 
-// ErrSessionBusy is returned by Send when a turn is already in flight.
-// Callers should normally check State first instead of relying on it.
+// ErrSessionBusy is returned by SendBegin when a turn is already in
+// flight. Callers should normally check State first instead of relying
+// on it.
 var ErrSessionBusy = errors.New("session busy")
 
 // gitBranch returns the current branch of the given directory, or "" if it's
@@ -134,6 +137,22 @@ type Session struct {
 
 	logger        *log.Logger
 	turnHadOutput bool
+
+	// Engine wiring. The session points at a daemon-bound client; SendBegin
+	// uses it to open an SSE stream. activeStream is non-nil while a turn
+	// is in flight so Cancel can interrupt it.
+	c           *client.Client
+	agentSlug   string
+	activeStream *client.Stream
+	streamCancel context.CancelFunc
+}
+
+// AttachClient binds the session to a daemon. Call once at construction.
+// The slug identifies which agent the daemon should run; for v0.3.x it's
+// the default ("sunny") since multi-agent picking lands later.
+func (s *Session) AttachClient(c *client.Client, slug string) {
+	s.c = c
+	s.agentSlug = slug
 }
 
 // AddAttachment registers a clipboard image with the session and returns
@@ -221,25 +240,188 @@ func (s *Session) RefreshBranch() bool {
 	return changed
 }
 
-// Send is a placeholder that always errors with ErrNoEngine. The user's
-// turn IS appended to the transcript so the input feels responsive, but
-// no provider is contacted. v0.3 replaces the body with an HTTP POST to
-// the daemon and an SSE stream consumer.
-func (s *Session) Send(text string) error {
-	if s.State == StateThinking {
-		return ErrSessionBusy
+// SendBegin starts an assistant turn against the daemon. The user's text
+// is appended to the transcript, state flips to Thinking, and the SSE
+// stream is opened. The returned Stream is non-nil on success — the
+// caller (TUI) is responsible for pumping it via Stream.Next() and
+// applying each event back via ApplyEvent.
+//
+// Side effects on the session:
+//   - appends UserItem{Text, Attachments}
+//   - clears pending Attachments
+//   - sets State=Thinking, StartedAt=now, turnHadOutput=false
+//   - records activeStream + streamCancel so Cancel() can interrupt
+func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, error) {
+	if s.c == nil {
+		return nil, ErrNoEngine
 	}
+	if s.State == StateThinking {
+		return nil, ErrSessionBusy
+	}
+
+	// Build wire messages from local transcript. We send all user/
+	// assistant text turns; tool blocks are claude-internal and the daemon
+	// rebuilds them via --resume. ProviderState (set on the second turn
+	// onward) is what actually gives claude its context — this list is
+	// just the conversation surface.
+	wire := buildWireMessages(s.Items, text)
+
+	turnCtx, cancel := context.WithCancel(ctx)
+	stream, err := s.c.Turn(turnCtx, s.agentSlug, client.TurnRequest{
+		Messages:      wire,
+		ProviderState: s.RemoteID,
+		Cwd:           s.Cwd,
+	})
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
 	s.Items = append(s.Items, UserItem{Text: text, Attachments: s.Attachments})
 	s.Attachments = nil
-	s.LastErr = ErrNoEngine
-	s.State = StateError
-	s.logger.Debug("send rejected", "reason", "no engine wired")
-	return ErrNoEngine
+	s.State = StateThinking
+	s.StartedAt = time.Now()
+	s.turnHadOutput = false
+	s.activeStream = stream
+	s.streamCancel = cancel
+
+	if s.logger != nil {
+		s.logger.Debug("turn started", "session", s.ID, "remote_id", s.RemoteID)
+	}
+	return stream, nil
 }
 
-// Cancel is a no-op. v0.3 routes this to the daemon's "abort current turn"
-// endpoint.
-func (s *Session) Cancel() error { return nil }
+// ApplyEvent mutates Items + State based on one event from the daemon's
+// stream. Returns true when the event ends the turn (Done or Error).
+//
+// Streaming text deltas merge into a single trailing AssistantTextItem
+// so the transcript renders as one coherent message instead of many tiny
+// fragments. Tool round-trips materialize as ToolUseItem entries that
+// flip Done=true once the matching ToolResult arrives.
+func (s *Session) ApplyEvent(ev client.Event) (terminal bool) {
+	switch e := ev.(type) {
+	case client.TextDelta:
+		s.appendText(e.Text)
+		s.turnHadOutput = true
+	case client.ThinkingDelta:
+		s.appendThinking(e.Text)
+	case client.ToolUse:
+		s.Items = append(s.Items, ToolUseItem{
+			ID:    e.ID,
+			Name:  e.Name,
+			Input: []byte(e.Input),
+		})
+		s.turnHadOutput = true
+	case client.ToolResult:
+		s.linkToolResult(e.ToolUseID, e.Content, e.IsError)
+	case client.Done:
+		if !s.turnHadOutput {
+			s.Items = append(s.Items, EmptyResponseItem{})
+		}
+		s.Items = append(s.Items, ResultItem{
+			DurationMs: int(time.Since(s.StartedAt).Milliseconds()),
+			CostUSD:    e.CostUSD,
+			NumTurns:   1,
+		})
+		s.RemoteID = e.ProviderState
+		s.TotalCost += e.CostUSD
+		s.Turns++
+		s.State = StateIdle
+		s.activeStream = nil
+		s.streamCancel = nil
+		return true
+	case client.Error:
+		s.LastErr = errors.New(e.Message)
+		s.Items = append(s.Items, ErrorItem{Message: e.Message})
+		s.State = StateError
+		s.activeStream = nil
+		s.streamCancel = nil
+		return true
+	}
+	return false
+}
+
+// Cancel interrupts the in-flight turn. No-op when idle.
+func (s *Session) Cancel() error {
+	if s.streamCancel != nil {
+		s.streamCancel()
+	}
+	if s.activeStream != nil {
+		_ = s.activeStream.Close()
+	}
+	return nil
+}
+
+// appendText merges a streaming delta into the trailing assistant text
+// block. Creates a fresh AssistantTextItem if the last item isn't one.
+func (s *Session) appendText(delta string) {
+	if delta == "" {
+		return
+	}
+	if n := len(s.Items); n > 0 {
+		if last, ok := s.Items[n-1].(AssistantTextItem); ok {
+			s.Items[n-1] = AssistantTextItem{Text: last.Text + delta}
+			return
+		}
+	}
+	s.Items = append(s.Items, AssistantTextItem{Text: delta})
+}
+
+// appendThinking merges a streaming thinking delta into the trailing
+// thinking block.
+func (s *Session) appendThinking(delta string) {
+	if delta == "" {
+		return
+	}
+	if n := len(s.Items); n > 0 {
+		if last, ok := s.Items[n-1].(ThinkingItem); ok {
+			s.Items[n-1] = ThinkingItem{Text: last.Text + delta}
+			return
+		}
+	}
+	s.Items = append(s.Items, ThinkingItem{Text: delta})
+}
+
+// linkToolResult finds the in-flight ToolUseItem with the matching ID
+// and marks it Done with the result content. Falls back to a standalone
+// ToolResultItem if no matching tool_use is in the transcript (which
+// shouldn't normally happen but keeps things resilient).
+func (s *Session) linkToolResult(id, content string, isError bool) {
+	for i := len(s.Items) - 1; i >= 0; i-- {
+		t, ok := s.Items[i].(ToolUseItem)
+		if !ok {
+			continue
+		}
+		if t.ID == id && !t.Done {
+			t.Done = true
+			t.Result = content
+			t.IsError = isError
+			s.Items[i] = t
+			return
+		}
+	}
+	s.Items = append(s.Items, ToolResultItem{Content: content})
+}
+
+// buildWireMessages flattens a session transcript into the user/assistant
+// text turns the daemon expects. Tool round-trips and thinking blocks are
+// dropped — claude-code reconstructs them via --resume; the anthropic
+// provider doesn't need them since it gets the full text turns.
+func buildWireMessages(items []Item, newUserText string) []client.Message {
+	var wire []client.Message
+	for _, it := range items {
+		switch v := it.(type) {
+		case UserItem:
+			wire = append(wire, client.Message{Role: "user", Content: v.Text})
+		case AssistantTextItem:
+			if v.Text != "" {
+				wire = append(wire, client.Message{Role: "assistant", Content: v.Text})
+			}
+		}
+	}
+	wire = append(wire, client.Message{Role: "user", Content: newUserText})
+	return wire
+}
 
 // LiveStatus returns a short human-readable label like "writing" or
 // "running grep" while a turn is in flight. Empty string when idle.

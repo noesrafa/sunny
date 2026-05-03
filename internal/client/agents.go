@@ -15,6 +15,8 @@ type AgentSummary struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
+	Effort      string `json:"effort,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 	Skills      int    `json:"skills"`
 	Knowledge   int    `json:"knowledge"`
 }
@@ -25,6 +27,8 @@ type AgentDetail struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
+	Effort      string `json:"effort,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
 	Skills      []struct {
 		Name        string `json:"name"`
@@ -41,6 +45,8 @@ type AgentCreate struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
+	Effort      string `json:"effort,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
 }
 
@@ -50,6 +56,8 @@ type AgentPatch struct {
 	Name        *string `json:"name,omitempty"`
 	Description *string `json:"description,omitempty"`
 	Model       *string `json:"model,omitempty"`
+	Effort      *string `json:"effort,omitempty"`
+	Provider    *string `json:"provider,omitempty"`
 	Prompt      *string `json:"prompt,omitempty"`
 }
 

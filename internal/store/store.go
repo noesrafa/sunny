@@ -117,6 +117,8 @@ type AgentPatch struct {
 	Name        *string
 	Description *string
 	Model       *string
+	Effort      *string
+	Provider    *string
 	Prompt      *string
 }
 
@@ -128,16 +130,28 @@ func (s *Store) Update(slug string, patch AgentPatch) (*Agent, error) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, slug)
 	}
 	cfg := *cur.Config
+	cfgChanged := false
 	if patch.Name != nil {
 		cfg.Name = *patch.Name
+		cfgChanged = true
 	}
 	if patch.Description != nil {
 		cfg.Description = *patch.Description
+		cfgChanged = true
 	}
 	if patch.Model != nil {
 		cfg.Model = *patch.Model
+		cfgChanged = true
 	}
-	if patch.Name != nil || patch.Description != nil || patch.Model != nil {
+	if patch.Effort != nil {
+		cfg.Effort = *patch.Effort
+		cfgChanged = true
+	}
+	if patch.Provider != nil {
+		cfg.Provider = *patch.Provider
+		cfgChanged = true
+	}
+	if cfgChanged {
 		if err := agent.SaveConfig(cur.Dir, &cfg); err != nil {
 			return nil, err
 		}

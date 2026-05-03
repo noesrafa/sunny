@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 )
@@ -93,4 +95,24 @@ func formFieldView(label string, focused bool, view string, s Styles) []string {
 		head = "  " + s.HeaderDim.Render(label)
 	}
 	return []string{head, "  " + view}
+}
+
+// renderRadioRow draws a horizontal radio: ●/○ marks + label per
+// option, two spaces apart, with the active slot highlighted when the
+// row is focused. Used wherever a dialog needs a one-of-N picker.
+func renderRadioRow(opts []string, sel int, focused bool, s Styles) string {
+	parts := make([]string, len(opts))
+	for i, o := range opts {
+		mark := "○"
+		st := s.Hint
+		if i == sel {
+			mark = "●"
+			st = s.StatusIdle
+			if focused {
+				st = s.UserPrompt
+			}
+		}
+		parts[i] = st.Render(mark + " " + o)
+	}
+	return "  " + strings.Join(parts, "  ")
 }

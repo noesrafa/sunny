@@ -9,17 +9,17 @@ import (
 	"github.com/noesrafa/sunny/internal/store"
 )
 
-// createAgent allocates a new agent on disk + in the in-memory store.
+// createAgentRequest is the JSON body of POST /agents.
 //
-// Body: {"slug","name","description","model","prompt"}
-//   slug:        required; [a-z0-9][a-z0-9-]*
-//   name, model: required
-//   description, prompt: optional
+// Required: slug ([a-z0-9][a-z0-9-]*), name, model.
+// Optional: description, effort, provider, prompt.
 type createAgentRequest struct {
 	Slug        string `json:"slug"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Model       string `json:"model"`
+	Effort      string `json:"effort"`
+	Provider    string `json:"provider"`
 	Prompt      string `json:"prompt"`
 }
 
@@ -33,6 +33,8 @@ func (s *server) createAgent(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Description: req.Description,
 		Model:       req.Model,
+		Effort:      req.Effort,
+		Provider:    req.Provider,
 	}, req.Prompt)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -45,12 +47,14 @@ func (s *server) createAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, summarize(a))
 }
 
-// updateAgent applies a partial patch to an existing agent. Any field
-// omitted from the JSON body is left unchanged.
+// updateAgentRequest is the body of PATCH /agents/{slug}. Any field
+// omitted (left as nil) is preserved on the agent.
 type updateAgentRequest struct {
 	Name        *string `json:"name,omitempty"`
 	Description *string `json:"description,omitempty"`
 	Model       *string `json:"model,omitempty"`
+	Effort      *string `json:"effort,omitempty"`
+	Provider    *string `json:"provider,omitempty"`
 	Prompt      *string `json:"prompt,omitempty"`
 }
 
@@ -65,6 +69,8 @@ func (s *server) updateAgent(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Description: req.Description,
 		Model:       req.Model,
+		Effort:      req.Effort,
+		Provider:    req.Provider,
 		Prompt:      req.Prompt,
 	})
 	if err != nil {
@@ -78,7 +84,7 @@ func (s *server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, summarize(a))
 }
 
-// deleteAgent moves the agent's directory to ~/.sunny/.trash/.
+// deleteAgent archives the agent's directory under ~/.sunny/.archive/.
 // Idempotent — already-missing slug returns 204.
 func (s *server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")

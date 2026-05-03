@@ -41,7 +41,7 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		if cur := m.manager.Current(); cur != nil && cur.AgentSlug() != "" {
 			curAgent = cur.AgentSlug()
 		}
-		return m, m.overlay.Open(NewNewSessionDialog(m.client, m.initialCwd, m.defaultModel, m.defaultEffort, curAgent, m.styles)), true
+		return m, m.overlay.Open(NewNewSessionDialog(m.client, m.initialCwd, curAgent, m.styles)), true
 	case key.Matches(msg, m.keymap.NextSession):
 		m.cycleTab(1)
 		return m, nil, true

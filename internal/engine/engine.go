@@ -72,12 +72,16 @@ func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provid
 		return nil, fmt.Errorf("build system prompt: %w", err)
 	}
 
+	effort := agent.Config.Effort
+	if effort == "" {
+		effort = "max"
+	}
 	req := provider.Request{
 		Model:         agent.Config.Model,
 		MaxTokens:     16000,
 		System:        system,
 		Messages:      messages,
-		Effort:        "high",
+		Effort:        effort,
 		Cwd:           opts.Cwd,
 		ProviderState: opts.ProviderState,
 	}

@@ -121,6 +121,8 @@ type agentItem struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
+	Effort      string `json:"effort,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 	Skills      int    `json:"skills"`
 	Knowledge   int    `json:"knowledge"`
 }
@@ -131,6 +133,8 @@ func summarize(a *store.Agent) agentItem {
 		Name:        a.Config.Name,
 		Description: a.Config.Description,
 		Model:       a.Config.Model,
+		Effort:      a.Config.Effort,
+		Provider:    a.Config.Provider,
 		Skills:      len(a.Skills),
 		Knowledge:   len(a.Knowledge),
 	}
@@ -163,6 +167,8 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Name        string          `json:"name"`
 		Description string          `json:"description,omitempty"`
 		Model       string          `json:"model"`
+		Effort      string          `json:"effort,omitempty"`
+		Provider    string          `json:"provider,omitempty"`
 		Prompt      string          `json:"prompt,omitempty"`
 		Skills      []skillItem     `json:"skills"`
 		Knowledge   []knowledgeItem `json:"knowledge"`
@@ -171,6 +177,8 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Name:        a.Config.Name,
 		Description: a.Config.Description,
 		Model:       a.Config.Model,
+		Effort:      a.Config.Effort,
+		Provider:    a.Config.Provider,
 		Prompt:      a.Prompt,
 		Skills:      []skillItem{},
 		Knowledge:   []knowledgeItem{},

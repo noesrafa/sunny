@@ -69,6 +69,8 @@ func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
 				Name:        req.Name,
 				Description: req.Description,
 				Model:       req.Model,
+				Effort:      req.Effort,
+				Provider:    req.Provider,
 				Prompt:      req.Prompt,
 			})
 			if err != nil {
@@ -80,6 +82,8 @@ func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
 			Name:        &req.Name,
 			Description: &req.Description,
 			Model:       &req.Model,
+			Effort:      &req.Effort,
+			Provider:    &req.Provider,
 			Prompt:      &req.Prompt,
 		})
 		if err != nil {

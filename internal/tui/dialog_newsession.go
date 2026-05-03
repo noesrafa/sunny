@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,34 +14,31 @@ import (
 	"github.com/noesrafa/sunny/internal/client"
 )
 
-var modelChoices = []string{"opus", "sonnet", "haiku"}
-var effortChoices = []string{"low", "medium", "high", "xhigh", "max"}
-
+// NewSessionDialog asks for two things: which agent + what cwd. Model
+// and effort used to live here; in v0.9 they moved into the agent's
+// own `agent.yaml`. The dialog reads them off the picked agent and
+// passes them through CreateSessionMsg so the sidebar's "opus max"
+// readout still works.
 type newSessionFocus int
 
 const (
 	focusAgent newSessionFocus = iota
 	focusPicker
-	focusModel
-	focusEffort
 	numNewSessionFocus
 )
 
 type NewSessionDialog struct {
-	cwd       string
-	entries   []string // directory names in cwd (sorted)
-	filtered  []int    // indices into entries
-	selected  int
-	search    textinput.Model
-	styles    Styles
-	focus     newSessionFocus
-	modelIdx  int
-	effortIdx int
-	err       string
+	cwd      string
+	entries  []string // directory names in cwd (sorted)
+	filtered []int    // indices into entries
+	selected int
+	search   textinput.Model
+	styles   Styles
+	focus    newSessionFocus
+	err      string
 
-	// Agent picker — loaded async via Init(). Until the load returns,
-	// the row shows "(loading…)" and Enter is allowed to fall back to
-	// the default agent so the dialog never blocks the user.
+	// Agent picker — loaded async via Init(). Until the load returns
+	// the row shows "(loading…)"; Enter still works once it does.
 	client       *client.Client
 	defaultAgent string
 	agents       []client.AgentSummary
@@ -51,7 +47,7 @@ type NewSessionDialog struct {
 	agentLoadErr string
 }
 
-func NewNewSessionDialog(c *client.Client, defaultCwd, defaultModel, defaultEffort, defaultAgent string, s Styles) *NewSessionDialog {
+func NewNewSessionDialog(c *client.Client, defaultCwd, defaultAgent string, s Styles) *NewSessionDialog {
 	cwd := defaultCwd
 	if cwd == "" {
 		cwd, _ = os.Getwd()
@@ -61,9 +57,6 @@ func NewNewSessionDialog(c *client.Client, defaultCwd, defaultModel, defaultEffo
 	ti.Prompt = "› "
 	ti.CharLimit = 0
 	ti.SetWidth(50)
-	// Initial focus is the directory picker so the original ergonomics
-	// are preserved — if you only have one agent, you blow past that
-	// row instantly with shift+tab anyway.
 	ti.Focus()
 
 	d := &NewSessionDialog{
@@ -71,21 +64,12 @@ func NewNewSessionDialog(c *client.Client, defaultCwd, defaultModel, defaultEffo
 		search:       ti,
 		styles:       s,
 		focus:        focusPicker,
-		modelIdx:     max0(slices.Index(modelChoices, defaultModel)),
-		effortIdx:    max0(slices.Index(effortChoices, defaultEffort)),
 		client:       c,
 		defaultAgent: defaultAgent,
 		agentLoading: c != nil,
 	}
 	d.loadDir()
 	return d
-}
-
-func max0(n int) int {
-	if n < 0 {
-		return 0
-	}
-	return n
 }
 
 func (d *NewSessionDialog) loadDir() {
@@ -145,7 +129,6 @@ func (d *NewSessionDialog) ascend() {
 	d.cwd = parent
 	d.search.SetValue("")
 	d.loadDir()
-	// Try to land on the directory we just came from.
 	for i, idx := range d.filtered {
 		if d.entries[idx] == prev {
 			d.selected = i
@@ -164,9 +147,9 @@ func (d *NewSessionDialog) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// newSessionAgentsLoadedMsg carries the agent list once the async fetch
-// returns. Distinct type from AgentsLoadedMsg so it doesn't accidentally
-// get consumed by the agent picker if both are open.
+// newSessionAgentsLoadedMsg carries the agent list once the async
+// fetch returns. Distinct from AgentsLoadedMsg so it doesn't clash
+// with the agent picker if both happen to be open.
 type newSessionAgentsLoadedMsg struct {
 	Agents []client.AgentSummary
 	Err    error
@@ -215,6 +198,21 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 
+		if d.focus == focusAgent {
+			switch k.String() {
+			case "left", "h":
+				if d.agentIdx > 0 {
+					d.agentIdx--
+				}
+				return nil
+			case "right", "l", " ":
+				if d.agentIdx < len(d.agents)-1 {
+					d.agentIdx++
+				}
+				return nil
+			}
+		}
+
 		if d.focus == focusPicker {
 			switch k.String() {
 			case "up", "ctrl+p":
@@ -249,49 +247,6 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 			}
 			return cmd
 		}
-
-		if d.focus == focusAgent {
-			switch k.String() {
-			case "left", "h":
-				if d.agentIdx > 0 {
-					d.agentIdx--
-				}
-				return nil
-			case "right", "l", " ":
-				if d.agentIdx < len(d.agents)-1 {
-					d.agentIdx++
-				}
-				return nil
-			}
-		}
-		if d.focus == focusModel {
-			switch k.String() {
-			case "left", "h":
-				if d.modelIdx > 0 {
-					d.modelIdx--
-				}
-				return nil
-			case "right", "l", " ":
-				if d.modelIdx < len(modelChoices)-1 {
-					d.modelIdx++
-				}
-				return nil
-			}
-		}
-		if d.focus == focusEffort {
-			switch k.String() {
-			case "left", "h":
-				if d.effortIdx > 0 {
-					d.effortIdx--
-				}
-				return nil
-			case "right", "l", " ":
-				if d.effortIdx < len(effortChoices)-1 {
-					d.effortIdx++
-				}
-				return nil
-			}
-		}
 	}
 	return nil
 }
@@ -320,14 +275,25 @@ func (d *NewSessionDialog) confirm() tea.Cmd {
 		d.err = "no es un directorio: " + abs
 		return nil
 	}
-	model := modelChoices[d.modelIdx]
-	effort := effortChoices[d.effortIdx]
+	// Pull model + effort from the picked agent so the sidebar's
+	// readout shows the right thing immediately. Empty if the agent
+	// list hasn't loaded yet — createSession falls back to the model
+	// defaults in that case.
 	agentSlug := d.defaultAgent
+	model, effort := "", ""
 	if len(d.agents) > 0 && d.agentIdx >= 0 && d.agentIdx < len(d.agents) {
-		agentSlug = d.agents[d.agentIdx].Slug
+		picked := d.agents[d.agentIdx]
+		agentSlug = picked.Slug
+		model = picked.Model
+		effort = picked.Effort
 	}
 	return func() tea.Msg {
-		return CreateSessionMsg{Cwd: abs, Model: model, Effort: effort, AgentSlug: agentSlug}
+		return CreateSessionMsg{
+			Cwd:       abs,
+			Model:     model,
+			Effort:    effort,
+			AgentSlug: agentSlug,
+		}
 	}
 }
 
@@ -342,7 +308,7 @@ func (d *NewSessionDialog) View(width, height int) string {
 	innerW := boxW - 6
 	d.search.SetWidth(innerW - 2)
 
-	listH := height - 22
+	listH := height - 14
 	if listH > 12 {
 		listH = 12
 	}
@@ -360,12 +326,6 @@ func (d *NewSessionDialog) View(width, height int) string {
 	listView := d.renderList(listH, innerW)
 	pickerHints := d.styles.Hint.Render("↑↓ navegar · → descender · ← atrás · type para filtrar")
 
-	modelLabel := d.fieldLabel("modelo", d.focus == focusModel)
-	modelRow := d.radioRow(modelChoices, d.modelIdx, d.focus == focusModel)
-
-	effortLabel := d.fieldLabel("effort", d.focus == focusEffort)
-	effortRow := d.radioRow(effortChoices, d.effortIdx, d.focus == focusEffort)
-
 	hints := d.styles.StatusKey.Render("enter") + d.styles.Hint.Render(" crear  ") +
 		d.styles.StatusKey.Render("tab") + d.styles.Hint.Render(" siguiente campo  ") +
 		d.styles.StatusKey.Render("←/→") + d.styles.Hint.Render(" cambiar opción  ") +
@@ -380,12 +340,6 @@ func (d *NewSessionDialog) View(width, height int) string {
 		searchView,
 		listView,
 		pickerHints,
-		"",
-		modelLabel,
-		modelRow,
-		"",
-		effortLabel,
-		effortRow,
 	}
 	if d.err != "" {
 		lines = append(lines, "", d.styles.ResultError.Render("✗ "+d.err))
@@ -395,15 +349,33 @@ func (d *NewSessionDialog) View(width, height int) string {
 	return d.styles.DialogBox.Width(boxW).Render(strings.Join(lines, "\n"))
 }
 
+// renderAgentRow renders the agent picker as a horizontal radio.
+// Loading shows a hint; on error shows the message; on success uses
+// the shared renderRadioRow.
+func (d *NewSessionDialog) renderAgentRow(focused bool) string {
+	if d.agentLoading {
+		return "  " + d.styles.Hint.Render("loading agents…")
+	}
+	if d.agentLoadErr != "" {
+		return "  " + d.styles.ResultError.Render("✗ "+d.agentLoadErr)
+	}
+	if len(d.agents) == 0 {
+		return "  " + d.styles.Hint.Render("(no agents — use ctrl+a to create one first)")
+	}
+	opts := make([]string, len(d.agents))
+	for i, a := range d.agents {
+		opts[i] = a.Slug
+	}
+	return renderRadioRow(opts, d.agentIdx, focused, d.styles)
+}
+
 func (d *NewSessionDialog) renderList(maxRows, innerW int) string {
 	if len(d.filtered) == 0 {
 		empty := "  " + d.styles.Hint.Render("(sin coincidencias)")
-		// Pad to the requested height so layout stays stable.
 		pad := strings.Repeat("\n", maxRows-1)
 		return empty + pad
 	}
 
-	// Window the list around the selection.
 	start := 0
 	if d.selected >= maxRows {
 		start = d.selected - maxRows + 1
@@ -423,7 +395,6 @@ func (d *NewSessionDialog) renderList(maxRows, innerW int) string {
 			rows = append(rows, "  "+d.styles.AssistantText.Render(name))
 		}
 	}
-	// Pad to maxRows so the layout below doesn't jump as the list shrinks.
 	for len(rows) < maxRows {
 		rows = append(rows, "")
 	}
@@ -439,41 +410,4 @@ func (d *NewSessionDialog) fieldLabel(text string, focused bool) string {
 		return d.styles.UserPrompt.Render("▸ ") + d.styles.HeaderTitle.Render(text)
 	}
 	return "  " + d.styles.HeaderDim.Render(text)
-}
-
-// renderAgentRow renders the agent picker as a horizontal radio.
-// While loading shows a hint; on error shows the message; on success
-// uses the same radio styling as model/effort.
-func (d *NewSessionDialog) renderAgentRow(focused bool) string {
-	if d.agentLoading {
-		return "  " + d.styles.Hint.Render("loading agents…")
-	}
-	if d.agentLoadErr != "" {
-		return "  " + d.styles.ResultError.Render("✗ "+d.agentLoadErr)
-	}
-	if len(d.agents) == 0 {
-		return "  " + d.styles.Hint.Render("(no agents — use ctrl+a to create one first)")
-	}
-	opts := make([]string, len(d.agents))
-	for i, a := range d.agents {
-		opts[i] = a.Slug
-	}
-	return d.radioRow(opts, d.agentIdx, focused)
-}
-
-func (d *NewSessionDialog) radioRow(opts []string, sel int, focused bool) string {
-	var parts []string
-	for i, o := range opts {
-		mark := "○"
-		st := d.styles.Hint
-		if i == sel {
-			mark = "●"
-			st = d.styles.StatusIdle
-			if focused {
-				st = d.styles.UserPrompt
-			}
-		}
-		parts = append(parts, st.Render(mark+" "+o))
-	}
-	return "  " + strings.Join(parts, "  ")
 }

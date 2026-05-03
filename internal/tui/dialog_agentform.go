@@ -20,9 +20,17 @@ const (
 	agFocusSlug
 	agFocusDescription
 	agFocusModel
+	agFocusEffort
+	agFocusProvider
 	agFocusPrompt
 	numAgentFocus
 )
+
+// agentFormEffortChoices and agentFormProviderChoices drive the radio
+// rows for those two fields. Both use empty-string-defaults so a
+// freshly-created agent inherits the daemon defaults.
+var agentFormEffortChoices = []string{"low", "medium", "high", "xhigh", "max"}
+var agentFormProviderChoices = []string{"(default)", "claude-code", "anthropic", "ollama"}
 
 // AgentFormDialog is the create/edit form for an agent.
 //
@@ -32,17 +40,19 @@ const (
 //   - editSlug != "" → edit mode. Slug is read-only; prompt is fetched
 //     async via GetAgent (AgentSummary doesn't carry it).
 type AgentFormDialog struct {
-	client    *client.Client
-	editSlug  string // empty = create
-	name      textinput.Model
-	slug      textinput.Model
-	desc      textinput.Model
-	model     textinput.Model
-	prompt    textarea.Model
-	focus     agentFormFocus
-	err       string
-	saving    bool
-	loading   bool // true while we fetch the existing agent's prompt for edit mode
+	client      *client.Client
+	editSlug    string // empty = create
+	name        textinput.Model
+	slug        textinput.Model
+	desc        textinput.Model
+	model       textinput.Model
+	effortIdx   int
+	providerIdx int
+	prompt      textarea.Model
+	focus       agentFormFocus
+	err         string
+	saving      bool
+	loading     bool // true while we fetch the existing agent's prompt for edit mode
 	// slugDirty flips true the first time the user edits the slug field
 	// directly. Until then, slug auto-syncs to a slugified Name. After
 	// that, the field is sticky.
@@ -57,15 +67,17 @@ type AgentDetailLoadedMsg struct {
 	Err    error
 }
 
-// SubmitAgentFormMsg is emitted when the user presses ctrl+enter or the
-// "save" hint. The root model performs the actual API call (CreateAgent
-// or UpdateAgent) and emits AgentSavedMsg.
+// SubmitAgentFormMsg is emitted when the user presses ctrl+s. The root
+// model performs the actual API call (CreateAgent or UpdateAgent) and
+// emits AgentSavedMsg.
 type SubmitAgentFormMsg struct {
 	EditSlug    string // empty → create
 	Slug        string
 	Name        string
 	Description string
 	Model       string
+	Effort      string
+	Provider    string
 	Prompt      string
 }
 
@@ -103,15 +115,28 @@ func NewAgentFormDialog(c *client.Client, m OpenAgentFormMsg, s Styles) *AgentFo
 	ta.CharLimit = 0
 	ta.SetHeight(8)
 
+	effortIdx := indexOfDefault(agentFormEffortChoices, m.Effort, "max")
+	providerIdx := 0
+	if m.Provider != "" {
+		for i, p := range agentFormProviderChoices {
+			if p == m.Provider {
+				providerIdx = i
+				break
+			}
+		}
+	}
+
 	d := &AgentFormDialog{
-		client:   c,
-		editSlug: m.EditSlug,
-		name:     mk("name", m.Name, 64, true),
-		slug:     mk("slug (a-z 0-9 -)", m.EditSlug, 32, false),
-		desc:     mk("description (optional)", m.Description, 240, false),
-		model:    mk("model", defaultModel, 64, false),
-		prompt:   ta,
-		styles:   s,
+		client:      c,
+		editSlug:    m.EditSlug,
+		name:        mk("name", m.Name, 64, true),
+		slug:        mk("slug (a-z 0-9 -)", m.EditSlug, 32, false),
+		desc:        mk("description (optional)", m.Description, 240, false),
+		model:       mk("model", defaultModel, 64, false),
+		effortIdx:   effortIdx,
+		providerIdx: providerIdx,
+		prompt:      ta,
+		styles:      s,
 		// In edit mode the slug is immutable, so it's always "dirty"
 		// from the form's perspective — no auto-sync.
 		slugDirty: m.EditSlug != "",
@@ -120,6 +145,22 @@ func NewAgentFormDialog(c *client.Client, m OpenAgentFormMsg, s Styles) *AgentFo
 		d.loading = true // fetch full prompt async
 	}
 	return d
+}
+
+// indexOfDefault returns the index of want in opts, or the index of
+// fallback if want isn't present, or 0.
+func indexOfDefault(opts []string, want, fallback string) int {
+	for i, o := range opts {
+		if o == want {
+			return i
+		}
+	}
+	for i, o := range opts {
+		if o == fallback {
+			return i
+		}
+	}
+	return 0
 }
 
 func (d *AgentFormDialog) SetStyles(s Styles) { d.styles = s }
@@ -186,7 +227,42 @@ func (d *AgentFormDialog) Update(msg tea.Msg) tea.Cmd {
 		}
 	}
 
-	// Route key/text events to the focused field.
+	// Effort and Provider focus levels use left/right arrows to cycle
+	// through the radio. Intercept those before routing to the
+	// generic textinput handler below.
+	if k, ok := msg.(tea.KeyMsg); ok {
+		key := k.String()
+		switch d.focus {
+		case agFocusEffort:
+			if key == "left" || key == "h" {
+				if d.effortIdx > 0 {
+					d.effortIdx--
+				}
+				return nil
+			}
+			if key == "right" || key == "l" || key == " " {
+				if d.effortIdx < len(agentFormEffortChoices)-1 {
+					d.effortIdx++
+				}
+				return nil
+			}
+		case agFocusProvider:
+			if key == "left" || key == "h" {
+				if d.providerIdx > 0 {
+					d.providerIdx--
+				}
+				return nil
+			}
+			if key == "right" || key == "l" || key == " " {
+				if d.providerIdx < len(agentFormProviderChoices)-1 {
+					d.providerIdx++
+				}
+				return nil
+			}
+		}
+	}
+
+	// Route key/text events to the focused textinput / textarea.
 	var cmd tea.Cmd
 	switch d.focus {
 	case agFocusName:
@@ -296,12 +372,18 @@ func (d *AgentFormDialog) submit() tea.Cmd {
 	}
 	d.saving = true
 	d.err = ""
+	provider := agentFormProviderChoices[d.providerIdx]
+	if provider == "(default)" {
+		provider = ""
+	}
 	payload := SubmitAgentFormMsg{
 		EditSlug:    d.editSlug,
 		Slug:        slug,
 		Name:        name,
 		Description: strings.TrimSpace(d.desc.Value()),
 		Model:       model,
+		Effort:      agentFormEffortChoices[d.effortIdx],
+		Provider:    provider,
 		Prompt:      d.prompt.Value(),
 	}
 	return func() tea.Msg { return payload }
@@ -352,6 +434,10 @@ func (d *AgentFormDialog) View(width, height int) string {
 		d.desc.View(),
 		d.fieldLabel("model", d.focus == agFocusModel),
 		d.model.View(),
+		d.fieldLabel("effort", d.focus == agFocusEffort),
+		renderRadioRow(agentFormEffortChoices, d.effortIdx, d.focus == agFocusEffort, d.styles),
+		d.fieldLabel("provider", d.focus == agFocusProvider),
+		renderRadioRow(agentFormProviderChoices, d.providerIdx, d.focus == agFocusProvider, d.styles),
 		d.fieldLabel("prompt", d.focus == agFocusPrompt),
 		d.prompt.View(),
 	}

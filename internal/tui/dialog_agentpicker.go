@@ -42,6 +42,8 @@ type OpenAgentFormMsg struct {
 	Name        string
 	Description string
 	Model       string
+	Effort      string
+	Provider    string
 	Prompt      string
 }
 
@@ -136,6 +138,8 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 					Name:        pick.Name,
 					Description: pick.Description,
 					Model:       pick.Model,
+					Effort:      pick.Effort,
+					Provider:    pick.Provider,
 					// Prompt is fetched by the form itself via GetAgent —
 					// AgentSummary doesn't carry it.
 				}

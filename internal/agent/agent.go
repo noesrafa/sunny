@@ -13,6 +13,10 @@ type Config struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description,omitempty"`
 	Model       string `yaml:"model"`
+	// Effort drives the provider's reasoning budget — for Anthropic
+	// it maps to OutputConfig.Effort (low/medium/high/xhigh/max).
+	// Empty falls back to "max" at request build time.
+	Effort string `yaml:"effort,omitempty"`
 	// Provider is optional. When set ("anthropic", "claude-code",
 	// "ollama", …) it overrides the daemon's default provider for
 	// turns against this agent. Empty falls back to the default.
@@ -25,6 +29,13 @@ func (c Config) Validate() error {
 	}
 	if c.Model == "" {
 		return fmt.Errorf("agent.yaml: model is required")
+	}
+	if c.Effort != "" {
+		switch c.Effort {
+		case "low", "medium", "high", "xhigh", "max":
+		default:
+			return fmt.Errorf("agent.yaml: invalid effort %q (allowed: low|medium|high|xhigh|max)", c.Effort)
+		}
 	}
 	return nil
 }

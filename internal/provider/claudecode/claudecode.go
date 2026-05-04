@@ -94,6 +94,15 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	}
 
 	cmd := exec.CommandContext(ctx, d.bin, args...)
+	// Isolate claude in its own process group so a Ctrl+C from the TUI
+	// (which lands here as ctx cancellation) kills bash sub-shells too,
+	// not just the claude binary. Without this, `claude` exits but its
+	// running bash child keeps the stdout pipe open as an orphan, the
+	// decoder's scanner.Scan() never sees EOF, and the turn hangs
+	// forever even though the cancel signal arrived. WaitDelay is the
+	// secondary safety: if any goroutine is still blocked on the pipe
+	// 5s after the kill, Go force-closes it.
+	configureProcessGroup(cmd)
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	} else if home, err := os.UserHomeDir(); err == nil {

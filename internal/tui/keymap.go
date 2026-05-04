@@ -5,7 +5,7 @@ import "charm.land/bubbles/v2/key"
 type KeyMap struct {
 	Send          key.Binding
 	Newline       key.Binding
-	Quit          key.Binding // ctrl+q → open quit confirm dialog (esc was too easy to hit by accident)
+	Quit          key.Binding // esc → open quit confirm dialog (default selection is Nope so accidental hits no-op)
 	ClearOrCancel key.Binding // ctrl+c: cancel current turn (SIGINT to claude); no-op when idle, never touches the textarea
 	NewSession    key.Binding
 	NextSession   key.Binding
@@ -35,7 +35,7 @@ func DefaultKeyMap() KeyMap {
 	return KeyMap{
 		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		Newline:       key.NewBinding(key.WithKeys("ctrl+j", "alt+enter"), key.WithHelp("ctrl+j", "newline")),
-		Quit:          key.NewBinding(key.WithKeys("ctrl+q"), key.WithHelp("ctrl+q", "quit")),
+		Quit:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
 		ClearOrCancel: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel turn")),
 		NewSession:    key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new")),
 		NextSession:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next")),

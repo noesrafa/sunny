@@ -105,7 +105,7 @@ func renderShortcutsSection(innerW int, s Styles) []string {
 		g.Render("end     bottom"),
 		g.Render("tab     next"),
 		g.Render("ctrl+w  close"),
-		g.Render("ctrl+q  quit"),
+		g.Render("esc     quit"),
 	}
 }
 

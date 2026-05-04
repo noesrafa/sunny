@@ -718,7 +718,7 @@ func (m *Model) welcomeText() string {
 		row("tab   ", "cambia entre sesiones"),
 		row("ctrl+w", "cierra la sesión actual"),
 		row("ctrl+c", "cancela el turno actual (no toca el input)"),
-		row("ctrl+q", "cierra sunny (con confirmación)"),
+		row("esc", "cierra sunny (con confirmación)"),
 		"",
 		row("ctrl+j / alt+enter", "nueva línea"),
 		row("ctrl+←/→", "saltar palabras"),

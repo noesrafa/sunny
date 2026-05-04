@@ -12,7 +12,7 @@ type QuitDialog struct {
 	styles      Styles
 	sessions    int
 	anyThinking bool
-	selected    int // 0 = Yep!, 1 = Nope (default focused on Yep)
+	selected    int // 0 = Yep!, 1 = Nope (default focused on Nope — safer)
 }
 
 func NewQuitDialog(s Styles, sessions int, anyThinking bool) *QuitDialog {
@@ -20,7 +20,11 @@ func NewQuitDialog(s Styles, sessions int, anyThinking bool) *QuitDialog {
 		styles:      s,
 		sessions:    sessions,
 		anyThinking: anyThinking,
-		selected:    0,
+		// Default to "Nope" so an accidental enter (or someone
+		// muscle-memorying esc-enter to dismiss a dialog) doesn't
+		// quit. Users who actually want to quit have to deliberately
+		// pick the destructive button.
+		selected: 1,
 	}
 }
 

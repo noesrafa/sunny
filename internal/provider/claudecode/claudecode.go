@@ -8,9 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/noesrafa/sunny/internal/provider"
 )
+
+// idleTimeout is how long claude can go without emitting any stream
+// event before sunny declares the turn unresponsive and kills the
+// process group. Picked to be long enough for legitimate long-
+// running tools (a slow `npm install`, a heavy grep) but short
+// enough that a hung bash sub-shell doesn't keep the TUI staring at
+// "thinking" all afternoon.
+const idleTimeout = 5 * time.Minute
 
 // New returns a driver. Returns an error if the `claude` binary cannot be
 // found on PATH — callers can use that signal to fall back to another
@@ -93,7 +103,13 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		args = append(args, "--append-system-prompt", sys)
 	}
 
-	cmd := exec.CommandContext(ctx, d.bin, args...)
+	// turnCtx wraps the caller's ctx so the inactivity watchdog can
+	// cancel independently. Cleanup lives at the end of the consumer
+	// goroutine (deferred turnCancel below) — failures during Start
+	// path still call it explicitly to avoid leaking the watcher.
+	turnCtx, turnCancel := context.WithCancel(ctx)
+
+	cmd := exec.CommandContext(turnCtx, d.bin, args...)
 	// Isolate claude in its own process group so a Ctrl+C from the TUI
 	// (which lands here as ctx cancellation) kills bash sub-shells too,
 	// not just the claude binary. Without this, `claude` exits but its
@@ -111,10 +127,12 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		turnCancel()
 		return nil, fmt.Errorf("claudecode: stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		turnCancel()
 		return nil, fmt.Errorf("claudecode: stdout pipe: %w", err)
 	}
 	// Drain stderr in the background so a chatty claude doesn't fill its
@@ -122,11 +140,13 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	// its lines into a debug log.
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		turnCancel()
 		return nil, fmt.Errorf("claudecode: stderr pipe: %w", err)
 	}
 	go func() { _, _ = io.Copy(io.Discard, stderr) }()
 
 	if err := cmd.Start(); err != nil {
+		turnCancel()
 		return nil, fmt.Errorf("claudecode: start: %w", err)
 	}
 
@@ -143,6 +163,7 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	line = append(line, '\n')
 	if _, err := stdin.Write(line); err != nil {
 		_ = cmd.Process.Kill()
+		turnCancel()
 		return nil, fmt.Errorf("claudecode: write user turn: %w", err)
 	}
 	// Closing stdin signals end-of-input. Claude finishes its turn (which
@@ -153,19 +174,36 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 	out := make(chan provider.Event, 64)
 	go func() {
 		defer close(out)
+		defer turnCancel()
 		var (
 			sessionID  string
 			stopReason string
 			isError    bool
 			cost       float64
 			lastUsage  *usage
+			idleKilled atomic.Bool
 		)
+
+		// Inactivity watchdog: if no decoder event arrives for
+		// idleTimeout, cancel turnCtx — that mass-kills the process
+		// group via configureProcessGroup, stdout closes, the for-
+		// range below unwinds. We surface this as a distinct error
+		// (vs user-cancel) so the TUI can render the right message.
+		activity := make(chan struct{}, 1)
+		go runIdleWatchdog(turnCtx, activity, &idleKilled, turnCancel)
 
 		// Skill memo: the first `system` event carries session_id; on
 		// streaming runs claude re-emits init at the start of each
 		// resumed turn — first sighting wins so resumed sessions keep
 		// their original ID.
 		for ev := range decode(stdout) {
+			// Non-blocking signal — if the watchdog hasn't drained the
+			// previous tick yet, drop. The buffer of 1 means we never
+			// queue more than one pending notification.
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
 			switch ev.Type {
 			case "system":
 				if ev.Subtype == "init" && sessionID == "" {
@@ -229,7 +267,14 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		}
 
 		if err := cmd.Wait(); err != nil {
-			// Distinguish: context cancellation vs claude exiting mid-turn.
+			// Distinguish three cancellation paths:
+			//   - Idle watchdog fired: claude went silent for too long
+			//   - Caller's ctx cancelled: user hit Ctrl+C / daemon shutdown
+			//   - Anything else: real exit error from the CLI
+			if idleKilled.Load() {
+				out <- provider.Error{Err: fmt.Errorf("claudecode: unresponsive — no output for %s", idleTimeout)}
+				return
+			}
 			if ctx.Err() != nil {
 				out <- provider.Error{Err: ctx.Err()}
 				return
@@ -257,6 +302,39 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		out <- done
 	}()
 	return out, nil
+}
+
+// runIdleWatchdog cancels the turn context if no activity arrives
+// on `activity` within idleTimeout. Sets killed=true before
+// cancelling so the consumer can distinguish this from a user-
+// initiated cancel. Exits cleanly when ctx is already done (turn
+// finished normally) or when activity keeps arriving.
+func runIdleWatchdog(ctx context.Context, activity <-chan struct{}, killed *atomic.Bool, cancel context.CancelFunc) {
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-activity:
+			if !timer.Stop() {
+				// Drain only if Stop returned false because the timer
+				// already fired (the channel has a value). Don't drain
+				// otherwise — Stop returning false on a timer that has
+				// not fired yet is also possible after Reset, and that
+				// channel would block.
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(idleTimeout)
+		case <-timer.C:
+			killed.Store(true)
+			cancel()
+			return
+		}
+	}
 }
 
 // flattenSystem joins the engine's SystemBlocks into a single string for

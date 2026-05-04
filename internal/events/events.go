@@ -37,6 +37,14 @@ const (
 	TabOpened        Type = "tab.opened"
 	TabClosed        Type = "tab.closed"
 	TabUpdated       Type = "tab.updated"
+	// Turn lifecycle. Coarser than conversation.turn (which fires
+	// once per appended journal event) — these mark only the
+	// boundaries of a single user→assistant exchange. Useful for
+	// dashboards / external apps that want to know "is anyone
+	// thinking right now?" without parsing deltas.
+	TurnStarted   Type = "turn.started"
+	TurnDone      Type = "turn.done"
+	TurnCancelled Type = "turn.cancelled"
 )
 
 // Event is one bus message. Slug + ConvID + TabID + Provider are

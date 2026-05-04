@@ -204,6 +204,12 @@ sunny tabs 2>/dev/null || \
   for CLIs that bring their own toolset. opencode also writes a
   per-agent file at `~/.config/opencode/agent/sunny-<slug>.md` to
   carry the system prompt (opencode has no `--append-system-prompt`).
+  claudecode runs each subprocess in its own process group
+  (`process_unix.go` `Setpgid: true` + `cmd.Cancel` to kill the
+  group on ctx cancel) so a Ctrl+C kills bash sub-shells too. A
+  5-min idle watchdog (`runIdleWatchdog`) cancels the turn when
+  claude goes silent — surfaces as `claudecode: unresponsive` so
+  callers can distinguish from a user-initiated cancel.
 - `internal/doctor/` — probes for `sunny doctor` and `sunny setup`,
   including `CheckPeers` which hits `GET /agents` against each remote
   to detect bad/expired tokens.
@@ -226,10 +232,13 @@ sunny tabs 2>/dev/null || \
 - `internal/events/` — in-process pub/sub bus. Hub.Publish is non-
   blocking per subscriber (slow ones drop with a log line, never
   backpressure). Wired into agent CRUD + conversation CRUD +
-  secrets PUT/DELETE + tabs CRUD so every mutation surfaces a
-  one-line event. Event types: `agent.{created,updated,deleted}`,
-  `conversation.{created,deleted,turn}`, `tab.{opened,closed,updated}`,
-  `secrets.changed`.
+  secrets PUT/DELETE + tabs CRUD + turn lifecycle so every
+  mutation surfaces a one-line event. Event types:
+  `agent.{created,updated,deleted}`,
+  `conversation.{created,deleted,turn}`,
+  `tab.{opened,closed,updated}`, `secrets.changed`,
+  `turn.{started,done,cancelled}` (coarser than conversation.turn —
+  one event per user→assistant exchange, marking the boundaries).
 - `internal/server/events.go` — SSE handler at `GET /events` with
   30s heartbeat. Auth required.
 - `internal/server/stats.go` — `GET /stats` snapshot of daemon

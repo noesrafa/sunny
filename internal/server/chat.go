@@ -234,6 +234,8 @@ func (s *server) runTurn(
 	slug := agent.Slug
 	convID := meta.ID
 
+	s.publish(evts.TurnStarted, slug, convID)
+
 	events, err := eng.Turn(ctx, agent, req.Messages, engine.TurnOptions{
 		ProviderState: meta.ProviderState,
 		Cwd:           req.Cwd,
@@ -275,6 +277,7 @@ func (s *server) runTurn(
 			s.sink.Append(slug, convID, "done", payload)
 			s.finalizeTurn(slug, convID, v)
 			s.publish(evts.ConvTurnAppended, slug, convID)
+			s.publish(evts.TurnDone, slug, convID)
 		case provider.Error:
 			// Distinguish "user cancelled" from "real error". The
 			// provider drivers surface ctx cancellation as
@@ -282,6 +285,7 @@ func (s *server) runTurn(
 			// reflects intent and the UI can render differently.
 			if errors.Is(v.Err, context.Canceled) || ctx.Err() != nil {
 				s.sink.Append(slug, convID, "cancelled", map[string]string{"reason": "client cancelled"})
+				s.publish(evts.TurnCancelled, slug, convID)
 			} else {
 				s.sink.Append(slug, convID, "error", map[string]string{"message": v.Err.Error()})
 			}

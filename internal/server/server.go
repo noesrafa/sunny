@@ -117,7 +117,6 @@ func New(opts Options) http.Handler {
 		root:          opts.Root,
 		startedAt:     opts.StartedAt,
 		activeTurns:   newActiveTurnsRegistry(),
-		startedAt:     time.Now().UTC(),
 	}
 	if srv.startedAt.IsZero() {
 		srv.startedAt = time.Now()
@@ -230,9 +229,6 @@ type server struct {
 	// POST /turns can return 409 on contention and DELETE /turn can
 	// look up the cancel func by conv key.
 	activeTurns *activeTurnsRegistry
-	// startedAt is the wall-clock time New() ran; surfaced as
-	// uptime_s on /stats.
-	startedAt time.Time
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

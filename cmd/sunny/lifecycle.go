@@ -1,12 +1,18 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -150,14 +156,15 @@ func stop(args []string) error {
 	return nil
 }
 
-// update upgrades sunny via Homebrew and restarts the daemon so the
-// new binary takes effect. Defaults: brew upgrade noesrafa/tap/
-// sunny, then `sunny restart`. --no-restart skips the restart for
-// users running it inside scripts that own daemon lifecycle.
+// update upgrades sunny in place and restarts the daemon so the new
+// binary takes effect. Tries Homebrew first; on any brew failure
+// (no brew, formula not installed via brew, network issue) it falls
+// back to downloading the latest GitHub release tarball and atomic-
+// renaming the binary into place. --no-restart skips the restart
+// for callers that own daemon lifecycle.
 //
-// Today this assumes Homebrew. Curl/manual installations can run
-// their own upgrade flow; a future version could detect install
-// method and do the right thing.
+// On VPS / Linux installs done with the curl one-liner, the
+// fallback is the path that actually runs.
 func update(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	noRestart := fs.Bool("no-restart", false, "skip restarting the daemon after the upgrade")
@@ -165,25 +172,30 @@ func update(args []string) error {
 		return err
 	}
 
-	if _, err := exec.LookPath("brew"); err != nil {
-		return fmt.Errorf("brew not on PATH — install Homebrew from https://brew.sh or upgrade sunny manually")
-	}
-
 	fmt.Printf("current: sunny %s\n", version)
-	fmt.Println("upgrading via brew…")
-	cmd := exec.Command("brew", "upgrade", "noesrafa/tap/sunny")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("brew upgrade: %w", err)
+
+	upgraded := false
+	if _, err := exec.LookPath("brew"); err == nil {
+		fmt.Println("upgrading via brew…")
+		cmd := exec.Command("brew", "upgrade", "noesrafa/tap/sunny")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		if err := cmd.Run(); err == nil {
+			upgraded = true
+		} else {
+			fmt.Fprintln(os.Stderr, "brew upgrade did not succeed — falling back to GitHub release download")
+		}
+	}
+	if !upgraded {
+		if err := updateViaRelease(); err != nil {
+			return err
+		}
 	}
 
-	// Print the version after upgrade by exec'ing the on-disk
-	// binary — version is a linker-set string in the OLD binary
-	// that's still running this process. The on-disk binary is the
-	// new one (brew replaced it), so `sunny version` reflects
-	// what the next launch will use.
+	// Re-exec on-disk binary to get the post-upgrade version.
+	// This process still has the old linker-set `version` constant;
+	// the new binary is what shows up to future invocations.
 	if binary, err := os.Executable(); err == nil {
 		if out, err := exec.Command(binary, "version").Output(); err == nil {
 			fmt.Printf("now:     %s", string(out))
@@ -195,6 +207,115 @@ func update(args []string) error {
 	}
 	fmt.Println()
 	return restart(nil)
+}
+
+// updateViaRelease pulls the latest GitHub release matching the
+// host's GOOS/GOARCH and replaces the running binary atomically.
+// The atomic rename trick lets the in-flight process keep using its
+// open inode while new invocations get the freshly-installed bits;
+// the next `sunny restart` then picks up the new code.
+func updateViaRelease() error {
+	const apiURL = "https://api.github.com/repos/noesrafa/sunny/releases/latest"
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
+	type asset struct {
+		Name string `json:"name"`
+		URL  string `json:"browser_download_url"`
+	}
+	type release struct {
+		TagName string  `json:"tag_name"`
+		Assets  []asset `json:"assets"`
+	}
+
+	resp, err := httpClient.Get(apiURL)
+	if err != nil {
+		return fmt.Errorf("fetch latest release info: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("fetch latest release info: status %d", resp.StatusCode)
+	}
+	var rel release
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return fmt.Errorf("decode release info: %w", err)
+	}
+
+	suffix := "_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+	var dlURL, dlName string
+	for _, a := range rel.Assets {
+		if strings.HasSuffix(a.Name, suffix) {
+			dlURL, dlName = a.URL, a.Name
+			break
+		}
+	}
+	if dlURL == "" {
+		return fmt.Errorf("no asset matching %s/%s in release %s", runtime.GOOS, runtime.GOARCH, rel.TagName)
+	}
+
+	fmt.Printf("downloading %s…\n", dlName)
+	dlResp, err := httpClient.Get(dlURL)
+	if err != nil {
+		return fmt.Errorf("download asset: %w", err)
+	}
+	defer dlResp.Body.Close()
+	if dlResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download asset: status %d", dlResp.StatusCode)
+	}
+
+	binData, err := extractSunnyBinary(dlResp.Body)
+	if err != nil {
+		return err
+	}
+
+	// Resolve symlinks so we operate on the real file on disk
+	// (e.g. /usr/local/bin/sunny might link to ~/.local/bin/sunny).
+	cur, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate own binary: %w", err)
+	}
+	if real, err := filepath.EvalSymlinks(cur); err == nil {
+		cur = real
+	}
+	dir := filepath.Dir(cur)
+	tmpPath := filepath.Join(dir, ".sunny.update.tmp")
+	if err := os.WriteFile(tmpPath, binData, 0o755); err != nil {
+		return fmt.Errorf("write new binary to %s: %w (try sudo if permission denied)", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, cur); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("install new binary at %s: %w (try sudo if permission denied)", cur, err)
+	}
+	fmt.Printf("installed %s at %s\n", rel.TagName, cur)
+	return nil
+}
+
+// extractSunnyBinary streams a gzipped tar archive looking for the
+// `sunny` executable entry and returns its bytes. Other files in
+// the archive (README, LICENSE) are ignored.
+func extractSunnyBinary(r io.Reader) ([]byte, error) {
+	gzr, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, fmt.Errorf("gzip open: %w", err)
+	}
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("tar read: %w", err)
+		}
+		if hdr.Typeflag == tar.TypeReg && filepath.Base(hdr.Name) == "sunny" {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return nil, fmt.Errorf("read sunny entry: %w", err)
+			}
+			return data, nil
+		}
+	}
+	return nil, fmt.Errorf("`sunny` binary not found in tarball")
 }
 
 // restart stops the running daemon (if any) and starts a fresh one

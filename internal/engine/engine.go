@@ -337,11 +337,48 @@ func (e *Engine) HasProviders() bool {
 	return e != nil && len(e.providers) > 0
 }
 
+// runtimeContext is the sunny-aware preamble we prepend to every
+// agent's system prompt unless explicitly opted out. The intent is
+// purely defensive: tell the agent it's running inside sunny so it
+// doesn't suggest commands that would terminate its own session
+// (`sunny stop` and friends), and orient it toward the daemon's
+// data layout in case a question lands here that needs that context.
+const runtimeContext = `# Runtime context (injected by sunny)
+
+You are running inside sunny (https://github.com/noesrafa/sunny), a
+local daemon at http://localhost:7777 that orchestrates AI agents.
+
+- Your data lives at ` + "`~/.sunny/`" + `. The journal of this conversation
+  is in ` + "`~/.sunny/agents/<your-slug>/conversations/<conv-id>/`" + `.
+- Other agents share this daemon. Listing/CRUD via ` + "`/agents`" + `.
+- The daemon hosts THIS conversation. **Do NOT run ` + "`sunny stop`" + `,
+  ` + "`sunny restart`" + `, or ` + "`sunny update`" + `** — they kill the daemon,
+  which terminates this turn mid-stream and may corrupt the
+  journal.
+- Read-only safe: ` + "`sunny status`" + `, ` + "`sunny doctor`" + `, ` + "`sunny token`" + `,
+  ` + "`sunny peers`" + `, ` + "`curl localhost:7777/healthz`" + `.
+- The user can talk to other sunny daemons across their tailscale
+  network; if they say "in the vps" they may mean a remote daemon.`
+
+// shouldInjectRuntimeContext is the gate. Off when the agent opted
+// out via agent.yaml or when the operator set SUNNY_NO_META_PROMPT
+// in the environment (test/dev escape hatch).
+func shouldInjectRuntimeContext(a *store.Agent) bool {
+	if a != nil && a.Config != nil && a.Config.NoRuntimeContext {
+		return false
+	}
+	if v := os.Getenv("SUNNY_NO_META_PROMPT"); v == "1" || v == "true" {
+		return false
+	}
+	return true
+}
+
 // BuildSystemPrompt assembles the system prompt from the agent's
-// on-disk definition. Order is: prompt.md → skills (each as a
-// labeled section) → knowledge file index. The last block carries a
-// cache_control breakpoint so the entire prefix caches across
-// turns; per-request user content sits outside this prefix.
+// on-disk definition. Order is: runtime context (sunny meta) →
+// prompt.md → skills (each as a labeled section) → knowledge file
+// index. The last block carries a cache_control breakpoint so the
+// entire prefix caches across turns; per-request user content sits
+// outside this prefix.
 //
 // **Skill framing note**: we deliberately frame skills as pre-loaded
 // behavioural guidelines, NOT as invocable tools. The claude-code
@@ -352,6 +389,15 @@ func (e *Engine) HasProviders() bool {
 // prompt.
 func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 	var blocks []provider.SystemBlock
+
+	if shouldInjectRuntimeContext(a) {
+		blocks = append(blocks, provider.SystemBlock{Text: runtimeContext})
+	}
+
+	// Track where agent-specific blocks begin so the fallback below
+	// fires when the agent has no prompt.md / skills / knowledge —
+	// even if the meta-prompt already filled blocks[0].
+	agentBlocksStart := len(blocks)
 
 	if promptPath := agentPromptPath(a); promptPath != "" {
 		data, err := os.ReadFile(promptPath)
@@ -394,7 +440,7 @@ func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 		blocks = append(blocks, provider.SystemBlock{Text: strings.TrimRight(b.String(), "\n")})
 	}
 
-	if len(blocks) == 0 {
+	if len(blocks) == agentBlocksStart {
 		blocks = append(blocks, provider.SystemBlock{
 			Text: fmt.Sprintf("You are %s, a personal agent.", a.Config.Name),
 		})

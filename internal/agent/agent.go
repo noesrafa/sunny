@@ -21,6 +21,10 @@ type Config struct {
 	// "ollama", …) it overrides the daemon's default provider for
 	// turns against this agent. Empty falls back to the default.
 	Provider string `yaml:"provider,omitempty"`
+	// NoRuntimeContext skips the auto-injected sunny meta-prompt
+	// for this agent. Default false (= the meta-prompt IS injected).
+	// Set true for purist agents that want a clean prompt window.
+	NoRuntimeContext bool `yaml:"no_runtime_context,omitempty"`
 }
 
 func (c Config) Validate() error {

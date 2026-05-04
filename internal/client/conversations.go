@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 // ConversationMeta mirrors internal/conversation.Meta over the wire.
@@ -24,7 +25,7 @@ type ConversationMeta struct {
 type JournalEvent struct {
 	Seq     int64           `json:"seq"`
 	Kind    string          `json:"kind"`
-	At      string          `json:"at"`
+	At      time.Time       `json:"at"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 

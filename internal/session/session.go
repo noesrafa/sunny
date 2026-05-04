@@ -132,6 +132,14 @@ type Session struct {
 	Turns     int
 	LastErr   error
 	StartedAt time.Time
+	// lastUserAt is the journal timestamp of the most recent "user"
+	// event we applied. Used to compute per-turn duration on `done`
+	// — that's "done.At - lastUserAt", which is identical for every
+	// viewer of the conversation regardless of who actually sent.
+	// Without it, durations on the viewer side were either 0 (if
+	// the viewer never sent) or the wall time since the viewer's
+	// last own send (way too long).
+	lastUserAt time.Time
 
 	// Draft is the unsent textarea content. Saved on tab switch,
 	// restored when switching back.
@@ -205,7 +213,7 @@ func (s *Session) loadHistory(ctx context.Context) error {
 		return err
 	}
 	for _, ev := range events {
-		s.applyKindLocked(ev.Kind, ev.Payload, ev.Seq)
+		s.applyKindLocked(ev.Kind, ev.At, ev.Payload)
 	}
 	if n := len(events); n > 0 {
 		s.lastSeq.Store(events[n-1].Seq)
@@ -475,30 +483,46 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // transcript. Returns true when the event ends a turn (done / error
 // / cancelled).
 //
-// The "user" event path skips when seq matches our own outstanding
-// echoSkipSeq — that's our optimistic local append showing back up
-// via the watch stream. Without this skip, the sender would see two
-// copies of every message they typed.
+// The "user" event path skips appending a transcript entry when seq
+// matches our own outstanding echoSkipSeq — that's our optimistic
+// local append showing back up via the watch stream. We still
+// record the journal timestamp (lastUserAt) BEFORE the skip though,
+// because the duration math on the upcoming `done` event depends on
+// it whether or not we drew the user item.
 func (s *Session) ApplyJournalEvent(ev client.JournalEvent) (terminal bool) {
-	if ev.Kind == "user" && ev.Seq == s.echoSkipSeq.Load() {
-		s.echoSkipSeq.Store(-1)
-		return false
+	if ev.Kind == "user" {
+		s.lastUserAt = ev.At
+		if ev.Seq == s.echoSkipSeq.Load() {
+			s.echoSkipSeq.Store(-1)
+			return false
+		}
 	}
-	return s.applyKindLocked(ev.Kind, ev.Payload, ev.Seq)
+	return s.applyKindLocked(ev.Kind, ev.At, ev.Payload)
 }
 
 // applyKindLocked is the shared dispatcher used by both
-// ApplyJournalEvent (live tail) and LoadHistory (bulk replay).
+// ApplyJournalEvent (live tail) and loadHistory (bulk replay).
 // "Locked" is aspirational — the session is single-threaded from the
 // TUI's perspective; calls from background goroutines would need
 // real locking.
-func (s *Session) applyKindLocked(kind string, payload json.RawMessage, _ int64) (terminal bool) {
+//
+// at is the journal timestamp of the event. For "user" events the
+// caller has already stored it as lastUserAt; for "done" events it
+// gives us a precise turn duration without depending on local
+// wall-clock state.
+func (s *Session) applyKindLocked(kind string, at time.Time, payload json.RawMessage) (terminal bool) {
 	switch kind {
 	case "user":
 		var p struct {
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal(payload, &p)
+		// Bulk replay (loadHistory) goes through this path too —
+		// keep lastUserAt fresh so a `done` later in the same
+		// replay loop computes the right duration.
+		if !at.IsZero() {
+			s.lastUserAt = at
+		}
 		s.Items = append(s.Items, UserItem{Text: p.Text})
 	case "text_delta":
 		var p struct {
@@ -542,8 +566,16 @@ func (s *Session) applyKindLocked(kind string, payload json.RawMessage, _ int64)
 		if !s.turnHadOutput {
 			s.Items = append(s.Items, EmptyResponseItem{})
 		}
+		// Per-turn duration is journal-derived (done.At - user.At)
+		// so every viewer of the conversation sees the same number,
+		// not their own wall-clock-since-last-own-send. Falls back
+		// to local elapsed time only if the journal didn't carry
+		// timestamps (very old conversations).
 		dur := 0
-		if !s.StartedAt.IsZero() {
+		switch {
+		case !at.IsZero() && !s.lastUserAt.IsZero():
+			dur = int(at.Sub(s.lastUserAt).Milliseconds())
+		case !s.StartedAt.IsZero():
 			dur = int(time.Since(s.StartedAt).Milliseconds())
 		}
 		s.Items = append(s.Items, ResultItem{

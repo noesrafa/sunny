@@ -167,7 +167,14 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		return m, next, true
 	case tabsRefreshedMsg:
-		return m, m.applyTabsRefresh(v), true
+		// applyTabsRefresh mutates m via its pointer receiver
+		// (adds sessions, refreshes the viewport). We MUST run it
+		// before the return statement captures m — Go's left-to-
+		// right evaluation order for return expressions would
+		// otherwise snapshot m before the mutations land, dropping
+		// the newly-added sessions on the floor.
+		cmd := m.applyTabsRefresh(v)
+		return m, cmd, true
 	case busEventClosedMsg:
 		// Multiplexer terminated (ctx cancelled, peers gone). Stop
 		// re-arming; future versions can show a "real-time sync

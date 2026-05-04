@@ -96,6 +96,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.Paste):
 		m.handlePaste()
 		return m, nil, true
+	case key.Matches(msg, m.keymap.Help):
+		return m, m.overlay.Open(NewHelpDialog(m.styles)), true
 	case key.Matches(msg, m.keymap.Peer1):
 		m.switchToPeerByIdx(0)
 		return m, nil, true

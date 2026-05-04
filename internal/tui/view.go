@@ -87,63 +87,29 @@ func clampHeight(s string, maxLines int) string {
 }
 
 func (m Model) renderHeader() string {
-	// Single-peer (zero-config local-only) → header stays blank to
-	// avoid clutter. Layout reserves headerHeight=1 either way so
-	// the math doesn't shift.
-	if len(m.peerOrder) <= 1 {
-		return ""
-	}
-	return " " + m.renderPeerSwitcher()
+	// Header stays blank (peer switcher moved to the sidebar in
+	// v0.19). Layout still reserves headerHeight=1 so the math
+	// doesn't shift; the row gives the chat some breathing room.
+	return ""
 }
 
-// renderPeerSwitcher renders peer pills like
-//
-//	[1 local]  2 vps  ·  3 pi
-//
-// where the active peer is highlighted in brackets and inactive
-// peers show their Ctrl+N number prefix so the binding is
-// discoverable without help. A recent activity dot appears next to
-// the number when a non-active peer received an event in the last
-// few seconds.
-func (m Model) renderPeerSwitcher() string {
-	const (
-		// activityWindow is how long after an event the dot stays
-		// visible. Short enough that it actually marks "this is
-		// happening NOW" rather than "this happened sometime today".
-		activityWindow = 8 * time.Second
-		maxVisible     = 5
-	)
-	pills := make([]string, 0, len(m.peerOrder))
+// peerStatuses snapshots peerOrder + active + activity into the
+// PeerStatus slice the sidebar renderer wants. Activity ages out
+// after a few seconds so the dot actually communicates "now".
+func (m Model) peerStatuses() []PeerStatus {
+	const activityWindow = 8 * time.Second
 	now := time.Now()
-	visible := m.peerOrder
-	if len(visible) > maxVisible {
-		visible = visible[:maxVisible]
-	}
-	for i, name := range visible {
-		num := i + 1
-		isActive := name == m.activePeer
-		dot := ""
-		if !isActive {
+	out := make([]PeerStatus, 0, len(m.peerOrder))
+	for _, name := range m.peerOrder {
+		st := PeerStatus{Name: name, Active: name == m.activePeer}
+		if !st.Active {
 			if t, ok := m.peerActivity[name]; ok && now.Sub(t) < activityWindow {
-				dot = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("•") + " "
+				st.HasActivity = true
 			}
 		}
-		if isActive {
-			numStr := lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Render(fmt.Sprintf("%d", num))
-			nameStr := lipgloss.NewStyle().Foreground(colText).Bold(true).Render(name)
-			pills = append(pills, "["+numStr+" "+nameStr+"]")
-		} else {
-			numStr := lipgloss.NewStyle().Foreground(colSecondary).Bold(true).Render(fmt.Sprintf("%d", num))
-			label := m.styles.HeaderDim.Render(name)
-			pills = append(pills, dot+numStr+" "+label)
-		}
+		out = append(out, st)
 	}
-	more := ""
-	if len(m.peerOrder) > maxVisible {
-		more = m.styles.HeaderDim.Render(fmt.Sprintf(" +%d", len(m.peerOrder)-maxVisible))
-	}
-	sep := m.styles.HeaderSep.Render(" · ")
-	return strings.Join(pills, sep) + more
+	return out
 }
 
 func (m Model) renderBody() string {
@@ -152,7 +118,7 @@ func (m Model) renderBody() string {
 		bodyH = 6
 	}
 	main := m.renderMain(bodyH)
-	sidebar := renderSidebar(m.manager, bodyH, m.styles, m.logoFrame, m.sysStats)
+	sidebar := renderSidebar(m.manager, m.peerStatuses(), bodyH, m.styles, m.logoFrame, m.sysStats)
 	// 3-col gap between main and sidebar — Crush-style breathing room, no
 	// vertical divider line. Sidebar sits on the RIGHT (Rafael's preference,
 	// keeps the chat anchored to the left edge where the eye lands first).

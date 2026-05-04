@@ -68,12 +68,21 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m.createSession(v)
 	case RenameSessionMsg:
 		m.overlay.CloseTop()
-		if cur := m.manager.Current(); cur != nil {
+		cur := m.manager.Current()
+		if cur != nil {
 			cur.Title = v.NewTitle
 			m.logger.Info("session renamed", "session", cur.ID, "title", v.NewTitle)
 		}
 		m.saveState()
-		return m, nil, true
+		// Persist to the daemon so other viewers (and the next TUI
+		// boot) pick up the new title. The PATCH publishes
+		// tab.updated to the bus; our applyTabsRefresh handler
+		// dedups our own self-echo by matching tab id.
+		var cmd tea.Cmd
+		if cur != nil && cur.TabID != "" {
+			cmd = m.patchTabTitleCmd(cur.Host(), cur.TabID, v.NewTitle)
+		}
+		return m, cmd, true
 	case SwitchTabMsg:
 		m.overlay.CloseTop()
 		m.switchToTab(v.Kind, v.Index)
@@ -175,6 +184,9 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		// the newly-added sessions on the floor.
 		cmd := m.applyTabsRefresh(v)
 		return m, cmd, true
+	case tabPatchFailedMsg:
+		m.logger.Warn("tab patch failed", "peer", v.Host, "tab", v.TabID, "err", v.Err)
+		return m, nil, true
 	case busEventClosedMsg:
 		// Multiplexer terminated (ctx cancelled, peers gone). Stop
 		// re-arming; future versions can show a "real-time sync
@@ -357,6 +369,25 @@ func (m *Model) handleJournalWatchClosed(msg journalWatchClosedMsg) {
 	m.saveState()
 }
 
+// patchTabTitleCmd PATCHes a single tab's title on the named peer.
+// Returns nil so callers can ignore the result — the bus event
+// `tab.updated` triggers the reconciliation that picks up the new
+// value across every viewer (including ourselves; the dedupe by
+// tab id makes the self-echo a no-op).
+func (m *Model) patchTabTitleCmd(peer, tabID, title string) tea.Cmd {
+	c := m.clientFor(peer)
+	if c == nil {
+		return nil
+	}
+	ctx := m.ctx
+	return func() tea.Msg {
+		if _, err := c.PatchTab(ctx, tabID, client.PatchTabRequest{Title: &title}); err != nil {
+			return tabPatchFailedMsg{Host: peer, TabID: tabID, Err: err}
+		}
+		return nil
+	}
+}
+
 // refetchTabsCmd kicks off an async GET /tabs against the named
 // peer; the response lands as tabsRefreshedMsg so the Update loop
 // can apply it without blocking. Used by tab.* bus events to
@@ -406,11 +437,18 @@ func (m *Model) applyTabsRefresh(msg tabsRefreshedMsg) tea.Cmd {
 		haveByID[s.TabID] = s
 	}
 
-	// Close sessions whose tab is gone server-side.
+	// Close sessions whose tab is gone server-side, and pick up
+	// title/cwd updates on tabs we already have. This is what
+	// makes a remote rename land in our UI without a refresh.
 	for _, s := range mgr.Sessions {
-		if _, ok := wantedByID[s.TabID]; !ok && s.TabID != "" {
+		t, ok := wantedByID[s.TabID]
+		if !ok && s.TabID != "" {
 			m.logger.Info("tab gone server-side; closing session", "peer", msg.Host, "tab", s.TabID)
 			mgr.Close(s.ID)
+			continue
+		}
+		if ok && t.Title != "" && t.Title != s.Title {
+			s.Title = t.Title
 		}
 	}
 

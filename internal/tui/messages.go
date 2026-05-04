@@ -78,3 +78,12 @@ type tabsRefreshedMsg struct {
 	Tabs []client.Tab
 	Err  error
 }
+
+// tabPatchFailedMsg surfaces a failed PATCH /tabs/{id} so we can log
+// it. The user's local mutation already happened (e.g. rename
+// applied to cur.Title); we just log the sync failure.
+type tabPatchFailedMsg struct {
+	Host  string
+	TabID string
+	Err   error
+}

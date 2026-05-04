@@ -25,6 +25,7 @@ type KeyMap struct {
 	ScrollTop     key.Binding // home — jump to start of transcript
 	ScrollBottom  key.Binding // end — jump to bottom + re-enable follow
 	Paste         key.Binding // ctrl+v — image-aware paste (image first, then text)
+	Help          key.Binding // ctrl+/ — open the full keybinding cheat sheet
 	// Peer1..Peer9: Ctrl+1..9 jumps directly to the Nth federation
 	// peer (peerOrder index N-1). The header switcher labels
 	// each pill with this number so the binding is discoverable.
@@ -55,6 +56,7 @@ func DefaultKeyMap() KeyMap {
 		ScrollTop:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
 		ScrollBottom:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		Paste:         key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste image/text")),
+		Help:          key.NewBinding(key.WithKeys("ctrl+/", "ctrl+_"), key.WithHelp("ctrl+/", "shortcuts")),
 		Peer1:         key.NewBinding(key.WithKeys("ctrl+1"), key.WithHelp("ctrl+1", "peer 1")),
 		Peer2:         key.NewBinding(key.WithKeys("ctrl+2"), key.WithHelp("ctrl+2", "peer 2")),
 		Peer3:         key.NewBinding(key.WithKeys("ctrl+3"), key.WithHelp("ctrl+3", "peer 3")),

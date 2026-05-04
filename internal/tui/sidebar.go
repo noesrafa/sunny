@@ -20,10 +20,22 @@ const (
 	sidebarGap   = 3 // empty cols between main column and sidebar
 )
 
-func renderSidebar(mgr *session.Manager, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
+// PeerStatus is the per-peer summary the sidebar renders. Built by
+// the model from peerOrder + activePeer + peerActivity.
+type PeerStatus struct {
+	Name       string
+	Active     bool
+	HasActivity bool // dot ON when a non-active peer pinged us recently
+}
+
+func renderSidebar(mgr *session.Manager, peers []PeerStatus, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s, logoFrame), ""}
+	if len(peers) > 1 {
+		rows = append(rows, renderPeersSection(peers, innerW, s)...)
+		rows = append(rows, "")
+	}
 	rows = append(rows, renderSessionsSection(mgr, innerW, s)...)
 	if section := renderUsageSection(mgr, sys, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
@@ -38,6 +50,38 @@ func renderSidebar(mgr *session.Manager, height int, s Styles, logoFrame int, sy
 		Height(height).
 		Padding(0, 1).
 		Render(body)
+}
+
+// renderPeersSection draws the federation roster as numbered rows.
+// Active peer marked with the same ▎ indicator the active session
+// uses, plus a Ctrl+N hint label so the binding is discoverable
+// without the help modal. Activity dot ON when the peer fired a
+// recent bus event.
+func renderPeersSection(peers []PeerStatus, innerW int, s Styles) []string {
+	rows := sectionHeader("peers", innerW, s)
+	for i, p := range peers {
+		if i >= 9 {
+			rows = append(rows, s.Hint.Render(fmt.Sprintf("  +%d more", len(peers)-9)))
+			break
+		}
+		num := i + 1
+		dot := " "
+		if p.HasActivity && !p.Active {
+			dot = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("•")
+		}
+		var line string
+		if p.Active {
+			indicator := s.UserPrompt.Render("▎")
+			numStr := lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Render(fmt.Sprintf("%d", num))
+			nameStr := s.AssistantText.Bold(true).Render(p.Name)
+			line = indicator + numStr + " " + nameStr
+		} else {
+			numStr := lipgloss.NewStyle().Foreground(colSecondary).Render(fmt.Sprintf("%d", num))
+			line = " " + numStr + " " + s.HeaderDim.Render(p.Name) + " " + dot
+		}
+		rows = append(rows, line)
+	}
+	return rows
 }
 
 // sectionHeader returns the bold title + the rule below it, the canonical
@@ -92,20 +136,17 @@ func buildSysStatsRows(st sysstats.Stats, innerW int, s Styles) []string {
 	}
 }
 
+// renderShortcutsSection shows just the three most-used keys.
+// Everything else lives in the help modal (ctrl+/) so the sidebar
+// doesn't crowd out the sessions/peers view.
 func renderShortcutsSection(innerW int, s Styles) []string {
 	g := s.HeaderDim
 	return []string{
 		s.HeaderSep.Render(strings.Repeat("─", innerW)),
+		g.Render("ctrl+a  agents"),
 		g.Render("ctrl+n  new chat"),
-		g.Render("ctrl+r  rename"),
-		g.Render("ctrl+l  reset chat"),
-		g.Render("ctrl+d  diff"),
-		g.Render("ctrl+k  switch"),
-		g.Render("ctrl+s  settings"),
-		g.Render("end     bottom"),
-		g.Render("tab     next"),
-		g.Render("ctrl+w  close"),
 		g.Render("esc     quit"),
+		g.Render("ctrl+/  more"),
 	}
 }
 

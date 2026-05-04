@@ -35,6 +35,8 @@ func main() {
 		err = stop(args)
 	case "restart":
 		err = restart(args)
+	case "update":
+		err = update(args)
 	case "status":
 		err = status(args)
 	case "serve":
@@ -77,6 +79,7 @@ commands:
   start     Run the daemon detached. Logs to <root>/run/sunny.log.
   stop      Stop the running daemon.
   restart   Stop the running daemon (if any) and start a fresh one — handy after 'brew upgrade'.
+  update    'brew upgrade noesrafa/tap/sunny' + restart the daemon. One command for the upgrade dance.
   status    Show whether the daemon is running, plus pid, addr, uptime.
   serve     Run the daemon in the foreground (advanced; prefer 'start').
   token     Print the daemon's bearer token. 'sunny token rotate' regenerates it.

@@ -150,6 +150,53 @@ func stop(args []string) error {
 	return nil
 }
 
+// update upgrades sunny via Homebrew and restarts the daemon so the
+// new binary takes effect. Defaults: brew upgrade noesrafa/tap/
+// sunny, then `sunny restart`. --no-restart skips the restart for
+// users running it inside scripts that own daemon lifecycle.
+//
+// Today this assumes Homebrew. Curl/manual installations can run
+// their own upgrade flow; a future version could detect install
+// method and do the right thing.
+func update(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	noRestart := fs.Bool("no-restart", false, "skip restarting the daemon after the upgrade")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if _, err := exec.LookPath("brew"); err != nil {
+		return fmt.Errorf("brew not on PATH — install Homebrew from https://brew.sh or upgrade sunny manually")
+	}
+
+	fmt.Printf("current: sunny %s\n", version)
+	fmt.Println("upgrading via brew…")
+	cmd := exec.Command("brew", "upgrade", "noesrafa/tap/sunny")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("brew upgrade: %w", err)
+	}
+
+	// Print the version after upgrade by exec'ing the on-disk
+	// binary — version is a linker-set string in the OLD binary
+	// that's still running this process. The on-disk binary is the
+	// new one (brew replaced it), so `sunny version` reflects
+	// what the next launch will use.
+	if binary, err := os.Executable(); err == nil {
+		if out, err := exec.Command(binary, "version").Output(); err == nil {
+			fmt.Printf("now:     %s", string(out))
+		}
+	}
+
+	if *noRestart {
+		return nil
+	}
+	fmt.Println()
+	return restart(nil)
+}
+
 // restart stops the running daemon (if any) and starts a fresh one
 // on the same address. The default --addr matches whatever the
 // running daemon is bound to, so a bare `sunny restart` is the

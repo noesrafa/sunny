@@ -95,6 +95,41 @@ func (m *Model) handleBranchTick() tea.Cmd {
 	return branchTickCmd()
 }
 
+// peerSyncTickCmd reconciles the federation roster every 2s.
+// Tailnet auto-discovery runs in a goroutine after boot so peers
+// land in fed.Names() asynchronously; without this tick they
+// wouldn't show up in the header switcher until the user restarted
+// the TUI.
+func peerSyncTickCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return peerSyncTickMsg{} })
+}
+
+// handlePeerSync compares m.peerOrder against fed.Names() and adds
+// any missing peers (with an empty session.Manager + a tabs
+// refetch so the new peer's open tabs show up immediately).
+// Removal is intentional NOT supported here — a peer that went
+// offline is likely to come back; dropping it would close every
+// session the user had open against it.
+func (m *Model) handlePeerSync() tea.Cmd {
+	cmds := []tea.Cmd{peerSyncTickCmd()}
+	if m.fed != nil {
+		known := map[string]bool{}
+		for _, n := range m.peerOrder {
+			known[n] = true
+		}
+		for _, name := range m.fed.Names() {
+			if known[name] {
+				continue
+			}
+			m.peerManagers[name] = session.NewManager()
+			m.peerOrder = append(m.peerOrder, name)
+			m.logger.Info("peer joined", "name", name)
+			cmds = append(cmds, m.refetchTabsCmd(name))
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m *Model) handleAnimStep(msg anim.StepMsg) tea.Cmd {
 	if msg.ID != m.thinkingAnim.ID() {
 		return nil

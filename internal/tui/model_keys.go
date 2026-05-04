@@ -96,6 +96,33 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.Paste):
 		m.handlePaste()
 		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer1):
+		m.switchToPeerByIdx(0)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer2):
+		m.switchToPeerByIdx(1)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer3):
+		m.switchToPeerByIdx(2)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer4):
+		m.switchToPeerByIdx(3)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer5):
+		m.switchToPeerByIdx(4)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer6):
+		m.switchToPeerByIdx(5)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer7):
+		m.switchToPeerByIdx(6)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer8):
+		m.switchToPeerByIdx(7)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.Peer9):
+		m.switchToPeerByIdx(8)
+		return m, nil, true
 	}
 	return m, nil, false
 }
@@ -128,24 +155,35 @@ func (m *Model) handleClearOrCancel() {
 	if cur == nil || cur.State != session.StateThinking {
 		return
 	}
-	if err := cur.Cancel(); err != nil {
+	if err := cur.Cancel(m.ctx); err != nil {
 		cur.LastErr = err
 	}
 }
 
 func (m *Model) handleCloseTab() {
 	cur := m.manager.Current()
-	if cur != nil {
-		m.manager.Close(cur.ID)
-		if next := m.manager.Current(); next != nil {
-			m.textarea.SetValue(next.Draft)
-			m.textarea.CursorEnd()
-		} else {
-			m.textarea.Reset()
-		}
-		m.layout()
-		m.refreshViewport()
+	if cur == nil {
+		return
 	}
+	// Tell the daemon to drop the tab. This publishes a tab.closed
+	// event so other viewers also remove it. Idempotent — we don't
+	// surface errors because the user just expects the tab to go.
+	if cur.TabID != "" {
+		if c := m.clientFor(cur.Host()); c != nil {
+			if err := c.CloseTab(m.ctx, cur.TabID); err != nil {
+				m.logger.Warn("close tab", "tab", cur.TabID, "err", err)
+			}
+		}
+	}
+	m.manager.Close(cur.ID)
+	if next := m.manager.Current(); next != nil {
+		m.textarea.SetValue(next.Draft)
+		m.textarea.CursorEnd()
+	} else {
+		m.textarea.Reset()
+	}
+	m.layout()
+	m.refreshViewport()
 	m.saveState()
 }
 
@@ -233,8 +271,7 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	m.textarea.Reset()
 	cur.Draft = ""
 
-	stream, err := cur.SendBegin(m.ctx, text)
-	if err != nil {
+	if err := cur.Send(m.ctx, text); err != nil {
 		cur.LastErr = err
 		cur.State = session.StateError
 		m.logger.Error("send failed", "err", err, "session", cur.ID)
@@ -247,11 +284,10 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	m.layout()
 	m.refreshViewport()
 	m.chat.ScrollToBottom()
-	// Kick off the spinner + morphing-thinking animation alongside the
-	// SSE event pump. All three live until the session goes idle on the
-	// terminal Done event.
+	// Spinner + thinking animation kick on while the engine works;
+	// the watch goroutine is already pumping events into the session,
+	// so no additional wait command is needed here.
 	return m, tea.Batch(
-		waitForChatEvent(cur.ID, stream),
 		m.spinner.Tick,
 		m.thinkingAnim.Step(),
 	)

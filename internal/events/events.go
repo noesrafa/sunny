@@ -27,22 +27,26 @@ import (
 type Type string
 
 const (
-	AgentCreated      Type = "agent.created"
-	AgentUpdated      Type = "agent.updated"
-	AgentDeleted      Type = "agent.deleted"
-	ConvCreated       Type = "conversation.created"
-	ConvDeleted       Type = "conversation.deleted"
-	ConvTurnAppended  Type = "conversation.turn"
-	SecretsChanged    Type = "secrets.changed"
+	AgentCreated     Type = "agent.created"
+	AgentUpdated     Type = "agent.updated"
+	AgentDeleted     Type = "agent.deleted"
+	ConvCreated      Type = "conversation.created"
+	ConvDeleted      Type = "conversation.deleted"
+	ConvTurnAppended Type = "conversation.turn"
+	SecretsChanged   Type = "secrets.changed"
+	TabOpened        Type = "tab.opened"
+	TabClosed        Type = "tab.closed"
+	TabUpdated       Type = "tab.updated"
 )
 
-// Event is one bus message. Slug + ConvID + Provider are union-typed
-// per Type — empty when not applicable. We deliberately avoid an
-// `any` payload field so the wire shape stays predictable.
+// Event is one bus message. Slug + ConvID + TabID + Provider are
+// union-typed per Type — empty when not applicable. We deliberately
+// avoid an `any` payload field so the wire shape stays predictable.
 type Event struct {
 	Type     Type   `json:"type"`
 	Slug     string `json:"slug,omitempty"`
 	ConvID   string `json:"conv_id,omitempty"`
+	TabID    string `json:"tab_id,omitempty"`
 	Provider string `json:"provider,omitempty"`
 }
 

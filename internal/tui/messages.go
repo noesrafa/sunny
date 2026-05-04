@@ -5,24 +5,21 @@ import (
 	"github.com/noesrafa/sunny/internal/sysstats"
 )
 
-// chatEventMsg carries one event from the daemon's SSE stream. Pumped
-// by waitForChatEvent and consumed by Update, which applies it to the
-// matching session and re-arms the next read.
-type chatEventMsg struct {
+// journalEventMsg carries one event from a session's watch stream
+// (GET /watch). Pumped by waitForJournalEvent and consumed by
+// Update, which dispatches into the session's ApplyJournalEvent and
+// re-arms the next read.
+type journalEventMsg struct {
 	SessionID string
-	Stream    *client.Stream
-	Event     client.Event
+	Event     client.JournalEvent
 }
 
-// chatStreamDoneMsg fires when the SSE stream ends — either cleanly
-// (Err == nil) or with an error (transport / cancel / decode). If the
-// session's activeStream still matches Stream we clear it; otherwise
-// the stream was already replaced (e.g. user fired a second turn) and
-// we ignore.
-type chatStreamDoneMsg struct {
+// journalWatchClosedMsg fires when a session's watch channel closes
+// — typically because the session was Closed (TUI tearing down) or
+// the bubbletea ctx was cancelled. The model stops re-arming for
+// that session; live sessions stay subscribed.
+type journalWatchClosedMsg struct {
 	SessionID string
-	Stream    *client.Stream
-	Err       error
 }
 
 // branchTickMsg is fired every few seconds so the input-hint row can pick up
@@ -63,3 +60,21 @@ type busEventMsg struct {
 // stops re-arming the wait; future versions can show a "real-time
 // sync paused" hint.
 type busEventClosedMsg struct{}
+
+// peerSyncTickMsg fires every couple of seconds so the model can
+// reconcile its peerManagers map against Federation.Names() —
+// tailnet discovery runs async after boot, so peers join the
+// federation late and need to surface in the header switcher
+// without forcing a TUI restart.
+type peerSyncTickMsg struct{}
+
+// tabsRefreshedMsg carries a fresh GET /tabs response for one
+// peer. Triggered by tab.* bus events and by peerSyncTick when a
+// new peer joins the federation. The handler reconciles the
+// peer's session.Manager: adds sessions for tabs we don't have,
+// closes sessions whose tab disappeared.
+type tabsRefreshedMsg struct {
+	Host string
+	Tabs []client.Tab
+	Err  error
+}

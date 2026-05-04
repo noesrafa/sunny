@@ -22,6 +22,7 @@ type ConversationMeta struct {
 // JournalEvent is one persisted entry from events.jsonl. Kind matches
 // the SSE event name; Payload is the same JSON object that streamed.
 type JournalEvent struct {
+	Seq     int64           `json:"seq"`
 	Kind    string          `json:"kind"`
 	At      string          `json:"at"`
 	Payload json.RawMessage `json:"payload,omitempty"`

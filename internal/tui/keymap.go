@@ -25,6 +25,10 @@ type KeyMap struct {
 	ScrollTop     key.Binding // home — jump to start of transcript
 	ScrollBottom  key.Binding // end — jump to bottom + re-enable follow
 	Paste         key.Binding // ctrl+v — image-aware paste (image first, then text)
+	// Peer1..Peer9: Ctrl+1..9 jumps directly to the Nth federation
+	// peer (peerOrder index N-1). The header switcher labels
+	// each pill with this number so the binding is discoverable.
+	Peer1, Peer2, Peer3, Peer4, Peer5, Peer6, Peer7, Peer8, Peer9 key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -51,5 +55,14 @@ func DefaultKeyMap() KeyMap {
 		ScrollTop:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
 		ScrollBottom:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		Paste:         key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste image/text")),
+		Peer1:         key.NewBinding(key.WithKeys("ctrl+1"), key.WithHelp("ctrl+1", "peer 1")),
+		Peer2:         key.NewBinding(key.WithKeys("ctrl+2"), key.WithHelp("ctrl+2", "peer 2")),
+		Peer3:         key.NewBinding(key.WithKeys("ctrl+3"), key.WithHelp("ctrl+3", "peer 3")),
+		Peer4:         key.NewBinding(key.WithKeys("ctrl+4"), key.WithHelp("ctrl+4", "peer 4")),
+		Peer5:         key.NewBinding(key.WithKeys("ctrl+5"), key.WithHelp("ctrl+5", "peer 5")),
+		Peer6:         key.NewBinding(key.WithKeys("ctrl+6"), key.WithHelp("ctrl+6", "peer 6")),
+		Peer7:         key.NewBinding(key.WithKeys("ctrl+7"), key.WithHelp("ctrl+7", "peer 7")),
+		Peer8:         key.NewBinding(key.WithKeys("ctrl+8"), key.WithHelp("ctrl+8", "peer 8")),
+		Peer9:         key.NewBinding(key.WithKeys("ctrl+9"), key.WithHelp("ctrl+9", "peer 9")),
 	}
 }

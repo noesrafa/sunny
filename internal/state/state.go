@@ -1,16 +1,13 @@
-// Package state persists/restores the TUI's between-runs UI state in a
-// single ~/.sunny/state.json. Holds:
+// Package state persists the TUI's between-runs UI preferences in
+// ~/.sunny/state.json.
 //
-//   - Open chat sessions (title, cwd, model, effort, draft, conv_id
-//     pointing at the server-side conversation that owns the journal)
-//   - Open terminal panes (title, command, cwd)
-//   - Which tab was active (kind + index)
-//   - Selected theme
-//
-// The TUI is the source of truth for *layout* (which sessions are
-// open in tabs, which is active). The daemon is the source of truth
-// for the *content* of those sessions (transcripts persisted under
-// agents/<slug>/conversations/<id>/).
+// Scope (v8): only what's genuinely local to ONE TUI device — theme,
+// drafts (the unsent textarea text per tab), and which tab was
+// active per peer. The "open tabs" themselves moved to the daemon
+// in v0.18 (~/.sunny/tabs.json on each daemon) so multiple TUIs on
+// the same daemon see the same tab set in real time. Schema mismatches
+// or missing files degrade to an Empty() prefs document — no
+// migrations, the daemon owns the canonical state.
 package state
 
 import (
@@ -19,58 +16,30 @@ import (
 	"path/filepath"
 )
 
-const Version = 6 // bumped when Host was added (federated sessions)
+// Version is the on-disk schema version. v8 introduced the
+// daemon-owned tab model; sessions/tabs no longer live here.
+const Version = 8
 
-type SavedSession struct {
-	Title  string `json:"title"`
-	Cwd    string `json:"cwd"`
-	Model  string `json:"model,omitempty"`
-	Effort string `json:"effort,omitempty"`
-	Draft  string `json:"draft,omitempty"`
-	// AgentSlug binds the session to one agent in ~/.sunny/agents/.
-	// Empty (legacy state files) restores as "sunny".
-	AgentSlug string `json:"agent_slug,omitempty"`
-	// Host is the federation peer name this session lives on. Empty
-	// (legacy state files) restores as "local" (the daemon on the same
-	// host as the TUI).
-	Host string `json:"host,omitempty"`
-	// ConvID points at ~/.sunny/agents/<slug>/conversations/<id>/ which
-	// owns the persistent transcript. Empty for sessions that haven't
-	// sent any message yet.
-	ConvID string `json:"conv_id,omitempty"`
-
-	// Items is the JSON-encoded transcript for this session
-	// (session.MarshalItems / UnmarshalItems). Stored as raw bytes so the
-	// state package stays decoupled from the session item types.
-	//
-	// This is a UI-side cache so the chat re-renders immediately on TUI
-	// restart, before any GET /conversations/{id} round-trip. The journal
-	// on disk is canonical; if it disagrees, the journal wins on reload.
-	Items json.RawMessage `json:"items,omitempty"`
-
-	// Cumulative cost + turn counter, persisted so the sidebar stays
-	// meaningful immediately after restore (before any new event arrives).
-	TotalCost float64 `json:"total_cost,omitempty"`
-	Turns     int     `json:"turns,omitempty"`
+// PeerPrefs is everything we remember between runs about ONE
+// federation peer, scoped to this TUI device.
+//
+//   - ActiveTabID: which tab the user had focused last time we
+//     visited this peer. On boot we restore that tab as the
+//     active one within the peer's session list.
+//   - Drafts: tab_id → unsent textarea text. Drafts are device-
+//     local on purpose — what you were typing on your laptop
+//     shouldn't auto-appear on your phone mid-sentence.
+type PeerPrefs struct {
+	ActiveTabID string            `json:"active_tab_id,omitempty"`
+	Drafts      map[string]string `json:"drafts,omitempty"`
 }
 
-type SavedPane struct {
-	Title   string `json:"title"`
-	Command string `json:"command"`
-	Cwd     string `json:"cwd,omitempty"`
-}
-
+// State is the root document. PeerState is keyed by peer name (the
+// same names used by client.Federation).
 type State struct {
-	Version    int            `json:"version"`
-	Sessions   []SavedSession `json:"sessions"`
-	Panes      []SavedPane    `json:"panes,omitempty"`
-	ActiveKind string         `json:"active_kind,omitempty"` // "claude" | "pane"
-	ActiveIdx  int            `json:"active_idx"`            // index within ActiveKind's manager
-
-	// Theme is the persisted theme ID (see internal/tui themes.go for the
-	// catalog). Empty means "use the default" — the TUI's ThemeByID falls
-	// back to Themes[0] for unknown values, so it's safe to leave blank.
-	Theme string `json:"theme,omitempty"`
+	Version   int                   `json:"version"`
+	Theme     string                `json:"theme,omitempty"`
+	PeerState map[string]*PeerPrefs `json:"peer_state,omitempty"`
 }
 
 func path() (string, error) {
@@ -81,8 +50,15 @@ func path() (string, error) {
 	return filepath.Join(home, ".sunny", "state.json"), nil
 }
 
-// Load returns the persisted state, or a zero-value State with no error if
-// the file doesn't exist. Migrates from v1 (sessions-only) silently.
+// Empty returns a zero-value State with the current Version stamped.
+// Use this as the bootstrap value when no file exists or the file
+// is unreadable.
+func Empty() *State {
+	return &State{Version: Version, PeerState: map[string]*PeerPrefs{}}
+}
+
+// Load returns the persisted prefs, or Empty() if the file doesn't
+// exist or has an incompatible version.
 func Load() (*State, error) {
 	p, err := path()
 	if err != nil {
@@ -91,23 +67,22 @@ func Load() (*State, error) {
 	raw, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &State{Version: Version, ActiveKind: "claude"}, nil
+			return Empty(), nil
 		}
 		return nil, err
+	}
+	var probe struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || probe.Version != Version {
+		return Empty(), nil
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, err
+		return Empty(), nil
 	}
-	// Backfill from legacy ~/.sunny/panes.json if v1 state doesn't have
-	// panes yet. After first Save() the legacy file becomes redundant.
-	if len(st.Panes) == 0 {
-		if legacy, lerr := loadLegacyPanes(); lerr == nil && len(legacy) > 0 {
-			st.Panes = legacy
-		}
-	}
-	if st.ActiveKind == "" {
-		st.ActiveKind = "claude"
+	if st.PeerState == nil {
+		st.PeerState = map[string]*PeerPrefs{}
 	}
 	return &st, nil
 }
@@ -139,31 +114,4 @@ func Save(st *State) error {
 func Path() string {
 	p, _ := path()
 	return p
-}
-
-// loadLegacyPanes reads the old standalone ~/.sunny/panes.json so users
-// who had panes from a previous version don't lose them on upgrade.
-func loadLegacyPanes() ([]SavedPane, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(filepath.Join(home, ".sunny", "panes.json"))
-	if err != nil {
-		return nil, err
-	}
-	type legacy struct {
-		Name    string `json:"name"`
-		Command string `json:"command"`
-		Cwd     string `json:"cwd"`
-	}
-	var ls []legacy
-	if err := json.Unmarshal(raw, &ls); err != nil {
-		return nil, err
-	}
-	out := make([]SavedPane, 0, len(ls))
-	for _, l := range ls {
-		out = append(out, SavedPane{Title: l.Name, Command: l.Command, Cwd: l.Cwd})
-	}
-	return out, nil
 }

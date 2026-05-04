@@ -55,7 +55,14 @@ type Meta struct {
 
 // Event is one entry in events.jsonl. Payload is the raw JSON body for
 // the event kind — readers decode based on Kind.
+//
+// Seq is a monotonic counter assigned by the publisher (see internal/conv.Sink)
+// before Append is called. It is the wire identity of an event for resumable
+// watchers: a client that disconnects at seq=42 reconnects with ?since=42 and
+// only receives events with Seq > 42. Append does NOT assign Seq itself — the
+// Store stays a dumb persistence layer; the Sink owns counter logic.
 type Event struct {
+	Seq     int64           `json:"seq"`
 	Kind    string          `json:"kind"`
 	At      time.Time       `json:"at"`
 	Payload json.RawMessage `json:"payload,omitempty"`
@@ -287,6 +294,12 @@ func readEvents(dir string) ([]Event, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1<<16), 1<<24) // SSE payloads can be large
 	var out []Event
+	// pos counts kept (non-skipped) lines so synthesized seqs stay
+	// monotonic and match what the Sink would have assigned. Pre-seq
+	// journals (Seq==0 on every line) end up with file-position seqs
+	// 1, 2, 3, … — same shape as future journals, just without the
+	// seq stored in disk.
+	var pos int64
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -296,6 +309,10 @@ func readEvents(dir string) ([]Event, error) {
 		if err := json.Unmarshal(line, &ev); err != nil {
 			// Skip malformed lines; future-format-tolerance.
 			continue
+		}
+		pos++
+		if ev.Seq == 0 {
+			ev.Seq = pos
 		}
 		out = append(out, ev)
 	}

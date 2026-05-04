@@ -129,7 +129,7 @@ Code, y cualquier cliente de la familia sin conversión.
 copia a `~/.sunny/`. A partir de ahí el usuario es dueño — sunny nunca
 sobrescribe.
 
-## Estado actual (v0.17.0)
+## Estado actual (v0.18.0)
 
 ### Lo que funciona end-to-end
 
@@ -250,11 +250,95 @@ sobrescribe.
 
 ## Roadmap
 
-### Lo que sigue (post-v0.17.0)
+### Fase 6 — Per-peer TUI + multi-viewer real-time (v0.18.0, RELEASED)
 
-El mesh está zero-config end-to-end. Las próximas piezas son las
-que quedaron pendientes desde el plan post-v0.10 antes de pivotar
-al mesh:
+El mesh actual te muestra agentes de varios daemons en un solo
+picker mezclado. Esta fase voltea el modelo mental: **cada peer
+es un universo completo**, y te mueves entre ellos con `Ctrl+1`,
+`Ctrl+2`, etc. El precio del cambio compra una propiedad nueva:
+**todos los viewers de una conversación ven los mismos deltas en
+tiempo real**, sin que importe quién mandó el turno.
+
+Decisiones (cerradas con el usuario antes de empezar):
+- POST de turno es fire-and-forget (202). Todo el streaming pasa
+  por `GET /watch`. Una sola fuente de verdad por conversación.
+- `?since=<seq>` desde v1: los seq son monotónicos por conv y
+  viven en `events.jsonl`, así reabrir TUI a media respuesta no
+  pierde nada.
+- Header con hasta 5 peers visibles, `Ctrl+P` cuando hay más.
+- Sin indicador de "alguien más está viendo" — punto rojo de
+  actividad sí, presence no.
+- Sin migración del `state.json`: rompemos el schema y empezamos
+  limpio (no hay usuarios todavía).
+- TUI siempre arranca en `local`; desde ahí ves los demás peers
+  en el header y te mueves a ellos.
+
+#### Servidor
+
+- [x] **`internal/conv` package nuevo**: `Sink` que journals +
+      publica a un per-conversation hub. Asigna `seq` monotónico.
+      El hub es no-bloqueante (slow subscribers droppean).
+- [x] **`conversation.Event` gana `Seq int64`** — persistido en
+      el JSONL para que `?since=` se pueda evaluar leyendo el
+      journal en disco.
+- [x] **`GET /agents/{slug}/conversations/{id}/watch?since=<seq>`**
+      — SSE que replays el journal desde `since` y luego tail
+      live vía hub. Subscribe ANTES de leer journal para no
+      perder eventos en la ventana race.
+- [x] **`POST /agents/{slug}/conversations/{id}/turns`** (plural,
+      reemplaza el singular) — 202 fire-and-forget. Spawna
+      goroutine que corre `engine.Turn` y le pega los eventos al
+      Sink. Per-conv mutex: dos turns simultáneos en la misma
+      conv → segundo recibe 409.
+- [x] **`DELETE /agents/{slug}/conversations/{id}/turn`** —
+      cancela el turn en vuelo (cancel func registrada por la
+      goroutine activa).
+- [x] **BORRAR `POST /turn` (singular)** y todo su SSE-en-
+      respuesta. La observabilidad pasa por watch.
+- [x] Sink publica también al `events.Hub` global en eventos
+      terminales (done/error) para que sidebars no-watching
+      refresquen meta.
+
+#### Cliente
+
+- [x] **`Client.WatchConversation(ctx, slug, convID, since)`** →
+      channel de eventos del journal (kind + seq + payload).
+- [x] **`Client.SendTurn(ctx, slug, convID, body)`** → 202,
+      retorna turn_id.
+- [x] **`Client.CancelTurn(ctx, slug, convID)`**.
+- [x] Borrar `Client.Turn` (la SSE-en-POST vieja).
+
+#### TUI
+
+- [x] **`Model.peerStates map[string]*PeerState`**: cada peer
+      tiene su propia `session.Manager`, tabs, active idx, draft.
+- [x] **`Model.activePeer string`** (default "local").
+- [x] **`Ctrl+1..9`** cicla peers en orden de descubrimiento.
+      `Ctrl+P` para picker cuando hay >5.
+- [x] **Header bar** con peers tipo `[1 local] 2 vps · 3 pi`,
+      punto de actividad cuando un peer no-activo recibe eventos.
+- [x] **Switch de peer**: persiste draft, cancela watch streams
+      del peer anterior, levanta los del nuevo.
+- [x] **Chat session**: mantiene un watch stream activo;
+      `SendTurn` por POST 202; deltas vía watch.
+- [x] **`state.json` v7**: schema nuevo `{peers: {local:{...},
+      vps:{...}}}`. Read de v6 (o cualquier versión vieja) →
+      descartar y arrancar limpio.
+- [x] Siempre boota en `local` (nada de "recordar último peer").
+
+#### Por qué este refactor vale la pena
+
+- **Multi-viewer real-time**: dos TUIs viendo la misma conv ven
+  los deltas en paralelo (POST en una → watchers en ambas).
+- **Reapertura robusta**: cerrar TUI a media respuesta del modelo
+  no pierde nada — el watch reconecta con `since=<lastSeq>`.
+- **Mental model claro**: "estoy en máquina X" ≡ todo el TUI
+  muestra X (agentes, conversaciones, herramientas corren ahí).
+- **Arquitectura simétrica**: el remitente del POST y los demás
+  watchers consumen la MISMA fuente. Adiós al doble path
+  (SSE-en-POST vs bus global).
+
+### Lo que sigue (post-v0.18.0)
 
 **Tools de write/exec (edit/write/bash) + permission flow**:
 - [ ] `permissions.Service` con `Request(ctx, action) → granted bool`

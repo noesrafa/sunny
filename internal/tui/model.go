@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
@@ -30,7 +31,20 @@ type Model struct {
 	keymap KeyMap
 	logger *log.Logger
 
-	manager      *session.Manager
+	// Per-peer state: each federation peer (local, vps, …) gets its
+	// own session.Manager so tabs are scoped to the machine you're
+	// working on. activePeer + manager point at the currently
+	// visible peer; peerManagers/peerOrder hold them all so
+	// Ctrl+1..9 can switch instantly without rebuilding state.
+	manager      *session.Manager // alias for peerManagers[activePeer]
+	peerManagers map[string]*session.Manager
+	peerOrder    []string
+	activePeer   string
+	// peerActivity[name] = wall time of the last bus/journal event
+	// from a non-active peer. Used to render the activity dot in
+	// the header switcher.
+	peerActivity map[string]time.Time
+
 	client       *client.Client     // local daemon client; CRUD ops still go here
 	fed          *client.Federation // peer roster — chat routing flows through For(host)
 	busEvents    chan client.FederatedEvent
@@ -125,7 +139,11 @@ const (
 	inputTopGap = 4
 )
 
-func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts Options) Model {
+// NewModel builds the TUI model. peerManagers carries one
+// session.Manager per federation peer (always includes "local"); the
+// model boots with activePeer=peerOrder[0] which the caller is
+// expected to set to "local" for predictability.
+func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, peerOrder []string, initialCwd string, opts Options) Model {
 	// Apply the persisted theme before building styles so every Style picks
 	// up the right palette on first render. Empty/unknown IDs fall back to
 	// Auto so fresh installs follow the terminal background out of the box.
@@ -214,27 +232,24 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	}
 
 	if fed != nil {
-		// Attach every existing session to its peer's client. Each
-		// session keeps its own agent binding (set when it was
-		// created or restored from state.json); fall back to the
-		// default only for sessions that don't carry one yet.
-		for _, s := range mgr.Sessions {
-			slug := s.AgentSlug()
-			if slug == "" {
-				slug = defaultAgent
-			}
-			host := s.Host()
-			peerClient := fed.For(host)
+		// Bind every session in every peer's manager to its peer's
+		// client. Each session keeps its own agent binding (set when
+		// created or restored); fall back to the default only for
+		// sessions that don't carry one. Bind starts the per-session
+		// watch goroutine and synchronously hydrates Items from the
+		// daemon's journal when ConvID is set.
+		for peerName, mgr := range peerManagers {
+			peerClient := fed.For(peerName)
 			if peerClient == nil {
-				// Saved session pointed at a peer no longer in the
-				// roster; degrade to local so the session opens
-				// instead of dropping silently. SendBegin will
-				// surface a clear error if the agent doesn't exist
-				// locally.
 				peerClient = fed.Local()
-				host = "local"
 			}
-			s.AttachClient(peerClient, slug, host)
+			for _, s := range mgr.Sessions {
+				slug := s.AgentSlug()
+				if slug == "" {
+					slug = defaultAgent
+				}
+				s.Bind(ctx, peerClient, slug, peerName)
+			}
 		}
 	}
 
@@ -260,12 +275,26 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		close(busCh)
 	}
 
+	// Always boot with local active for predictability — even if the
+	// last session before quit was on a remote peer, the user will
+	// usually want to start on their own machine. peerOrder lets the
+	// header switcher render pills in stable order across restarts.
+	activePeer := "local"
+	if _, ok := peerManagers[activePeer]; !ok && len(peerOrder) > 0 {
+		activePeer = peerOrder[0]
+	}
+	manager := peerManagers[activePeer]
+
 	return Model{
 		ctx:           ctx,
 		styles:        st,
 		keymap:        km,
 		logger:        logger,
-		manager:       mgr,
+		manager:       manager,
+		peerManagers:  peerManagers,
+		peerOrder:     peerOrder,
+		activePeer:    activePeer,
+		peerActivity:  map[string]time.Time{},
 		client:        cli,
 		fed:           fed,
 		busEvents:     busCh,
@@ -281,6 +310,60 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		themeID:       themeID,
 		skipPerms:     opts.DangerousSkipPermissions,
 	}
+}
+
+// switchToPeer makes peerName the active peer. Saves the current
+// peer's draft, swaps the manager pointer, restores the new peer's
+// draft, refreshes the viewport. No-op when peerName isn't known or
+// is already active.
+func (m *Model) switchToPeer(peerName string) {
+	if peerName == m.activePeer {
+		return
+	}
+	mgr, ok := m.peerManagers[peerName]
+	if !ok {
+		return
+	}
+	if cur := m.manager.Current(); cur != nil {
+		cur.Draft = m.textarea.Value()
+	}
+	m.activePeer = peerName
+	m.manager = mgr
+	delete(m.peerActivity, peerName) // clear activity dot on view
+	if cur := m.manager.Current(); cur != nil {
+		m.textarea.SetValue(cur.Draft)
+		m.textarea.CursorEnd()
+	} else {
+		m.textarea.Reset()
+	}
+	m.layout()
+	m.refreshViewport()
+	m.chat.ScrollToBottom()
+}
+
+// switchToPeerByIdx is the Ctrl+1..9 entry point: idx is 0-based
+// against peerOrder. No-op if idx is out of range.
+func (m *Model) switchToPeerByIdx(idx int) {
+	if idx < 0 || idx >= len(m.peerOrder) {
+		return
+	}
+	m.switchToPeer(m.peerOrder[idx])
+}
+
+// allSessions iterates every session across every peer. Used at
+// boot to spawn one waitForJournalEvent per session regardless of
+// which peer is active — non-active peers' sessions still receive
+// events that drive their activity dot.
+func (m *Model) allSessions() []*session.Session {
+	var out []*session.Session
+	for _, name := range m.peerOrder {
+		mgr := m.peerManagers[name]
+		if mgr == nil {
+			continue
+		}
+		out = append(out, mgr.Sessions...)
+	}
+	return out
 }
 
 // waitForBusEvent reads one event off the federated multiplexer
@@ -312,20 +395,18 @@ func (m *Model) clientFor(host string) *client.Client {
 	return m.fed.Local()
 }
 
-// waitForChatEvent reads one event off the SSE stream and surfaces it as
-// a tea.Msg. The Update handler applies it back to the session, then
-// re-arms the next wait via this same helper. On EOF or error the
-// stream emits chatStreamDoneMsg instead.
-func waitForChatEvent(sessionID string, stream *client.Stream) tea.Cmd {
+// waitForJournalEvent reads one event off a session's watch channel
+// and surfaces it as a tea.Msg. Update applies it via
+// ApplyJournalEvent and re-arms with another waitForJournalEvent.
+// When the channel closes (session.Close or ctx cancellation), emits
+// journalWatchClosedMsg and the loop stops for that session.
+func waitForJournalEvent(sessionID string, ch <-chan client.JournalEvent) tea.Cmd {
 	return func() tea.Msg {
-		ev, ok, err := stream.Next()
-		if err != nil {
-			return chatStreamDoneMsg{SessionID: sessionID, Stream: stream, Err: err}
-		}
+		ev, ok := <-ch
 		if !ok {
-			return chatStreamDoneMsg{SessionID: sessionID, Stream: stream}
+			return journalWatchClosedMsg{SessionID: sessionID}
 		}
-		return chatEventMsg{SessionID: sessionID, Stream: stream, Event: ev}
+		return journalEventMsg{SessionID: sessionID, Event: ev}
 	}
 }
 
@@ -341,18 +422,31 @@ func (m Model) Init() tea.Cmd {
 	// to the textarea. bgPollCmd re-asks every 30s so macOS appearance
 	// changes (Ghostty updates bg in lockstep) flip Auto themes within
 	// half a minute without sub-second polling overhead.
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd()}
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd(), peerSyncTickCmd()}
 	if m.busEvents != nil {
 		cmds = append(cmds, m.waitForBusEvent())
 	}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
+	// Each bound session has its own watch goroutine forwarding to
+	// session.WatchEvents(); kick off one waitForJournalEvent per
+	// session across ALL peers so the bubbletea loop drains them
+	// even from peers that aren't currently active (we still want
+	// to surface activity dots for them).
+	for _, s := range m.allSessions() {
+		if ch := s.WatchEvents(); ch != nil {
+			cmds = append(cmds, waitForJournalEvent(s.ID, ch))
+		}
+	}
 	return tea.Batch(cmds...)
 }
 
 func (m Model) anyThinking() bool {
-	for _, s := range m.manager.Sessions {
+	// The spinner is global across peers — if anything anywhere is
+	// thinking, we want the tick alive so the spinner keeps rendering
+	// after a peer switch back.
+	for _, s := range m.allSessions() {
 		if s.State == session.StateThinking {
 			return true
 		}
@@ -439,10 +533,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m = next
 		cmds = append(cmds, cmd)
-	case chatEventMsg:
-		cmds = append(cmds, m.handleChatEvent(msg))
-	case chatStreamDoneMsg:
-		m.handleChatStreamDone(msg)
+	case journalEventMsg:
+		cmds = append(cmds, m.handleJournalEvent(msg))
+	case journalWatchClosedMsg:
+		m.handleJournalWatchClosed(msg)
 	case spinner.TickMsg:
 		next, cmd := m.handleSpinnerTick(msg)
 		m = next
@@ -467,6 +561,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flushState()
 		}
 		cmds = append(cmds, saveTickCmd())
+	case peerSyncTickMsg:
+		cmds = append(cmds, m.handlePeerSync())
 	case tea.BackgroundColorMsg:
 		// Terminal told us its current background. Every paired theme
 		// auto-flips dark↔light when the polarity changes (ResolveTheme

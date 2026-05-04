@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -116,34 +117,45 @@ func openTUI(args []string) error {
 		go discoverTailnetPeers(ctx, fed, *root, lg)
 	}
 
-	mgr := session.NewManager()
-	saved, themeID, activeIdx := loadSavedState(lg)
-	for _, ss := range saved {
-		restored, err := restoreSession(ctx, lg, ss)
-		if err != nil {
-			lg.Warn("restore session failed; skipping", "title", ss.Title, "err", err)
+	prefs := loadPrefs(lg)
+
+	// Build one session.Manager per peer currently in the
+	// federation. Local is always present; tailnet peers join async
+	// (discoverTailnetPeers above + the TUI's peerSyncTickCmd
+	// reconciliation tick).
+	peerManagers := map[string]*session.Manager{}
+	peerOrder := []string{peers.LocalName}
+	peerManagers[peers.LocalName] = session.NewManager()
+	for _, name := range fed.Names() {
+		if _, ok := peerManagers[name]; ok {
 			continue
 		}
-		mgr.Add(restored)
-	}
-	if mgr.Len() == 0 {
-		// First launch (or every restore failed) — bootstrap one fresh
-		// session bound to the default agent.
-		first, err := session.New(ctx, cwd, session.Options{
-			Logger:    lg,
-			Title:     "sunny",
-			AgentSlug: "sunny",
-		})
-		if err != nil {
-			return fmt.Errorf("create session: %w", err)
-		}
-		mgr.Add(first)
-	} else if activeIdx >= 0 && activeIdx < mgr.Len() {
-		mgr.Active = activeIdx
+		peerManagers[name] = session.NewManager()
+		peerOrder = append(peerOrder, name)
 	}
 
-	first := mgr.Sessions[0]
-	model := tui.NewModel(ctx, mgr, cwd, tui.Options{
+	// Hydrate per-peer tabs from each daemon. Sessions track their
+	// owning tab id so close → DELETE /tabs/{id} works. Per-peer
+	// fetches run in parallel with a short budget so a slow remote
+	// doesn't block boot.
+	hydrateTabsParallel(ctx, fed, peerManagers, lg)
+
+	// First launch (no saved tabs anywhere): open one default
+	// "sunny" tab on local so the user lands in a usable chat
+	// instead of an empty welcome screen.
+	if peerManagers[peers.LocalName].Len() == 0 {
+		if err := bootstrapDefaultTab(ctx, fed.Local(), peerManagers[peers.LocalName], cwd, lg); err != nil {
+			return fmt.Errorf("bootstrap default tab: %w", err)
+		}
+	}
+
+	// Restore drafts + active tab idx from per-TUI prefs. These
+	// are local to this device — different machines naturally
+	// have different drafts.
+	applyPrefs(prefs, peerManagers, peerOrder)
+
+	first := peerManagers[peers.LocalName].Sessions[0]
+	model := tui.NewModel(ctx, peerManagers, peerOrder, cwd, tui.Options{
 		Logger:                   lg,
 		DefaultModel:             first.Model,
 		DefaultEffort:            first.Effort,
@@ -151,10 +163,128 @@ func openTUI(args []string) error {
 		DaemonAddr:               *addr,
 		DaemonToken:              tok,
 		DefaultAgent:             "sunny",
-		InitialTheme:             themeID,
+		InitialTheme:             prefs.Theme,
 		Federation:               fed,
 	})
 	return model.Run(ctx)
+}
+
+// hydrateTabsParallel calls GET /tabs on every peer concurrently
+// and turns each tab into a session.Session inside the matching
+// peerManager. Per-peer failures are logged and skipped — a slow or
+// down peer can't block boot.
+func hydrateTabsParallel(ctx context.Context, fed *client.Federation, peerManagers map[string]*session.Manager, lg *charmlog.Logger) {
+	type peerJob struct {
+		name string
+		mgr  *session.Manager
+	}
+	jobs := []peerJob{}
+	for name, mgr := range peerManagers {
+		jobs = append(jobs, peerJob{name: name, mgr: mgr})
+	}
+	tCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j peerJob) {
+			defer wg.Done()
+			c := fed.For(j.name)
+			if c == nil {
+				return
+			}
+			tabs, err := c.ListTabs(tCtx)
+			if err != nil {
+				lg.Warn("list tabs", "peer", j.name, "err", err)
+				return
+			}
+			for _, t := range tabs {
+				s, err := session.New(ctx, fallbackCwd(t.Cwd), session.Options{
+					Logger:    lg,
+					Title:     t.Title,
+					AgentSlug: t.AgentSlug,
+					Host:      j.name,
+					TabID:     t.ID,
+					ConvID:    t.ConvID,
+				})
+				if err != nil {
+					lg.Warn("session from tab", "peer", j.name, "tab", t.ID, "err", err)
+					continue
+				}
+				j.mgr.Add(s)
+			}
+		}(j)
+	}
+	wg.Wait()
+}
+
+// bootstrapDefaultTab opens a "sunny" tab on the local daemon so
+// fresh installs (or first runs after wiping ~/.sunny/tabs.json)
+// land in an actual chat instead of an empty TUI.
+func bootstrapDefaultTab(ctx context.Context, c *client.Client, mgr *session.Manager, cwd string, lg *charmlog.Logger) error {
+	if c == nil {
+		return fmt.Errorf("local client unavailable")
+	}
+	tab, err := c.OpenTab(ctx, client.OpenTabRequest{
+		AgentSlug: "sunny",
+		Cwd:       cwd,
+	})
+	if err != nil {
+		return err
+	}
+	s, err := session.New(ctx, cwd, session.Options{
+		Logger:    lg,
+		Title:     tab.Title,
+		AgentSlug: tab.AgentSlug,
+		Host:      peers.LocalName,
+		TabID:     tab.ID,
+		ConvID:    tab.ConvID,
+	})
+	if err != nil {
+		return err
+	}
+	mgr.Add(s)
+	return nil
+}
+
+// applyPrefs walks the saved per-peer prefs and applies drafts +
+// active tab id to the freshly-hydrated managers. Drafts are keyed
+// by tab id; if a saved draft refers to a tab that no longer exists
+// on the daemon it's silently dropped.
+func applyPrefs(prefs *uistate.State, peerManagers map[string]*session.Manager, peerOrder []string) {
+	if prefs == nil || prefs.PeerState == nil {
+		return
+	}
+	for _, name := range peerOrder {
+		mgr := peerManagers[name]
+		ps := prefs.PeerState[name]
+		if mgr == nil || ps == nil {
+			continue
+		}
+		for _, s := range mgr.Sessions {
+			if d, ok := ps.Drafts[s.TabID]; ok {
+				s.Draft = d
+			}
+		}
+		if ps.ActiveTabID != "" {
+			for i, s := range mgr.Sessions {
+				if s.TabID == ps.ActiveTabID {
+					mgr.Active = i
+					break
+				}
+			}
+		}
+	}
+}
+
+func fallbackCwd(cwd string) string {
+	if cwd != "" {
+		return cwd
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return "/"
 }
 
 // discoverTailnetPeers is the zero-config discovery flow. Walks
@@ -266,45 +396,15 @@ func peerNameFromTailscaleHost(h string) string {
 	return h
 }
 
-// loadSavedState reads ~/.sunny/state.json. Failures degrade to a fresh
-// launch — the TUI bootstraps a new session in that case.
-func loadSavedState(lg *charmlog.Logger) ([]uistate.SavedSession, string, int) {
+// loadPrefs reads ~/.sunny/state.json (v8 — UI-local prefs only,
+// no session/tab content; that lives on the daemon). Failures
+// degrade to an empty prefs object so the TUI still boots cleanly.
+func loadPrefs(lg *charmlog.Logger) *uistate.State {
 	st, err := uistate.Load()
 	if err != nil {
-		lg.Warn("load state failed; starting fresh", "err", err)
-		return nil, "", 0
+		lg.Warn("load prefs failed; starting fresh", "err", err)
+		return uistate.Empty()
 	}
-	return st.Sessions, st.Theme, st.ActiveIdx
+	return st
 }
 
-// restoreSession rebuilds a Session from its saved form. The transcript
-// items are decoded from the cached blob; ConvID + AgentSlug are
-// preserved so the next send hits the same server-side conversation.
-// AgentSlug falls back to "sunny" for legacy state files.
-func restoreSession(ctx context.Context, lg *charmlog.Logger, ss uistate.SavedSession) (*session.Session, error) {
-	items, err := session.UnmarshalItems(ss.Items)
-	if err != nil {
-		return nil, fmt.Errorf("decode items: %w", err)
-	}
-	slug := ss.AgentSlug
-	if slug == "" {
-		slug = "sunny"
-	}
-	host := ss.Host
-	if host == "" {
-		host = peers.LocalName
-	}
-	return session.New(ctx, ss.Cwd, session.Options{
-		Logger:    lg,
-		Title:     ss.Title,
-		Model:     ss.Model,
-		Effort:    ss.Effort,
-		Draft:     ss.Draft,
-		AgentSlug: slug,
-		Host:      host,
-		ConvID:    ss.ConvID,
-		Items:     items,
-		TotalCost: ss.TotalCost,
-		Turns:     ss.Turns,
-	})
-}

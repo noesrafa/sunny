@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -86,11 +87,63 @@ func clampHeight(s string, maxLines int) string {
 }
 
 func (m Model) renderHeader() string {
-	// Header used to show "☀ sunny · <session title>" but the logo is
-	// already in the sidebar and the title is in the session list — so we
-	// leave the header blank to avoid duplication. Keeping the function
-	// (returns "") so the layout math (headerHeight=1) stays consistent.
-	return ""
+	// Single-peer (zero-config local-only) → header stays blank to
+	// avoid clutter. Layout reserves headerHeight=1 either way so
+	// the math doesn't shift.
+	if len(m.peerOrder) <= 1 {
+		return ""
+	}
+	return " " + m.renderPeerSwitcher()
+}
+
+// renderPeerSwitcher renders peer pills like
+//
+//	[1 local]  2 vps  ·  3 pi
+//
+// where the active peer is highlighted in brackets and inactive
+// peers show their Ctrl+N number prefix so the binding is
+// discoverable without help. A recent activity dot appears next to
+// the number when a non-active peer received an event in the last
+// few seconds.
+func (m Model) renderPeerSwitcher() string {
+	const (
+		// activityWindow is how long after an event the dot stays
+		// visible. Short enough that it actually marks "this is
+		// happening NOW" rather than "this happened sometime today".
+		activityWindow = 8 * time.Second
+		maxVisible     = 5
+	)
+	pills := make([]string, 0, len(m.peerOrder))
+	now := time.Now()
+	visible := m.peerOrder
+	if len(visible) > maxVisible {
+		visible = visible[:maxVisible]
+	}
+	for i, name := range visible {
+		num := i + 1
+		isActive := name == m.activePeer
+		dot := ""
+		if !isActive {
+			if t, ok := m.peerActivity[name]; ok && now.Sub(t) < activityWindow {
+				dot = lipgloss.NewStyle().Foreground(colWarning).Bold(true).Render("•") + " "
+			}
+		}
+		if isActive {
+			numStr := lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Render(fmt.Sprintf("%d", num))
+			nameStr := lipgloss.NewStyle().Foreground(colText).Bold(true).Render(name)
+			pills = append(pills, "["+numStr+" "+nameStr+"]")
+		} else {
+			numStr := lipgloss.NewStyle().Foreground(colSecondary).Bold(true).Render(fmt.Sprintf("%d", num))
+			label := m.styles.HeaderDim.Render(name)
+			pills = append(pills, dot+numStr+" "+label)
+		}
+	}
+	more := ""
+	if len(m.peerOrder) > maxVisible {
+		more = m.styles.HeaderDim.Render(fmt.Sprintf(" +%d", len(m.peerOrder)-maxVisible))
+	}
+	sep := m.styles.HeaderSep.Render(" · ")
+	return strings.Join(pills, sep) + more
 }
 
 func (m Model) renderBody() string {

@@ -46,7 +46,7 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 	}
 	peerClient := m.clientFor(host)
 	if peerClient != nil {
-		s.AttachClient(peerClient, slug, host)
+		s.Bind(m.ctx, peerClient, slug, host)
 	}
 	m.manager.Add(s)
 	m.textarea.Reset()

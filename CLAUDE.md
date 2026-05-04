@@ -5,23 +5,37 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.17.0`** (true zero-config mesh: tailscale
-account identity = mesh membership. Install sunny on N tailnet
-machines, open TUI, you see every one — no keys, no codes, no
-config files). Brew `sunny version` should match.
+**Latest release: `v0.18.0`** (per-peer TUI + multi-viewer real-
+time + server-side tabs). Three big shifts on top of v0.17:
+
+1. **Tabs live on the daemon**, not in each TUI. `~/.sunny/tabs.json`
+   is the source of truth; the TUI fetches via `GET /tabs` at boot
+   and reconciles on `tab.opened/closed/updated` bus events. Two
+   TUIs against the same daemon see the same tabs in real time;
+   open a tab in one, it appears in the other.
+2. **Per-conversation pub/sub**: chat is now POST `/turns` (202
+   fire-and-forget) + `GET /watch?since=N` (SSE with seq-based
+   resume). Multiple watchers of the same conv see identical
+   delta streams. Cancellation via `DELETE /turn`.
+3. **Per-peer TUI**: `Ctrl+1..9` jump between federation peers
+   (each peer is its own universe of tabs/agents). Header switcher
+   shows pills with activity dots. Always boots in `local`.
 
 Everything that works today is enumerated in PLAN.md → "Estado
 actual". The short version: chat works end-to-end across four
 backends; the TUI auto-discovers every sunny daemon in your
-tailscale account; remote agents appear as `host/slug` and
-refresh in real time via `GET /events`. Optional `mesh.key`
-override exists for sub-meshes within shared tailnets. Manual
-`sunny pair` flow still works for hosts off the tailnet.
+tailscale account; tabs sync across TUIs sharing a daemon; per-
+conversation watches let any number of viewers see the same chat
+in real time. Optional `mesh.key` override exists for sub-meshes
+within shared tailnets. Manual `sunny pair` flow still works for
+hosts off the tailnet.
 
 **Single most likely next thing to pick up**: write/exec tools
 (`edit`, `write`, `bash`) + their permission flow — the original
 post-v0.10 plan that mesh work pushed back. PLAN.md → "Lo que
-sigue" has the design.
+sigue" has the design. A close second: a "join existing
+conversation" picker (`ctrl+o`?) to attach a new tab to a conv
+that already exists in the journal.
 
 ### How to verify things quickly
 
@@ -79,8 +93,70 @@ README.md with the view tool"; the model will emit a tool_use, the
 engine runs `view`, feeds the result back, model continues. Same
 flow with grep / glob / ls.
 
+### How to verify multi-viewer sync (v0.18)
+
+```bash
+sunny stop && sunny start             # MUST be the v0.18+ daemon
+sunny tabs 2>/dev/null || \
+  TOK=$(sunny token); curl -s -H "Authorization: Bearer $TOK" \
+       localhost:7777/tabs | jq      # daemon-side tab list
+
+# Open two TUIs in two terminals (same daemon, default :7777):
+#   term1$ sunny
+#   term2$ sunny
+# They MUST show the same tabs (same conv per tab). If they don't:
+#   - your daemon is still v0.17 (no /tabs route → curl above 404s)
+#   - or each TUI started its own daemon (different --addr/--root)
+# Sending a message in term1 → the matching tab in term2 should
+# stream the same deltas live. ctrl+w in term1 closes the tab in
+# term2 too (via the tab.closed bus event).
+```
+
 ### Where the bodies are buried
 
+- `internal/tabs/tabs.go` — daemon-side tab store backing
+  `~/.sunny/tabs.json`. Single mutex; opens/closes are human-pace
+  so contention is non-existent. Atomic rename on every mutation.
+- `internal/server/tabs.go` — `GET/POST/DELETE/PATCH /tabs`. POST
+  with no `conv_id` spawns a fresh conv as part of opening the tab
+  so the TUI doesn't have to orchestrate two round-trips. Every
+  mutation publishes `tab.opened/closed/updated` to events.Hub
+  (carrying `tab_id`) for live reconciliation across viewers.
+- `internal/conv/sink.go` — per-conversation pub/sub bus.
+  `Sink.Append` assigns a monotonic seq, journals, and publishes
+  in one call. Hubs are lazy per (slug, convID) and keep the seq
+  counter primed from the on-disk journal so restarts don't shadow
+  existing events.
+- `internal/server/watch.go` — `GET /watch?since=N` SSE handler.
+  Subscribes BEFORE replaying the journal (race-free); filters live
+  events whose seq is already in the journal slice we sent.
+- `internal/server/chat.go` — `postTurns` is now 202 fire-and-
+  forget; `runTurn` runs in a goroutine and writes through the
+  Sink (not the chat handler's response). Per-conv mutex via
+  `activeTurnsRegistry` blocks a second turn with 409 and lets
+  `DELETE /turn` cancel via the registered cancel func.
+- `internal/session/session.go` — `Bind` starts a per-session
+  watch goroutine that auto-reconnects with `since=lastSeq`.
+  `Send` is fire-and-forget POST + optimistic local UserItem;
+  `echoSkipSeq` dedupes the watch echo of our own user message.
+  Transcript items are NOT persisted in state.json any more —
+  Bind synchronously fetches the journal via GET /conversations/
+  {id} when ConvID is set.
+- `internal/state/state.go` — v8 schema, ULTRA slim:
+  `{theme, peer_state: {peerName: {active_tab_id, drafts}}}`.
+  Drafts are tab_id → unsent text (per-device on purpose). The
+  daemon owns "what tabs exist".
+- `internal/tui/model.go` — `Model.peerManagers` is the per-peer
+  state map. `m.manager` always points at the active peer's
+  manager. `switchToPeer` saves draft, swaps pointer, restores
+  the new peer's draft. `Ctrl+1..9` → `switchToPeerByIdx(N-1)`.
+  `peerSyncTick` (every 2s) reconciles the federation roster +
+  refetches tabs for newly-joined peers.
+- `internal/tui/model_appmsg.go` — `applyTabsRefresh` is the
+  reconciliation core: any `tab.*` bus event triggers a `GET /tabs`
+  on that peer; new tabs become bound sessions, dropped tabs are
+  closed locally. Self-echoes are no-ops because the tab ID is
+  already in the manager.
 - `internal/engine/engine.go` — `runTurnLoop` is the round-trip
   driver. ToolUse events get added to `pendingCalls` ONLY when
   `advertised` is non-empty; for claude-code/opencode the events

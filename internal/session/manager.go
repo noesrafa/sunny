@@ -39,7 +39,7 @@ func (m *Manager) ByID(id string) *Session {
 func (m *Manager) Close(id string) {
 	for i, s := range m.Sessions {
 		if s.ID == id {
-			_ = s // session no longer owns subprocess; nothing to close
+			s.Close() // cancels the per-session watch goroutine
 			m.Sessions = append(m.Sessions[:i], m.Sessions[i+1:]...)
 			if len(m.Sessions) == 0 {
 				m.Active = 0
@@ -55,7 +55,7 @@ func (m *Manager) Close(id string) {
 
 func (m *Manager) CloseAll() {
 	for _, s := range m.Sessions {
-		_ = s // session no longer owns subprocess; nothing to close
+		s.Close()
 	}
 	m.Sessions = nil
 	m.Active = 0

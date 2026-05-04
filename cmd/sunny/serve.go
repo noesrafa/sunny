@@ -17,6 +17,7 @@ import (
 
 	"github.com/noesrafa/sunny/internal/auth"
 	"github.com/noesrafa/sunny/internal/bootstrap"
+	"github.com/noesrafa/sunny/internal/conv"
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/events"
@@ -30,6 +31,7 @@ import (
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
+	"github.com/noesrafa/sunny/internal/tabs"
 	"github.com/noesrafa/sunny/internal/tools"
 	"github.com/noesrafa/sunny/internal/tsnet"
 )
@@ -81,6 +83,11 @@ func serve(args []string) error {
 	var enginePtr atomic.Pointer[engine.Engine]
 	enginePtr.Store(buildEngine(log, secretsStore))
 	convs := conversation.NewStore(*root)
+	sink := conv.NewSink(convs, log)
+	tabsStore, err := tabs.Load(*root)
+	if err != nil {
+		return fmt.Errorf("load tabs.json: %w", err)
+	}
 
 	rebuild := func() {
 		log.Info("rebuilding engine after secrets change")
@@ -111,6 +118,8 @@ func serve(args []string) error {
 		Handler: server.New(server.Options{
 			Store:            st,
 			Conversations:    convs,
+			Sink:             sink,
+			Tabs:             tabsStore,
 			Secrets:          secretsStore,
 			Engine:           &enginePtr,
 			Log:              log,

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/noesrafa/sunny/internal/conv"
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	"github.com/noesrafa/sunny/internal/events"
@@ -20,6 +21,7 @@ import (
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/store"
+	"github.com/noesrafa/sunny/internal/tabs"
 )
 
 // Options bundles everything New needs. Grouping these keeps the
@@ -31,9 +33,19 @@ import (
 type Options struct {
 	Store         *store.Store
 	Conversations *conversation.Store
-	Secrets       *secrets.Store
-	Engine        *atomic.Pointer[engine.Engine]
-	Log           *slog.Logger
+	// Sink is the per-conversation pub/sub bus. Required for chat:
+	// the watch endpoint subscribes here, and the chat handler
+	// publishes turn events through it. Constructed by the daemon
+	// over the same underlying conversation.Store.
+	Sink *conv.Sink
+	// Tabs holds the daemon-side list of "open chat tabs". Multi-
+	// viewer sync (the same conversation visible in multiple TUIs
+	// at once) is built on top of this — every TUI fetches the same
+	// list and listens for tab.* bus events.
+	Tabs    *tabs.Store
+	Secrets *secrets.Store
+	Engine  *atomic.Pointer[engine.Engine]
+	Log     *slog.Logger
 	// Token is the bearer credential clients must send. Empty disables
 	// auth (test/dev only).
 	Token string
@@ -80,6 +92,8 @@ func New(opts Options) http.Handler {
 	srv := &server{
 		store:         opts.Store,
 		conv:          opts.Conversations,
+		sink:          opts.Sink,
+		tabs:          opts.Tabs,
 		secrets:       opts.Secrets,
 		engine:        opts.Engine,
 		log:           opts.Log,
@@ -89,6 +103,7 @@ func New(opts Options) http.Handler {
 		meshKey:       opts.MeshKey,
 		version:       opts.Version,
 		instanceID:    opts.InstanceID,
+		activeTurns:   newActiveTurnsRegistry(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -103,7 +118,9 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /agents/{slug}/conversations", srv.createConversation)
 	mux.HandleFunc("GET /agents/{slug}/conversations/{id}", srv.getConversation)
 	mux.HandleFunc("DELETE /agents/{slug}/conversations/{id}", srv.deleteConversation)
-	mux.HandleFunc("POST /agents/{slug}/conversations/{id}/turn", srv.postTurn)
+	mux.HandleFunc("POST /agents/{slug}/conversations/{id}/turns", srv.postTurns)
+	mux.HandleFunc("DELETE /agents/{slug}/conversations/{id}/turn", srv.deleteTurn)
+	mux.HandleFunc("GET /agents/{slug}/conversations/{id}/watch", srv.watchConversation)
 	mux.HandleFunc("GET /secrets", srv.listSecrets)
 	mux.HandleFunc("PUT /secrets/{provider}", srv.putSecrets)
 	mux.HandleFunc("DELETE /secrets/{provider}", srv.deleteSecrets)
@@ -111,6 +128,10 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /pairing/claim", srv.claimPairing)
 	mux.HandleFunc("GET /events", srv.streamEvents)
 	mux.HandleFunc("GET /sunny/identity", srv.streamIdentity)
+	mux.HandleFunc("GET /tabs", srv.listTabs)
+	mux.HandleFunc("POST /tabs", srv.openTab)
+	mux.HandleFunc("DELETE /tabs/{id}", srv.closeTab)
+	mux.HandleFunc("PATCH /tabs/{id}", srv.patchTab)
 
 	// Compose middleware:
 	//   logging → tailnetIdentity → meshAuth → requireBearer → mux
@@ -166,6 +187,8 @@ func requireBearer(token string, h http.Handler) http.Handler {
 type server struct {
 	store         *store.Store
 	conv          *conversation.Store
+	sink          *conv.Sink
+	tabs          *tabs.Store
 	secrets       *secrets.Store
 	engine        *atomic.Pointer[engine.Engine]
 	log           *slog.Logger
@@ -175,6 +198,10 @@ type server struct {
 	meshKey       mesh.Key
 	version       string
 	instanceID    string
+	// activeTurns enforces "at most one in-flight turn per conv" so
+	// POST /turns can return 409 on contention and DELETE /turn can
+	// look up the cancel func by conv key.
+	activeTurns *activeTurnsRegistry
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

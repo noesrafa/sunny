@@ -4,50 +4,119 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/noesrafa/sunny/internal/conversation"
 	"github.com/noesrafa/sunny/internal/engine"
 	evts "github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/provider"
+	"github.com/noesrafa/sunny/internal/store"
 )
 
-// turnRequest is the body of POST /agents/{slug}/conversations/{id}/turn.
+// turnRequest is the body of POST /agents/{slug}/conversations/{id}/turns.
 //
 // The client sends the full transcript on every turn — stateless on the
 // server side. Skills, knowledge, and the system prompt come from the
 // agent's on-disk definition. ProviderState (claude-code session id for
-// --resume) is now tracked in the conversation's meta.json, not here.
+// --resume) is tracked in the conversation's meta.json.
 type turnRequest struct {
 	Messages []provider.Message `json:"messages"`
 	Cwd      string             `json:"cwd,omitempty"`
 }
 
-// postTurn streams one assistant turn back as Server-Sent Events while
-// also journaling every event to the conversation's events.jsonl. On
-// terminal events (done / error) the conversation's meta.json is
-// updated with msg_count, total_cost, and the new provider_state.
+// activeTurnsRegistry tracks the in-flight turn (at most one) per
+// conversation. POST /turns refuses with 409 when a turn is already
+// running on the same conv; DELETE /turn looks up the cancel func
+// here and triggers it.
 //
-// Event shapes (SSE):
+// Per-conversation serialization (rather than a global mutex) lets
+// independent conversations make progress in parallel — the model is
+// "one model worker per chat", which matches user expectations.
+type activeTurnsRegistry struct {
+	mu      sync.Mutex
+	current map[string]*activeTurn // key = slug + "/" + convID
+}
+
+type activeTurn struct {
+	cancel context.CancelFunc
+}
+
+func newActiveTurnsRegistry() *activeTurnsRegistry {
+	return &activeTurnsRegistry{current: map[string]*activeTurn{}}
+}
+
+// claim tries to register a new turn for (slug, convID). Returns the
+// long-lived turn context, a release func, and ok=true on success.
+// On contention returns ok=false — caller should respond 409.
 //
-//	event: text_delta       data: {"text": "..."}
-//	event: thinking_delta   data: {"text": "..."}
-//	event: tool_use         data: {"id":"...","name":"...","input":"..."}
-//	event: tool_result      data: {"tool_use_id":"...","content":"...","is_error":bool}
-//	event: done             data: {"stop_reason":"...","cost_usd":..., "usage":{...}}
-//	event: error            data: {"message":"..."}
+// The release func MUST be called in a defer at the end of the turn:
+// it removes the entry from the registry AND cancels the context so
+// any goroutines hung on it unwind cleanly.
+func (r *activeTurnsRegistry) claim(slug, convID string) (context.Context, func(), bool) {
+	key := slug + "/" + convID
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, busy := r.current[key]; busy {
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	at := &activeTurn{cancel: cancel}
+	r.current[key] = at
+	release := func() {
+		r.mu.Lock()
+		// Identity check guards against the race where a brand-new
+		// turn replaced this entry between our defer firing and the
+		// lock — we must only delete OUR own entry.
+		if cur, ok := r.current[key]; ok && cur == at {
+			delete(r.current, key)
+		}
+		r.mu.Unlock()
+		cancel()
+	}
+	return ctx, release, true
+}
+
+// cancel triggers the registered cancel func for (slug, convID), if
+// one is registered. Returns true when a turn was found and cancelled.
+func (r *activeTurnsRegistry) cancel(slug, convID string) bool {
+	key := slug + "/" + convID
+	r.mu.Lock()
+	at, ok := r.current[key]
+	r.mu.Unlock()
+	if !ok {
+		return false
+	}
+	at.cancel()
+	return true
+}
+
+// postTurns enqueues a new turn for processing and returns 202
+// immediately. Streaming of deltas/results happens entirely through
+// the per-conversation watch endpoint (GET /watch); this handler
+// never writes SSE.
 //
-// The connection closes immediately after `done` or `error`. If the
-// client drops mid-stream, a synthetic `cancelled` event is appended to
-// the journal (not sent over SSE — the connection is already gone).
-func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
+// Path: POST /agents/{slug}/conversations/{id}/turns
+//
+// Body: {"messages": [...], "cwd": "..."}
+//
+// Responses:
+//   - 202 {"conv_id": "..."} — turn accepted, watch the conv for events
+//   - 400                    — malformed body
+//   - 404                    — agent or conversation missing
+//   - 409                    — another turn is already running on this conv
+//   - 503                    — no provider configured
+func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 	var eng *engine.Engine
 	if s.engine != nil {
 		eng = s.engine.Load()
 	}
 	if eng == nil || !eng.HasProviders() {
 		http.Error(w, "engine not configured — add a provider key via /secrets or restart with one in env", http.StatusServiceUnavailable)
+		return
+	}
+	if s.sink == nil {
+		http.Error(w, "sink not configured", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -83,56 +152,95 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
+	// Reserve the per-conv slot. Two clients hitting POST against the
+	// same conv in close succession see the second one fail with 409
+	// — the TUI shouldn't allow this, but the daemon enforces.
+	turnCtx, release, ok := s.activeTurns.claim(slug, convID)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		http.Error(w, "another turn is already running on this conversation", http.StatusConflict)
 		return
 	}
 
-	// Journal the user turn before we start streaming. If the daemon
-	// crashes mid-turn, the user's input still survives.
-	s.journal(slug, convID, "user", map[string]string{"text": last.Content})
+	// Journal the user turn synchronously so a watcher that joins
+	// before the engine spits its first delta still sees the prompt.
+	userEv, err := s.sink.Append(slug, convID, "user", map[string]string{"text": last.Content})
+	if err != nil {
+		release()
+		http.Error(w, "journal user turn: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
+	go s.runTurn(turnCtx, release, a, eng, req, meta)
 
-	events, err := eng.Turn(r.Context(), a, req.Messages, engine.TurnOptions{
+	// Returning the user_seq lets the sender's TUI dedup the
+	// self-echo when the same event lands via its watch stream
+	// (the sender already rendered the message optimistically).
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"conv_id":  convID,
+		"user_seq": userEv.Seq,
+	})
+}
+
+// deleteTurn cancels the in-flight turn on a conversation, if any.
+// Idempotent: 204 either way (the caller doesn't need to know
+// whether there was something to cancel).
+//
+// Path: DELETE /agents/{slug}/conversations/{id}/turn
+func (s *server) deleteTurn(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	convID := r.PathValue("id")
+	if _, ok := s.store.Agent(slug); !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.activeTurns.cancel(slug, convID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// runTurn drives engine.Turn to completion, mirroring every event
+// into the Sink. Errors become `error` events; cancellations (via
+// DELETE /turn) become `cancelled`. Always calls release at the end
+// so the next POST against this conv can claim the slot.
+func (s *server) runTurn(
+	ctx context.Context,
+	release func(),
+	agent *store.Agent,
+	eng *engine.Engine,
+	req turnRequest,
+	meta *conversation.Meta,
+) {
+	defer release()
+
+	slug := agent.Slug
+	convID := meta.ID
+
+	events, err := eng.Turn(ctx, agent, req.Messages, engine.TurnOptions{
 		ProviderState: meta.ProviderState,
 		Cwd:           req.Cwd,
 	})
 	if err != nil {
-		s.journal(slug, convID, "error", map[string]string{"message": err.Error()})
-		writeSSEError(w, flusher, err)
+		s.sink.Append(slug, convID, "error", map[string]string{"message": err.Error()})
 		return
 	}
 
-	terminated := false
 	for ev := range events {
 		switch v := ev.(type) {
 		case provider.TextDelta:
-			payload := map[string]string{"text": v.Text}
-			writeSSE(w, flusher, "text_delta", payload)
-			s.journal(slug, convID, "text_delta", payload)
+			s.sink.Append(slug, convID, "text_delta", map[string]string{"text": v.Text})
 		case provider.ThinkingDelta:
-			payload := map[string]string{"text": v.Text}
-			writeSSE(w, flusher, "thinking_delta", payload)
-			s.journal(slug, convID, "thinking_delta", payload)
+			s.sink.Append(slug, convID, "thinking_delta", map[string]string{"text": v.Text})
 		case provider.ToolUse:
-			payload := map[string]string{"id": v.ID, "name": v.Name, "input": v.Input}
-			writeSSE(w, flusher, "tool_use", payload)
-			s.journal(slug, convID, "tool_use", payload)
+			s.sink.Append(slug, convID, "tool_use", map[string]string{
+				"id":    v.ID,
+				"name":  v.Name,
+				"input": v.Input,
+			})
 		case provider.ToolResult:
-			payload := map[string]any{
+			s.sink.Append(slug, convID, "tool_result", map[string]any{
 				"tool_use_id": v.ToolUseID,
 				"content":     v.Content,
 				"is_error":    v.IsError,
-			}
-			writeSSE(w, flusher, "tool_result", payload)
-			s.journal(slug, convID, "tool_result", payload)
+			})
 		case provider.Done:
 			payload := map[string]any{
 				"stop_reason": v.StopReason,
@@ -144,47 +252,20 @@ func (s *server) postTurn(w http.ResponseWriter, r *http.Request) {
 					"cache_read_tokens":     v.CacheReadTokens,
 				},
 			}
-			writeSSE(w, flusher, "done", payload)
-			s.journal(slug, convID, "done", payload)
+			s.sink.Append(slug, convID, "done", payload)
 			s.finalizeTurn(slug, convID, v)
-			// Notify federated subscribers that this conversation
-			// just got a new turn — drives "refresh transcript"
-			// behaviour on remote clients watching the same conv.
 			s.publish(evts.ConvTurnAppended, slug, convID)
-			terminated = true
 		case provider.Error:
-			// Distinguish "user cancelled" from "real error". Provider
-			// drivers surface ctx cancellation as Error{Err: ctx.Err()};
-			// we re-classify those so the journal reflects intent and
-			// the UI can render them differently.
-			if errors.Is(v.Err, context.Canceled) || r.Context().Err() != nil {
-				s.journal(slug, convID, "cancelled", map[string]string{"reason": "client disconnected"})
+			// Distinguish "user cancelled" from "real error". The
+			// provider drivers surface ctx cancellation as
+			// Error{Err: ctx.Err()}; reclassify so the journal
+			// reflects intent and the UI can render differently.
+			if errors.Is(v.Err, context.Canceled) || ctx.Err() != nil {
+				s.sink.Append(slug, convID, "cancelled", map[string]string{"reason": "client cancelled"})
 			} else {
-				s.journal(slug, convID, "error", map[string]string{"message": v.Err.Error()})
-				writeSSEError(w, flusher, v.Err)
+				s.sink.Append(slug, convID, "error", map[string]string{"message": v.Err.Error()})
 			}
-			terminated = true
 		}
-	}
-
-	// Stream ended without any terminal event — the engine closed the
-	// channel without a Done/Error. Treat as cancelled.
-	if !terminated {
-		s.journal(slug, convID, "cancelled", map[string]string{"reason": "stream closed"})
-	}
-}
-
-// journal appends one event to the conversation's events.jsonl. Logged
-// (not propagated) on failure — losing a journal entry shouldn't take
-// down a turn that's already streaming to the client.
-func (s *server) journal(slug, convID, kind string, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		s.log.Warn("journal marshal", "err", err, "kind", kind)
-		return
-	}
-	if err := s.conv.Append(slug, convID, conversation.Event{Kind: kind, Payload: data}); err != nil {
-		s.log.Warn("journal append", "err", err, "slug", slug, "conv", convID, "kind", kind)
 	}
 }
 
@@ -201,17 +282,4 @@ func (s *server) finalizeTurn(slug, convID string, done provider.Done) {
 	if err != nil {
 		s.log.Warn("update meta", "err", err, "slug", slug, "conv", convID)
 	}
-}
-
-func writeSSE(w http.ResponseWriter, f http.Flusher, event string, data any) {
-	payload, err := json.Marshal(data)
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload)
-	f.Flush()
-}
-
-func writeSSEError(w http.ResponseWriter, f http.Flusher, err error) {
-	writeSSE(w, f, "error", map[string]string{"message": err.Error()})
 }

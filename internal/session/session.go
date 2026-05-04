@@ -1,14 +1,20 @@
 // Package session models a single conversation in the TUI: cwd, model
-// preference, transcript items, draft state, and pending image attachments.
+// preference, transcript items, draft state, and pending image
+// attachments. It also owns the network plumbing for one chat:
 //
-// The session does NOT talk to providers. It used to wrap a `claude` CLI
-// subprocess; that wrapper has been removed in v0.2. The TUI is now a pure
-// renderer — Send/Cancel here are placeholders that return ErrNoEngine
-// until v0.3 wires them to the daemon's HTTP chat endpoint.
+//   - one always-on watch subscription against
+//     GET /agents/{slug}/conversations/{id}/watch (auto-reconnects)
+//   - POST /turns to send + DELETE /turn to cancel
+//
+// All transcript mutations flow through ApplyJournalEvent, which
+// decodes one journal event from the watch stream and updates Items
+// + State accordingly. Two TUIs watching the same conversation see
+// identical streams of events — the data path is symmetric.
 package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,13 +29,13 @@ import (
 	"github.com/noesrafa/sunny/internal/client"
 )
 
-// ErrNoEngine is returned by SendBegin when the session has no client
+// ErrNoEngine is returned by Send when the session has no client
 // configured (daemon unreachable, addr unset).
 var ErrNoEngine = errors.New("session: no engine connected")
 
-// ErrSessionBusy is returned by SendBegin when a turn is already in
-// flight. Callers should normally check State first instead of relying
-// on it.
+// ErrSessionBusy is returned by Send when a turn is already in
+// flight. Callers should normally check State first instead of
+// relying on it.
 var ErrSessionBusy = errors.New("session busy")
 
 // gitBranch returns the current branch of the given directory, or "" if it's
@@ -112,7 +118,8 @@ func (s State) String() string {
 
 type Session struct {
 	ID        string // local UI id
-	ConvID    string // server-assigned conversation id (~/.sunny/agents/<slug>/conversations/<id>/)
+	TabID     string // daemon-side tab id (~/.sunny/tabs.json) — close via client.CloseTab
+	ConvID    string // server-assigned conversation id
 	Cwd       string
 	Title     string
 	Model     string
@@ -126,8 +133,8 @@ type Session struct {
 	LastErr   error
 	StartedAt time.Time
 
-	// Draft is the unsent textarea content. Saved on tab switch, restored
-	// when switching back.
+	// Draft is the unsent textarea content. Saved on tab switch,
+	// restored when switching back.
 	Draft string
 
 	// Attachments are images pasted into the current draft but not yet sent.
@@ -138,29 +145,72 @@ type Session struct {
 	logger        *log.Logger
 	turnHadOutput bool
 
-	// Engine wiring. The session points at a daemon-bound client; SendBegin
-	// uses it to open an SSE stream. activeStream is non-nil while a turn
-	// is in flight so Cancel can interrupt it. host is the federation peer
-	// name (`local`, `vps`, …) — used by the UI for display and by state
-	// persistence to re-bind the session to the right peer on restart.
-	c            *client.Client
-	agentSlug    string
-	host         string
-	activeStream *client.Stream
-	streamCancel context.CancelFunc
+	// Engine wiring. The session holds a daemon client + agent +
+	// federation peer name. A long-lived watch goroutine forwards
+	// every journal event into watchCh; the TUI reads from there.
+	c           *client.Client
+	agentSlug   string
+	host        string
+	watchCh     chan client.JournalEvent
+	watchCancel context.CancelFunc
+	watchOpened atomic.Bool
+	lastSeq     atomic.Int64 // highest seq forwarded to watchCh; for resume
+	echoSkipSeq atomic.Int64 // user_seq returned by our last POST; watch echo of this seq is dropped
 }
 
-// AttachClient binds the session to a daemon. Call once at construction.
-// `slug` identifies which agent the daemon should run; `host` is the
-// federation peer name (use "local" or peers.LocalName for the local
-// daemon).
-func (s *Session) AttachClient(c *client.Client, slug, host string) {
+// Bind configures the session's client + agent + host AND starts the
+// background watch goroutine. Replaces the older AttachClient. Call
+// once at construction (or after restoring from saved state).
+//
+// When the session was restored with a non-empty ConvID, Bind
+// synchronously fetches the journal once to pre-populate Items and
+// lastSeq — so the transcript renders fully before the watch
+// streams its first event. Failures are logged and the session
+// starts with an empty transcript (the watch will eventually fill
+// it via since=0 replay).
+//
+// ctx scopes the watch loop's lifetime — typically the TUI's root
+// context, so the watch dies cleanly on Ctrl+C / quit.
+func (s *Session) Bind(ctx context.Context, c *client.Client, slug, host string) {
 	s.c = c
 	s.agentSlug = slug
 	if host == "" {
 		host = "local"
 	}
 	s.host = host
+	s.echoSkipSeq.Store(-1)
+
+	if s.ConvID != "" {
+		if err := s.loadHistory(ctx); err != nil && s.logger != nil {
+			s.logger.Warn("loadHistory failed; transcript will fill via watch replay",
+				"err", err, "session", s.ID, "conv", s.ConvID)
+		}
+	}
+
+	s.watchCh = make(chan client.JournalEvent, 256)
+	watchCtx, cancel := context.WithCancel(ctx)
+	s.watchCancel = cancel
+	go s.runWatch(watchCtx)
+}
+
+// loadHistory synchronously fetches the conversation's journal and
+// applies every event to Items + lastSeq. Used by Bind for restored
+// sessions; may also be useful in future "reload from disk" flows.
+func (s *Session) loadHistory(ctx context.Context) error {
+	if s.c == nil || s.ConvID == "" {
+		return nil
+	}
+	_, events, err := s.c.GetConversation(ctx, s.agentSlug, s.ConvID)
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		s.applyKindLocked(ev.Kind, ev.Payload, ev.Seq)
+	}
+	if n := len(events); n > 0 {
+		s.lastSeq.Store(events[n-1].Seq)
+	}
+	return nil
 }
 
 // AgentSlug returns the slug of the agent this session is bound to.
@@ -175,8 +225,13 @@ func (s *Session) Host() string {
 	return s.host
 }
 
-// AddAttachment registers a clipboard image with the session and returns
-// the 1-based marker index the caller should embed in the textarea draft.
+// WatchEvents returns the channel the TUI should drain for live
+// journal events. Always non-nil after Bind. Closed only by Close().
+func (s *Session) WatchEvents() <-chan client.JournalEvent { return s.watchCh }
+
+// AddAttachment registers a clipboard image with the session and
+// returns the 1-based marker index the caller should embed in the
+// textarea draft.
 func (s *Session) AddAttachment(path, mediaType string) int {
 	s.attachmentSeq++
 	s.Attachments = append(s.Attachments, Attachment{
@@ -199,29 +254,26 @@ type Options struct {
 	Model                    string
 	Effort                   string
 	DangerousSkipPermissions bool
-	// AgentSlug binds the session to a specific agent. AttachClient
-	// will be called with this slug. Empty falls back to whatever the
-	// caller passes to AttachClient.
+	// AgentSlug binds the session to a specific agent.
 	AgentSlug string
-	// Host is the federation peer name this session lives on. Empty
-	// defaults to "local" (the daemon on the same machine).
+	// Host is the federation peer name this session lives on.
+	// Empty defaults to "local".
 	Host string
-	// ConvID, when non-empty, restores a session bound to an existing
-	// server-side conversation. SendBegin reuses it instead of creating
-	// a new one. Empty on fresh sessions.
+	// TabID is the daemon-side tab handle (~/.sunny/tabs.json).
+	// Required for everything that opens a tab on the server (i.e.
+	// every session today); empty only for transient throwaways.
+	TabID string
+	// ConvID is the server-assigned conversation id. Always set
+	// alongside TabID — the daemon creates a conv when a tab is
+	// opened, so by the time a Session is constructed both ids
+	// exist.
 	ConvID string
 	Title  string
 	Draft  string
-
-	// State-restore extras. Only consumed when reopening a previously-open
-	// session — fresh sessions leave them zero.
-	Items     []Item
-	TotalCost float64
-	Turns     int
 }
 
-// New constructs a fresh session. The ctx is unused today but reserved for
-// the v0.3 path where New will dial the daemon to register the session.
+// New constructs a fresh session. Bind must be called separately to
+// attach a daemon client + start the watch.
 func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 	if cwd == "" {
 		return nil, fmt.Errorf("session: cwd required")
@@ -239,6 +291,7 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 	}
 	return &Session{
 		ID:        id,
+		TabID:     opts.TabID,
 		Cwd:       cwd,
 		Title:     title,
 		Model:     opts.Model,
@@ -247,9 +300,6 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 		Changes:   gitChangeStats(cwd),
 		ConvID:    opts.ConvID,
 		Draft:     opts.Draft,
-		Items:     opts.Items,
-		TotalCost: opts.TotalCost,
-		Turns:     opts.Turns,
 		State:     StateIdle,
 		agentSlug: opts.AgentSlug,
 		host:      defaultHost(opts.Host),
@@ -264,8 +314,9 @@ func defaultHost(h string) string {
 	return h
 }
 
-// RefreshBranch re-reads the cwd's git branch and dirty state. Returns
-// true if anything changed so the caller can decide to re-render.
+// RefreshBranch re-reads the cwd's git branch and dirty state.
+// Returns true if anything changed so the caller can decide to
+// re-render.
 func (s *Session) RefreshBranch() bool {
 	changed := false
 	if b := gitBranch(s.Cwd); b != s.Branch {
@@ -279,159 +330,250 @@ func (s *Session) RefreshBranch() bool {
 	return changed
 }
 
-// SendBegin starts an assistant turn against the daemon. The user's
-// text is appended to the transcript, state flips to Thinking, and
-// the SSE stream is opened. The returned Stream is non-nil on success
-// — the caller (TUI) is responsible for pumping it via Stream.Next()
-// and applying each event back via ApplyEvent.
+// Send posts a new turn to the daemon. Returns immediately after the
+// 202 — the response is observed via the watch stream. Side effects:
 //
-// Side effects on the session (only on success):
-//   - appends UserItem{Text, Attachments}
+//   - appends a UserItem optimistically (for snappy UI)
 //   - clears pending Attachments
-//   - sets State=Thinking, StartedAt=now, turnHadOutput=false
-//   - records activeStream + streamCancel so Cancel() can interrupt
+//   - sets State=Thinking, StartedAt=now
+//   - records echoSkipSeq so the watch event with the same seq is
+//     dropped instead of duplicating the user message
 //
-// Recovery: if the saved ConvID has been archived/deleted out-of-band
-// the daemon returns 404 (client.ErrConvNotFound). We catch that
-// case, clear ConvID, and retry once with a fresh conversation. The
-// local transcript is preserved in the wire payload so the model
-// still sees the full context — but the journal on disk only has
-// the new turn forward, since the prior conv is gone.
-func (s *Session) SendBegin(ctx context.Context, text string) (*client.Stream, error) {
+// Recovery: if the saved ConvID has been archived/deleted out-of-
+// band the daemon returns 404. We catch that, clear ConvID, and
+// retry once with a fresh conversation.
+func (s *Session) Send(ctx context.Context, text string) error {
 	if s.c == nil {
-		return nil, ErrNoEngine
+		return ErrNoEngine
 	}
 	if s.State == StateThinking {
-		return nil, ErrSessionBusy
+		return ErrSessionBusy
 	}
-
-	stream, cancel, err := s.openTurn(ctx, text, false)
+	res, err := s.send(ctx, text, false)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
+	// Optimistic local append + skip the watch echo of this exact seq.
 	s.Items = append(s.Items, UserItem{Text: text, Attachments: s.Attachments})
 	s.Attachments = nil
+	s.echoSkipSeq.Store(res.UserSeq)
 	s.State = StateThinking
 	s.StartedAt = time.Now()
 	s.turnHadOutput = false
-	s.activeStream = stream
-	s.streamCancel = cancel
-
 	if s.logger != nil {
-		s.logger.Debug("turn started", "session", s.ID, "conv_id", s.ConvID)
+		s.logger.Debug("turn started", "session", s.ID, "conv_id", s.ConvID, "user_seq", res.UserSeq)
 	}
-	return stream, nil
+	return nil
 }
 
-// openTurn ensures a server-side conversation exists, then opens the
-// turn stream. retried=true on the second attempt prevents infinite
-// recursion if the brand-new conversation also 404s (would only
-// happen on truly broken daemon state).
-func (s *Session) openTurn(ctx context.Context, text string, retried bool) (*client.Stream, context.CancelFunc, error) {
-	// Lazily create the server-side conversation on first send.
-	// Subsequent turns reuse the same ConvID. The server tracks
-	// claude-code's ProviderState in meta.json so we don't carry it
-	// on the wire.
+// send builds the wire payload and POSTs it. The tab/conv pair is
+// always set up by the time a session exists (server-side tabs
+// model: opening a tab spawns its conv eagerly) — so we no longer
+// lazy-create here. A 404 surfaces to the caller, who can prompt
+// the user to close the broken tab.
+func (s *Session) send(ctx context.Context, text string, _ bool) (*client.SendTurnResult, error) {
 	if s.ConvID == "" {
-		meta, err := s.c.CreateConversation(ctx, s.agentSlug, s.Title, s.Model)
-		if err != nil {
-			return nil, nil, fmt.Errorf("create conversation: %w", err)
-		}
-		s.ConvID = meta.ID
-		if s.logger != nil {
-			s.logger.Debug("conversation created", "session", s.ID, "conv_id", s.ConvID)
-		}
+		return nil, fmt.Errorf("session: no conv_id (tab not initialised)")
 	}
-
 	wire := buildWireMessages(s.Items, text)
-
-	turnCtx, cancel := context.WithCancel(ctx)
-	stream, err := s.c.Turn(turnCtx, s.agentSlug, s.ConvID, client.TurnRequest{
+	res, err := s.c.SendTurn(ctx, s.agentSlug, s.ConvID, client.TurnRequest{
 		Messages: wire,
 		Cwd:      s.Cwd,
 	})
-	if errors.Is(err, client.ErrConvNotFound) && !retried {
-		// The saved ConvID points at a conversation that no longer
-		// exists. Drop it and start a new one transparently. The
-		// user's intent is "keep talking" — they don't need to know
-		// the journal got reset.
-		cancel()
-		if s.logger != nil {
-			s.logger.Info("conv vanished server-side; creating fresh", "session", s.ID, "old_conv", s.ConvID)
-		}
-		s.ConvID = ""
-		return s.openTurn(ctx, text, true)
-	}
 	if err != nil {
-		cancel()
-		return nil, nil, err
+		return nil, err
 	}
-	return stream, cancel, nil
+	return res, nil
 }
 
-// ApplyEvent mutates Items + State based on one event from the daemon's
-// stream. Returns true when the event ends the turn (Done or Error).
+// Cancel signals the daemon to interrupt the in-flight turn. The
+// watch will deliver a `cancelled` event when the engine winds down,
+// which flips State back to Idle.
+func (s *Session) Cancel(ctx context.Context) error {
+	if s.c == nil || s.ConvID == "" {
+		return nil
+	}
+	return s.c.CancelTurn(ctx, s.agentSlug, s.ConvID)
+}
+
+// Close cancels the watch goroutine and closes the events channel.
+// Safe to call multiple times.
+func (s *Session) Close() {
+	if s.watchCancel != nil {
+		s.watchCancel()
+	}
+}
+
+// runWatch is the per-session reconnect loop. Opens a watch against
+// the daemon, forwards every event to s.watchCh, and reconnects on
+// disconnect. Exits when ctx is cancelled (Close called or TUI
+// shutting down).
+func (s *Session) runWatch(ctx context.Context) {
+	defer close(s.watchCh)
+	const reconnectDelay = 2 * time.Second
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if s.ConvID == "" {
+			return // session never got a conv (caller error); nothing to watch
+		}
+		s.watchOpened.Store(true)
+		ch, err := s.c.WatchConversation(ctx, s.agentSlug, s.ConvID, s.lastSeq.Load())
+		if err != nil {
+			s.watchOpened.Store(false)
+			if !sleepCtx(ctx, reconnectDelay) {
+				return
+			}
+			continue
+		}
+		s.pumpWatch(ctx, ch)
+		s.watchOpened.Store(false)
+		if !sleepCtx(ctx, reconnectDelay) {
+			return
+		}
+	}
+}
+
+// pumpWatch forwards events from one watch connection to s.watchCh
+// until the upstream closes (network drop, daemon shutdown).
+// Updates lastSeq as each event is forwarded so a reconnect can
+// resume cleanly.
+func (s *Session) pumpWatch(ctx context.Context, ch <-chan client.JournalEvent) {
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			select {
+			case s.watchCh <- ev:
+				if ev.Seq > s.lastSeq.Load() {
+					s.lastSeq.Store(ev.Seq)
+				}
+			case <-ctx.Done():
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// ApplyJournalEvent dispatches one watch event into the session's
+// transcript. Returns true when the event ends a turn (done / error
+// / cancelled).
 //
-// Streaming text deltas merge into a single trailing AssistantTextItem
-// so the transcript renders as one coherent message instead of many tiny
-// fragments. Tool round-trips materialize as ToolUseItem entries that
-// flip Done=true once the matching ToolResult arrives.
-func (s *Session) ApplyEvent(ev client.Event) (terminal bool) {
-	switch e := ev.(type) {
-	case client.TextDelta:
-		s.appendText(e.Text)
+// The "user" event path skips when seq matches our own outstanding
+// echoSkipSeq — that's our optimistic local append showing back up
+// via the watch stream. Without this skip, the sender would see two
+// copies of every message they typed.
+func (s *Session) ApplyJournalEvent(ev client.JournalEvent) (terminal bool) {
+	if ev.Kind == "user" && ev.Seq == s.echoSkipSeq.Load() {
+		s.echoSkipSeq.Store(-1)
+		return false
+	}
+	return s.applyKindLocked(ev.Kind, ev.Payload, ev.Seq)
+}
+
+// applyKindLocked is the shared dispatcher used by both
+// ApplyJournalEvent (live tail) and LoadHistory (bulk replay).
+// "Locked" is aspirational — the session is single-threaded from the
+// TUI's perspective; calls from background goroutines would need
+// real locking.
+func (s *Session) applyKindLocked(kind string, payload json.RawMessage, _ int64) (terminal bool) {
+	switch kind {
+	case "user":
+		var p struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		s.Items = append(s.Items, UserItem{Text: p.Text})
+	case "text_delta":
+		var p struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		s.appendText(p.Text)
 		s.turnHadOutput = true
-	case client.ThinkingDelta:
-		s.appendThinking(e.Text)
-	case client.ToolUse:
+	case "thinking_delta":
+		var p struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		s.appendThinking(p.Text)
+	case "tool_use":
+		var p struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Input string `json:"input"`
+		}
+		_ = json.Unmarshal(payload, &p)
 		s.Items = append(s.Items, ToolUseItem{
-			ID:    e.ID,
-			Name:  e.Name,
-			Input: []byte(e.Input),
+			ID:    p.ID,
+			Name:  p.Name,
+			Input: []byte(p.Input),
 		})
 		s.turnHadOutput = true
-	case client.ToolResult:
-		s.linkToolResult(e.ToolUseID, e.Content, e.IsError)
-	case client.Done:
+	case "tool_result":
+		var p struct {
+			ToolUseID string `json:"tool_use_id"`
+			Content   string `json:"content"`
+			IsError   bool   `json:"is_error"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		s.linkToolResult(p.ToolUseID, p.Content, p.IsError)
+	case "done":
+		var p struct {
+			CostUSD float64 `json:"cost_usd"`
+		}
+		_ = json.Unmarshal(payload, &p)
 		if !s.turnHadOutput {
 			s.Items = append(s.Items, EmptyResponseItem{})
 		}
+		dur := 0
+		if !s.StartedAt.IsZero() {
+			dur = int(time.Since(s.StartedAt).Milliseconds())
+		}
 		s.Items = append(s.Items, ResultItem{
-			DurationMs: int(time.Since(s.StartedAt).Milliseconds()),
-			CostUSD:    e.CostUSD,
+			DurationMs: dur,
+			CostUSD:    p.CostUSD,
 			NumTurns:   1,
 		})
-		s.TotalCost += e.CostUSD
+		s.TotalCost += p.CostUSD
 		s.Turns++
 		s.State = StateIdle
-		s.activeStream = nil
-		s.streamCancel = nil
 		return true
-	case client.Error:
-		s.LastErr = errors.New(e.Message)
-		s.Items = append(s.Items, ErrorItem{Message: e.Message})
+	case "error":
+		var p struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(payload, &p)
+		s.LastErr = errors.New(p.Message)
+		s.Items = append(s.Items, ErrorItem{Message: p.Message})
 		s.State = StateError
-		s.activeStream = nil
-		s.streamCancel = nil
+		return true
+	case "cancelled":
+		s.State = StateIdle
 		return true
 	}
 	return false
 }
 
-// Cancel interrupts the in-flight turn. No-op when idle.
-func (s *Session) Cancel() error {
-	if s.streamCancel != nil {
-		s.streamCancel()
-	}
-	if s.activeStream != nil {
-		_ = s.activeStream.Close()
-	}
-	return nil
-}
-
-// appendText merges a streaming delta into the trailing assistant text
-// block. Creates a fresh AssistantTextItem if the last item isn't one.
+// appendText merges a streaming delta into the trailing assistant
+// text block. Creates a fresh AssistantTextItem if the last item
+// isn't one.
 func (s *Session) appendText(delta string) {
 	if delta == "" {
 		return
@@ -460,10 +602,11 @@ func (s *Session) appendThinking(delta string) {
 	s.Items = append(s.Items, ThinkingItem{Text: delta})
 }
 
-// linkToolResult finds the in-flight ToolUseItem with the matching ID
-// and marks it Done with the result content. Falls back to a standalone
-// ToolResultItem if no matching tool_use is in the transcript (which
-// shouldn't normally happen but keeps things resilient).
+// linkToolResult finds the in-flight ToolUseItem with the matching
+// ID and marks it Done with the result content. Falls back to a
+// standalone ToolResultItem if no matching tool_use is in the
+// transcript (which shouldn't normally happen but keeps things
+// resilient).
 func (s *Session) linkToolResult(id, content string, isError bool) {
 	for i := len(s.Items) - 1; i >= 0; i-- {
 		t, ok := s.Items[i].(ToolUseItem)
@@ -481,10 +624,11 @@ func (s *Session) linkToolResult(id, content string, isError bool) {
 	s.Items = append(s.Items, ToolResultItem{Content: content})
 }
 
-// buildWireMessages flattens a session transcript into the user/assistant
-// text turns the daemon expects. Tool round-trips and thinking blocks are
-// dropped — claude-code reconstructs them via --resume; the anthropic
-// provider doesn't need them since it gets the full text turns.
+// buildWireMessages flattens a session transcript into the
+// user/assistant text turns the daemon expects. Tool round-trips and
+// thinking blocks are dropped — claude-code reconstructs them via
+// --resume; the anthropic provider doesn't need them since it gets
+// the full text turns.
 func buildWireMessages(items []Item, newUserText string) []client.Message {
 	var wire []client.Message
 	for _, it := range items {

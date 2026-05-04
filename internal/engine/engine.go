@@ -124,7 +124,7 @@ func (e *Engine) runTurnLoop(
 	if effort == "" {
 		effort = "max"
 	}
-	advertised := e.advertisedTools(agent)
+	advertised := e.advertisedTools(agent, p)
 
 	// Hard cap on iterations: prevents runaway tool loops if a model
 	// gets confused. Crush uses 25; we mirror.
@@ -243,9 +243,23 @@ func (e *Engine) runTurnLoop(
 // advertisedTools returns the tools we send to the provider for this
 // agent. claude-code gets none — it has its own toolset that would
 // collide. Other providers get the full registry.
-func (e *Engine) advertisedTools(agent *store.Agent) []provider.ToolDef {
+//
+// We key the skip on the picked provider's Name() instead of
+// agent.Config.Provider because an agent may leave Provider empty
+// and fall through to the daemon default. If the default ends up
+// being claude-code, advertising sunny's tools would let the engine
+// collect tool_use events for claude-code's native tools (Bash,
+// Read, Edit, Grep) and try to dispatch them through sunny's
+// registry, which fails with "unknown tool" and then breaks the
+// next iteration ("last message must be role=user").
+func (e *Engine) advertisedTools(agent *store.Agent, p provider.Provider) []provider.ToolDef {
 	if e.tools == nil {
 		return nil
+	}
+	if p != nil {
+		if name := p.Name(); name == "claude-code" || name == "opencode" {
+			return nil
+		}
 	}
 	if agent.Config.Provider == "claude-code" || agent.Config.Provider == "opencode" {
 		return nil

@@ -75,6 +75,17 @@ type Options struct {
 	// /sunny/identity. Lets the TUI distinguish "the same daemon
 	// across reboots" from "a new daemon at the same address".
 	InstanceID string
+	// Root is the sunny runtime directory (defaults to ~/.sunny).
+	// Forwarded by the lifecycle handlers when they spawn the
+	// detached `sunny restart/update/stop` helper so the helper
+	// targets this exact daemon (important when running multiple
+	// daemons against different roots).
+	Root string
+	// StartedAt is the wall-clock time the daemon's HTTP handler
+	// was constructed. Surfaced by GET /sunny/version so clients
+	// can detect when a restart has actually happened (the value
+	// changes only on a fresh boot).
+	StartedAt time.Time
 	// AutoTrustTailnet enables the zero-config auto-trust path: any
 	// request from a tailnet IP belonging to the same tailscale
 	// account as this daemon authenticates without any header. On
@@ -103,7 +114,12 @@ func New(opts Options) http.Handler {
 		meshKey:       opts.MeshKey,
 		version:       opts.Version,
 		instanceID:    opts.InstanceID,
+		root:          opts.Root,
+		startedAt:     opts.StartedAt,
 		activeTurns:   newActiveTurnsRegistry(),
+	}
+	if srv.startedAt.IsZero() {
+		srv.startedAt = time.Now()
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -131,6 +147,10 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /pairing/claim", srv.claimPairing)
 	mux.HandleFunc("GET /events", srv.streamEvents)
 	mux.HandleFunc("GET /sunny/identity", srv.streamIdentity)
+	mux.HandleFunc("GET /sunny/version", srv.getSunnyVersion)
+	mux.HandleFunc("POST /sunny/restart", srv.postSunnyRestart)
+	mux.HandleFunc("POST /sunny/update", srv.postSunnyUpdate)
+	mux.HandleFunc("POST /sunny/stop", srv.postSunnyStop)
 	mux.HandleFunc("GET /fs/list", srv.fsList)
 	mux.HandleFunc("GET /tabs", srv.listTabs)
 	mux.HandleFunc("POST /tabs", srv.openTab)
@@ -202,6 +222,8 @@ type server struct {
 	meshKey       mesh.Key
 	version       string
 	instanceID    string
+	root          string
+	startedAt     time.Time
 	// activeTurns enforces "at most one in-flight turn per conv" so
 	// POST /turns can return 409 on contention and DELETE /turn can
 	// look up the cancel func by conv key.

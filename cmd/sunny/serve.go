@@ -130,6 +130,8 @@ func serve(args []string) error {
 			MeshKey:          meshKey,
 			Version:          version,
 			InstanceID:       *root,
+			Root:             *root,
+			StartedAt:        time.Now(),
 			AutoTrustTailnet: true, // zero-config trust between your own tailscale nodes
 		}),
 		ReadHeaderTimeout: 5 * time.Second,

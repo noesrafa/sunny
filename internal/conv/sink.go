@@ -171,6 +171,28 @@ func (s *Sink) hubFor(slug, convID string) *hub {
 	return h
 }
 
+// LiveStats returns one watcher count per per-conversation hub the
+// Sink has ever touched. Hubs are lazy and never reaped, so a key
+// with subs=0 means the conv was watched at least once since boot
+// but has no live viewers right now.
+func (s *Sink) LiveStats() map[string]int {
+	s.mu.Lock()
+	hubs := make([]*hub, 0, len(s.hubs))
+	keys := make([]string, 0, len(s.hubs))
+	for k, h := range s.hubs {
+		keys = append(keys, k)
+		hubs = append(hubs, h)
+	}
+	s.mu.Unlock()
+	out := make(map[string]int, len(hubs))
+	for i, h := range hubs {
+		h.mu.Lock()
+		out[keys[i]] = len(h.subs)
+		h.mu.Unlock()
+	}
+	return out
+}
+
 // publish fan-outs ev to every subscriber non-blockingly. Slow subs
 // drop (and log) — never let one stuck client backpressure the
 // publisher or every other viewer.

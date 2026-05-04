@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/noesrafa/sunny/internal/conversation"
@@ -89,6 +90,25 @@ func (r *activeTurnsRegistry) cancel(slug, convID string) bool {
 	}
 	at.cancel()
 	return true
+}
+
+// TurnRef identifies one in-flight turn.
+type TurnRef struct {
+	Slug   string `json:"slug"`
+	ConvID string `json:"conv_id"`
+}
+
+func (r *activeTurnsRegistry) snapshot() []TurnRef {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]TurnRef, 0, len(r.current))
+	for key := range r.current {
+		parts := strings.SplitN(key, "/", 2)
+		if len(parts) == 2 {
+			out = append(out, TurnRef{Slug: parts[0], ConvID: parts[1]})
+		}
+	}
+	return out
 }
 
 // postTurns enqueues a new turn for processing and returns 202

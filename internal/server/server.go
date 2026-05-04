@@ -117,6 +117,7 @@ func New(opts Options) http.Handler {
 		root:          opts.Root,
 		startedAt:     opts.StartedAt,
 		activeTurns:   newActiveTurnsRegistry(),
+		startedAt:     time.Now().UTC(),
 	}
 	if srv.startedAt.IsZero() {
 		srv.startedAt = time.Now()
@@ -156,6 +157,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /tabs", srv.openTab)
 	mux.HandleFunc("DELETE /tabs/{id}", srv.closeTab)
 	mux.HandleFunc("PATCH /tabs/{id}", srv.patchTab)
+	mux.HandleFunc("GET /stats", srv.stats)
 
 	// Compose middleware:
 	//   logging → tailnetIdentity → meshAuth → requireBearer → mux
@@ -228,6 +230,9 @@ type server struct {
 	// POST /turns can return 409 on contention and DELETE /turn can
 	// look up the cancel func by conv key.
 	activeTurns *activeTurnsRegistry
+	// startedAt is the wall-clock time New() ran; surfaced as
+	// uptime_s on /stats.
+	startedAt time.Time
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

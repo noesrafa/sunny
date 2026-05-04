@@ -121,6 +121,29 @@ func (s *Store) Create(agentSlug, title, model string) (*Meta, error) {
 	return meta, nil
 }
 
+// Count returns the number of conversation directories under an
+// agent without parsing any meta.json. Cheaper than List for /stats.
+func (s *Store) Count(agentSlug string) (int, error) {
+	if !validSlug(agentSlug) {
+		return 0, fmt.Errorf("invalid agent slug %q", agentSlug)
+	}
+	convsDir := filepath.Join(s.agentDir(agentSlug), "conversations")
+	entries, err := os.ReadDir(convsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // List returns metas for every conversation under an agent, newest first.
 // Missing agents → empty slice (not an error).
 func (s *Store) List(agentSlug string) ([]*Meta, error) {

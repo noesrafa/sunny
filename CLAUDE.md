@@ -37,6 +37,40 @@ sigue" has the design. A close second: a "join existing
 conversation" picker (`ctrl+o`?) to attach a new tab to a conv
 that already exists in the journal.
 
+### Daemon stats (since v0.18)
+
+`GET /stats` returns a one-shot snapshot of everything contable in
+the daemon. Useful for dashboards, federation peer cards, and any
+external app that wants "what is this daemon doing right now"
+without computing it client-side. Shape:
+
+```json
+{
+  "daemon":  {"version", "instance_id", "uptime_s", "started_at",
+              "providers_configured", "default_provider"},
+  "counts":  {"agents", "conversations", "tabs",
+              "conversations_per_agent": {<slug>: n}},
+  "live":    {"turns_in_flight": [{"slug","conv_id"}],
+              "bus_subscribers", "watchers": {<slug/conv>: n}},
+  "system":  {"cpu_percent", "num_cpu", "memory_percent",
+              "memory_total_bytes", "memory_used_bytes", "platform"},
+  "process": {"goroutines", "heap_alloc_bytes", "heap_sys_bytes"}
+}
+```
+
+CPU sample takes ~1s wall (two `top -l 2` snapshots; same path
+the TUI sidebar uses via `internal/sysstats`). System block is
+zero on non-darwin — the `Platform` and `NumCPU` fields still
+populate. The `live` block reads in-memory registries that
+already exist (`activeTurnsRegistry`, `Sink.LiveStats()`,
+`Hub.SubCount()`); cost is microseconds.
+
+Client helper at `internal/client/stats.go`:
+```go
+c := client.New(addr, token)
+s, _ := c.FetchStats(ctx)
+```
+
 ### How to verify things quickly
 
 ```bash
@@ -191,10 +225,22 @@ sunny tabs 2>/dev/null || \
   warn and the primary bind keeps running.
 - `internal/events/` — in-process pub/sub bus. Hub.Publish is non-
   blocking per subscriber (slow ones drop with a log line, never
-  backpressure). Wired into agent CRUD + conversation CRUD + chat
-  Done so every mutation surfaces a one-line event.
+  backpressure). Wired into agent CRUD + conversation CRUD +
+  secrets PUT/DELETE + tabs CRUD so every mutation surfaces a
+  one-line event. Event types: `agent.{created,updated,deleted}`,
+  `conversation.{created,deleted,turn}`, `tab.{opened,closed,updated}`,
+  `secrets.changed`.
 - `internal/server/events.go` — SSE handler at `GET /events` with
   30s heartbeat. Auth required.
+- `internal/server/stats.go` — `GET /stats` snapshot of daemon
+  counts + in-flight turns + watcher counts + host CPU/RAM.
+  Reads `activeTurnsRegistry.snapshot()`, `Sink.LiveStats()`,
+  `Hub.SubCount()`, `conversation.Store.Count(slug)`,
+  `sysstats.Sample()`. No caching — each call recomputes; CPU
+  sample dominates at ~1s wall.
+- `internal/sysstats/` — macOS-only host CPU + RAM via `top`,
+  `vm_stat`, `sysctl hw.memsize`. Returns zeros (with `NumCPU`
+  populated) on other platforms so callers don't special-case.
 - `internal/client/events.go` + `federation.go` — `Client.Subscribe
   Events(ctx)` parses one SSE stream into BusEvents; `Federation.
   SubscribeAll(ctx)` multiplexes across every peer with auto-

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/noesrafa/sunny/internal/provider"
@@ -54,6 +55,22 @@ func New(providers map[string]provider.Provider, defaultName string, toolReg *to
 		tools:       toolReg,
 	}
 }
+
+// ProviderNames returns the registered provider names, sorted
+// alphabetically. Used by /stats.
+func (e *Engine) ProviderNames() []string {
+	out := make([]string, 0, len(e.providers))
+	for name := range e.providers {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DefaultProvider returns the name of the provider used when an
+// agent has no `provider:` field. Empty when no providers are
+// registered.
+func (e *Engine) DefaultProvider() string { return e.defaultName }
 
 // TurnOptions are per-call knobs that travel with the turn but
 // aren't on the agent definition.

@@ -28,8 +28,11 @@ import (
 )
 
 type Stats struct {
-	CPUPct float64 // 0-100, whole-machine (user + sys)
-	MemPct float64 // 0-100, (active + wired + compressed) / total
+	CPUPct        float64 // 0-100, whole-machine (user + sys)
+	MemPct        float64 // 0-100, (active + wired + compressed) / total
+	MemTotalBytes uint64  // hw.memsize — physical RAM
+	MemUsedBytes  uint64  // (active + wired + compressed) × pageSize
+	NumCPU        int     // logical core count (runtime.NumCPU)
 }
 
 var (
@@ -43,10 +46,10 @@ var (
 // error on unsupported platforms — callers can render an empty widget
 // without special-casing.
 func Sample() (Stats, error) {
+	st := Stats{NumCPU: runtime.NumCPU()}
 	if runtime.GOOS != "darwin" {
-		return Stats{}, nil
+		return st, nil
 	}
-	var st Stats
 
 	if out, err := exec.Command("top", "-l", "2", "-n", "0", "-s", "1").Output(); err == nil {
 		st.CPUPct = parseCPU(string(out))
@@ -54,7 +57,14 @@ func Sample() (Stats, error) {
 
 	if out, err := exec.Command("vm_stat").Output(); err == nil {
 		if total := totalMemBytes(); total > 0 {
-			st.MemPct = parseMemPct(string(out), total)
+			st.MemTotalBytes = total
+			st.MemUsedBytes = parseMemUsed(string(out))
+			if total > 0 {
+				st.MemPct = float64(st.MemUsedBytes) / float64(total) * 100
+				if st.MemPct > 100 {
+					st.MemPct = 100
+				}
+			}
 		}
 	}
 
@@ -81,12 +91,12 @@ func parseCPU(s string) float64 {
 	return pct
 }
 
-// parseMemPct scans `vm_stat` output for the per-page counters and computes
+// parseMemUsed scans `vm_stat` output for the per-page counters and returns
 // Used = (active + wired down + occupied by compressor) × pageSize. That
 // matches Activity Monitor's "Memory Used" definition (App Memory + Wired
 // + Compressed). Cached files / inactive / speculative pages are
 // reclaimable on demand and so are EXCLUDED, same as Activity Monitor.
-func parseMemPct(s string, totalBytes uint64) float64 {
+func parseMemUsed(s string) uint64 {
 	pageSize := uint64(4096)
 	if m := pageSzRE.FindStringSubmatch(s); len(m) == 2 {
 		if ps, err := strconv.ParseUint(m[1], 10, 64); err == nil && ps > 0 {
@@ -99,18 +109,7 @@ func parseMemPct(s string, totalBytes uint64) float64 {
 		v, _ := strconv.ParseUint(m[2], 10, 64)
 		pages[key] = v
 	}
-	used := pages["active"] + pages["wired down"] + pages["occupied by compressor"]
-	if used == 0 || totalBytes == 0 {
-		return 0
-	}
-	pct := float64(used*pageSize) / float64(totalBytes) * 100
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	return pct
+	return (pages["active"] + pages["wired down"] + pages["occupied by compressor"]) * pageSize
 }
 
 // totalMemBytes returns hw.memsize, cached after the first successful read

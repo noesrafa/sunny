@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	evts "github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/secrets"
 )
 
@@ -42,6 +43,7 @@ func (s *server) putSecrets(w http.ResponseWriter, r *http.Request) {
 	if s.rebuildEngine != nil {
 		s.rebuildEngine()
 	}
+	s.publishSecrets(provider)
 	writeJSON(w, http.StatusOK, secrets.ProviderInfo{
 		Provider: provider,
 		Fields:   listKeys(fields),
@@ -60,7 +62,18 @@ func (s *server) deleteSecrets(w http.ResponseWriter, r *http.Request) {
 	if s.rebuildEngine != nil {
 		s.rebuildEngine()
 	}
+	s.publishSecrets(provider)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// publishSecrets emits a secrets.changed event so live consumers
+// (sunny doctor pinning a status row, the TUI's badges, third-party
+// dashboards) can refresh without polling.
+func (s *server) publishSecrets(provider string) {
+	if s.hub == nil {
+		return
+	}
+	s.hub.Publish(evts.Event{Type: evts.SecretsChanged, Provider: provider})
 }
 
 func listKeys(m map[string]string) []string {

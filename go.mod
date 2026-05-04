@@ -13,6 +13,7 @@ require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/ultraviolet v0.0.0-20260428153724-66037269d7be
 	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/rivo/uniseg v0.4.7
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -35,7 +36,6 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
-	github.com/mdp/qrterminal/v3 v3.2.1 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

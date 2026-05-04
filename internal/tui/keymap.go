@@ -19,7 +19,6 @@ type KeyMap struct {
 	Agents        key.Binding // ctrl+a — agent picker / manager
 	Secrets       key.Binding // ctrl+y — secrets manager (api keys)
 	Settings      key.Binding // ctrl+s — open settings modal (theme picker)
-	Game          key.Binding // ctrl+g — open minigames modal (snake)
 	ScrollUp      key.Binding
 	ScrollDn      key.Binding
 	ScrollTop     key.Binding // home — jump to start of transcript
@@ -50,7 +49,6 @@ func DefaultKeyMap() KeyMap {
 		Agents:        key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "agents")),
 		Secrets:       key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "secrets")),
 		Settings:      key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "settings")),
-		Game:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "game")),
 		ScrollUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),
 		ScrollDn:      key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll down")),
 		ScrollTop:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),

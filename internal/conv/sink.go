@@ -135,16 +135,6 @@ func (s *Sink) Subscribe(slug, convID string) (<-chan Event, int64, func()) {
 	return sub.ch, current, cancel
 }
 
-// HeadSeq returns the last-assigned seq for a conversation, or 0 if
-// the conversation has no events yet (or has never been touched by
-// this Sink).
-func (s *Sink) HeadSeq(slug, convID string) int64 {
-	h := s.hubFor(slug, convID)
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.seq
-}
-
 // hubFor returns the hub for (slug, convID), creating it on first
 // touch. First touch primes the seq counter from the on-disk journal
 // so freshly-loaded conversations don't start at seq=1 and shadow

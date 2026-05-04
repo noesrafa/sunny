@@ -110,8 +110,3 @@ func Save(st *State) error {
 	}
 	return os.Rename(tmp, p)
 }
-
-func Path() string {
-	p, _ := path()
-	return p
-}

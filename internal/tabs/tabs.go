@@ -107,19 +107,6 @@ func (s *Store) List() []*Tab {
 	return out
 }
 
-// Get returns the tab with the given id, or ErrNotFound.
-func (s *Store) Get(id string) (*Tab, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, t := range s.tabs {
-		if t.ID == id {
-			cp := *t
-			return &cp, nil
-		}
-	}
-	return nil, ErrNotFound
-}
-
 // Add appends a new tab and persists. Caller is responsible for
 // filling AgentSlug, ConvID, Cwd, Title; ID + timestamps are
 // assigned here. Returns the stored copy (with id + timestamps set).

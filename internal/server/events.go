@@ -75,12 +75,3 @@ func (s *server) publish(t events.Type, slug, convID string) {
 	s.hub.Publish(events.Event{Type: t, Slug: slug, ConvID: convID})
 }
 
-// publishProvider mirrors publish for secret events where Slug is
-// not the right concept; provider name carries the same uniqueness
-// role.
-func (s *server) publishProvider(t events.Type, provider string) {
-	if s.hub == nil {
-		return
-	}
-	s.hub.Publish(events.Event{Type: t, Provider: provider})
-}

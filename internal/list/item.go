@@ -6,8 +6,6 @@
 package list
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -48,19 +46,3 @@ type MouseClickable interface {
 	HandleMouseClick(btn ansi.MouseButton, x, y int) bool
 }
 
-// SpacerItem is a spacer item that adds vertical space in the list.
-type SpacerItem struct {
-	Height int
-}
-
-// NewSpacerItem creates a new [SpacerItem] with the specified height.
-func NewSpacerItem(height int) *SpacerItem {
-	return &SpacerItem{
-		Height: max(0, height-1),
-	}
-}
-
-// Render implements the Item interface for [SpacerItem].
-func (s *SpacerItem) Render(width int) string {
-	return strings.Repeat("\n", s.Height)
-}

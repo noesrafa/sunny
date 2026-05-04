@@ -4,7 +4,6 @@ import (
 	"image"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
@@ -132,69 +131,3 @@ func HighlightBuffer(content string, area image.Rectangle, startLine, startCol, 
 	return &buf
 }
 
-// ToHighlighter converts a [lipgloss.Style] to a [Highlighter] — the cell
-// style overlays the underlying content. Convenient when you want a colored
-// selection overlay instead of plain reverse-video.
-func ToHighlighter(lgStyle lipgloss.Style) Highlighter {
-	return func(_ int, _ int, c *uv.Cell) *uv.Cell {
-		if c != nil {
-			c.Style = ToStyle(lgStyle)
-		}
-		return c
-	}
-}
-
-// ToStyle converts an inline [lipgloss.Style] to a [uv.Style].
-func ToStyle(lgStyle lipgloss.Style) uv.Style {
-	var uvStyle uv.Style
-
-	uvStyle.Fg = lgStyle.GetForeground()
-	uvStyle.Bg = lgStyle.GetBackground()
-
-	var attrs uint8
-	if lgStyle.GetBold() {
-		attrs |= uv.AttrBold
-	}
-	if lgStyle.GetItalic() {
-		attrs |= uv.AttrItalic
-	}
-	if lgStyle.GetUnderline() {
-		uvStyle.Underline = uv.UnderlineSingle
-	}
-	if lgStyle.GetStrikethrough() {
-		attrs |= uv.AttrStrikethrough
-	}
-	if lgStyle.GetFaint() {
-		attrs |= uv.AttrFaint
-	}
-	if lgStyle.GetBlink() {
-		attrs |= uv.AttrBlink
-	}
-	if lgStyle.GetReverse() {
-		attrs |= uv.AttrReverse
-	}
-	uvStyle.Attrs = attrs
-
-	return uvStyle
-}
-
-// Apply is the convenience entry point that sunnytui used before it had a
-// list package — kept for back-compat with the clipboard path. Equivalent to
-// Highlight with the default reverse-video highlighter.
-func Apply(content string, width, height, startLine, startCol, endLine, endCol int) string {
-	if width <= 0 || height <= 0 {
-		return content
-	}
-	area := image.Rect(0, 0, width, height)
-	return Highlight(content, area, startLine, startCol, endLine, endCol, DefaultHighlighter)
-}
-
-// Extract returns the plain (un-styled) text inside the selection range,
-// suitable for clipboard. Mirrors HighlightContent — the older sunnytui name.
-func Extract(content string, width, height, startLine, startCol, endLine, endCol int) string {
-	if width <= 0 || height <= 0 {
-		return ""
-	}
-	area := image.Rect(0, 0, width, height)
-	return HighlightContent(content, area, startLine, startCol, endLine, endCol)
-}

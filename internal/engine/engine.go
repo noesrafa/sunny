@@ -280,18 +280,6 @@ func (e *Engine) runTool(ctx context.Context, call provider.ToolCall, cwd string
 	return provider.ToolResult{ToolUseID: call.ID, Content: out}, out, false
 }
 
-// isToolStop reports whether the provider's stop reason indicates
-// the model wants its tool calls executed. Strings come straight
-// from providers; we accept both the Anthropic and OpenAI/Ollama
-// canon.
-func isToolStop(stop string) bool {
-	switch strings.ToLower(stop) {
-	case "tool_use", "tool_calls", "function_call":
-		return true
-	}
-	return false
-}
-
 // pick selects the provider for an agent.
 func (e *Engine) pick(agent *store.Agent) (provider.Provider, error) {
 	want := agent.Config.Provider
@@ -310,15 +298,6 @@ func (e *Engine) pick(agent *store.Agent) (provider.Provider, error) {
 		return nil, fmt.Errorf("engine: default provider %q missing from registry", e.defaultName)
 	}
 	return p, nil
-}
-
-// ProviderName surfaces the active default for logging / UI. Returns
-// "" when no default is configured.
-func (e *Engine) ProviderName() string {
-	if e == nil {
-		return ""
-	}
-	return e.defaultName
 }
 
 // HasProviders reports whether at least one provider is registered.

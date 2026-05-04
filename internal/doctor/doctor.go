@@ -23,17 +23,6 @@ const (
 	StatusFail
 )
 
-func (s Status) String() string {
-	switch s {
-	case StatusOK:
-		return "ok"
-	case StatusWarn:
-		return "warn"
-	default:
-		return "fail"
-	}
-}
-
 // Result is a single probe outcome. Detail is one short human line
 // describing what we found ("v1.14.33 on PATH, 0 providers authed").
 // Hint, when set, is a single command the user can run to fix what

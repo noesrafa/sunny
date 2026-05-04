@@ -9,7 +9,6 @@ import (
 
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/sysstats"
-	"github.com/noesrafa/sunny/internal/usage"
 )
 
 const (
@@ -107,11 +106,6 @@ func renderSessionsSection(mgr *session.Manager, innerW int, s Styles) []string 
 	return rows
 }
 
-// renderUsageSection now only surfaces the host machine's cpu/ram. The
-// Claude Code rate-limit bars (5h/7d/ctx) used to live here too but they
-// turned out to be noisy and rarely actionable — Rafael wanted the panel
-// quiet. The buildUsageWidget code path is kept around (dead) in case we
-// want to reintroduce a richer view later.
 func renderUsageSection(mgr *session.Manager, sys sysstats.Stats, innerW int, s Styles) []string {
 	_ = mgr
 	sysRows := buildSysStatsRows(sys, innerW, s)
@@ -202,37 +196,6 @@ func renderSidebarRow(sess *session.Session, active bool, s Styles) []string {
 		line2 = "    " + s.Hint.Render(base)
 	}
 	return []string{line1, line2}
-}
-
-// buildUsageWidget tries the rich percentage view first (statusline snapshot)
-// and falls back to a status-only line from the in-stream rate_limit_event.
-// Mirrors claude-hud's display: context window % + 5h + 7d rate-limit windows.
-//
-// Freshness window: 24h. We deliberately keep stale snapshots visible
-// instead of disappearing the bars whenever the user steps away from
-// claude-hud — Claude Code only refreshes the statusline payload on
-// activity, so a 10-minute cutoff hides the widget for the rest of the
-// day after a single break.
-func buildUsageWidget(mgr *session.Manager, innerW int, s Styles) []string {
-	if payload, _, err := usage.Read(24 * time.Hour); err == nil && payload != nil {
-		var rows []string
-		if cw := payload.ContextWindow; cw != nil && cw.UsedPercentage > 0 {
-			rows = append(rows, renderProgressBar("ctx", cw.UsedPercentage, "", innerW, s))
-		}
-		if rl := payload.RateLimits; rl != nil {
-			if w := rl.FiveHour; w != nil {
-				rows = append(rows, renderProgressBar("5h", w.UsedPercentage, resetHint(w.ResetsAt), innerW, s))
-			}
-			if w := rl.SevenDay; w != nil {
-				rows = append(rows, renderProgressBar("7d", w.UsedPercentage, resetHint(w.ResetsAt), innerW, s))
-			}
-		}
-		if len(rows) > 0 {
-			return rows
-		}
-	}
-	_ = mgr
-	return nil
 }
 
 // barRamp caches the per-cell Blend1D ramp used by renderProgressBar.
@@ -331,38 +294,6 @@ func renderProgressBar(label string, pctF float64, reset string, innerW int, s S
 		line += " " + s.Hint.Render(reset)
 	}
 	return line
-}
-
-// resetHint formats an absolute reset timestamp into a compact relative
-// duration ("3h54m", "12m"), or "" when the timestamp is missing / past.
-func resetHint(resetsAt int64) string {
-	if resetsAt <= 0 {
-		return ""
-	}
-	d := time.Until(time.Unix(resetsAt, 0))
-	if d <= 0 {
-		return ""
-	}
-	return shortDuration(d)
-}
-
-func shortDuration(d time.Duration) string {
-	if d >= 24*time.Hour {
-		// Long resets (7d window) — collapse to whole hours, no minutes.
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	}
-	if d >= time.Hour {
-		hours := int(d.Hours())
-		mins := int(d.Minutes()) - hours*60
-		if mins == 0 {
-			return fmt.Sprintf("%dh", hours)
-		}
-		return fmt.Sprintf("%dh%dm", hours, mins)
-	}
-	if d >= time.Minute {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
 func stateBadge(st session.State, s Styles) string {

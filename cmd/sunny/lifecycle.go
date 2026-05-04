@@ -176,6 +176,23 @@ func update(args []string) error {
 
 	upgraded := false
 	if _, err := exec.LookPath("brew"); err == nil {
+		// Refresh the tap formulae first. Without this, brew may
+		// keep its cached view of "latest" (HOMEBREW_AUTO_UPDATE_SECS
+		// throttles the implicit refresh that `brew upgrade` does)
+		// and report "already installed" against a stale formula
+		// even after we've published a new release. We surface the
+		// output so the user sees what's happening, but we don't
+		// fail the whole flow on a brew update glitch — the upgrade
+		// step below still tries.
+		fmt.Println("refreshing brew formulae…")
+		updCmd := exec.Command("brew", "update", "--quiet")
+		updCmd.Stdout = os.Stdout
+		updCmd.Stderr = os.Stderr
+		updCmd.Stdin = os.Stdin
+		if err := updCmd.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "brew update failed (non-fatal):", err)
+		}
+
 		fmt.Println("upgrading via brew…")
 		cmd := exec.Command("brew", "upgrade", "noesrafa/tap/sunny")
 		cmd.Stdout = os.Stdout

@@ -14,10 +14,17 @@ import (
 // itself lives in updateAppMsg (model_appmsg.go); these are the
 // helpers it routes to.
 
-// switchAgent spawns a new session bound to (slug, host). Existing
+// switchAgent reacts to "enter on agent" in the picker. Existing
 // sessions are not modified — agent binding is per-session and
-// immutable for that session's lifetime, so "switch agent" really
-// means "open a new tab on the chosen agent."
+// immutable for that session's lifetime, so this always opens a new
+// tab.
+//
+// Local agents auto-create at m.initialCwd (the TUI's launch dir),
+// matching the long-standing UX: enter feels instant, no extra
+// dialog. Remote agents open the new-session dialog scoped to that
+// peer's filesystem so the user can pick a cwd that actually exists
+// on the remote daemon — using m.initialCwd there would leak the
+// local path into a remote that doesn't have it.
 func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 	slug := req.Slug
 	host := req.Host
@@ -26,6 +33,16 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 	}
 	if cur := m.manager.Current(); cur != nil && cur.AgentSlug() == slug && cur.Host() == host {
 		return m, nil, true // already on this agent on this peer — picker just closes
+	}
+	if host != "local" {
+		peerClient := m.clientFor(host)
+		if peerClient == nil {
+			m.lastErr = errNoClient
+			m.logger.Error("switch agent: no client for peer", "peer", host)
+			return m, nil, true
+		}
+		dialog := NewNewSessionDialog(peerClient, host, "", slug, m.styles)
+		return m, m.overlay.Open(dialog), true
 	}
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()

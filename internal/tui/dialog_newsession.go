@@ -2,8 +2,6 @@ package tui
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +17,11 @@ import (
 // own `agent.yaml`. The dialog reads them off the picked agent and
 // passes them through CreateSessionMsg so the sidebar's "opus max"
 // readout still works.
+//
+// The directory picker walks the *daemon's* filesystem (not the local
+// process'). Even for the local daemon we go through GET /fs/list —
+// it keeps the local/remote code paths identical, the round-trip on
+// loopback is sub-millisecond, and remote peers Just Work.
 type newSessionFocus int
 
 const (
@@ -28,14 +31,23 @@ const (
 )
 
 type NewSessionDialog struct {
-	cwd      string
-	entries  []string // directory names in cwd (sorted)
-	filtered []int    // indices into entries
+	host     string // federation peer name (for CreateSessionMsg.Host)
+	cwd      string // current path being browsed (daemon-side)
+	entries  []string
+	filtered []int // indices into entries
 	selected int
 	search   textinput.Model
 	styles   Styles
 	focus    newSessionFocus
 	err      string
+
+	// Dir loader (async). loading is true while the first response for
+	// the current cwd is in flight; loadGen guards against stale
+	// responses landing after the user has already navigated past
+	// them (only the latest gen's response is applied).
+	dirLoading bool
+	dirLoadErr string
+	loadGen    int
 
 	// Agent picker — loaded async via Init(). Until the load returns
 	// the row shows "(loading…)"; Enter still works once it does.
@@ -47,11 +59,14 @@ type NewSessionDialog struct {
 	agentLoadErr string
 }
 
-func NewNewSessionDialog(c *client.Client, defaultCwd, defaultAgent string, s Styles) *NewSessionDialog {
-	cwd := defaultCwd
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
+// NewNewSessionDialog wires the dialog against one peer's client.
+// host is the federation peer name (e.g. "local", "vmi3091691"); it
+// rides along on the emitted CreateSessionMsg so the model spawns the
+// session against the right daemon.
+//
+// defaultCwd may be empty — when it is, the dialog falls back to the
+// daemon's home dir (returned by the first /fs/list response).
+func NewNewSessionDialog(c *client.Client, host, defaultCwd, defaultAgent string, s Styles) *NewSessionDialog {
 	ti := textinput.New()
 	ti.Placeholder = "buscar carpeta…"
 	ti.Prompt = "› "
@@ -60,38 +75,54 @@ func NewNewSessionDialog(c *client.Client, defaultCwd, defaultAgent string, s St
 	ti.Focus()
 
 	d := &NewSessionDialog{
-		cwd:          cwd,
+		host:         host,
+		cwd:          defaultCwd,
 		search:       ti,
 		styles:       s,
 		focus:        focusPicker,
 		client:       c,
 		defaultAgent: defaultAgent,
 		agentLoading: c != nil,
+		dirLoading:   c != nil,
 	}
-	d.loadDir()
 	return d
 }
 
-func (d *NewSessionDialog) loadDir() {
-	d.entries = d.entries[:0]
-	items, err := os.ReadDir(d.cwd)
-	if err == nil {
-		for _, it := range items {
-			name := it.Name()
-			if strings.HasPrefix(name, ".") {
-				continue
-			}
-			if !it.IsDir() {
-				continue
-			}
-			d.entries = append(d.entries, name)
-		}
-		sort.Slice(d.entries, func(i, j int) bool {
-			return strings.ToLower(d.entries[i]) < strings.ToLower(d.entries[j])
-		})
+// dirLoadedMsg carries one /fs/list response. Tagged with gen so the
+// dialog can drop responses for a path the user has already navigated
+// past.
+type dirLoadedMsg struct {
+	Gen     int
+	Path    string
+	Entries []string
+	Err     error
+}
+
+func (d *NewSessionDialog) loadDirCmd(path string) tea.Cmd {
+	c := d.client
+	if c == nil {
+		return nil
 	}
-	d.refilter()
-	d.selected = 0
+	d.loadGen++
+	gen := d.loadGen
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		resp, err := c.ListDir(ctx, path)
+		if err != nil {
+			return dirLoadedMsg{Gen: gen, Path: path, Err: err}
+		}
+		names := make([]string, 0, len(resp.Entries))
+		for _, e := range resp.Entries {
+			names = append(names, e.Name)
+		}
+		// Daemon already sorts case-insensitive; sort defensively in
+		// case a future server version stops doing it.
+		sort.Slice(names, func(i, j int) bool {
+			return strings.ToLower(names[i]) < strings.ToLower(names[j])
+		})
+		return dirLoadedMsg{Gen: gen, Path: resp.Path, Entries: names}
+	}
 }
 
 func (d *NewSessionDialog) refilter() {
@@ -107,34 +138,37 @@ func (d *NewSessionDialog) refilter() {
 	}
 }
 
-func (d *NewSessionDialog) descend() {
-	if len(d.filtered) == 0 {
-		return
+// descend dives into the highlighted directory. The /fs/list response
+// will replace the entry list; until it arrives the picker stays on
+// the old listing with dirLoading true.
+func (d *NewSessionDialog) descend() tea.Cmd {
+	if len(d.filtered) == 0 || d.cwd == "" {
+		return nil
 	}
 	name := d.entries[d.filtered[d.selected]]
-	next := filepath.Join(d.cwd, name)
-	if info, err := os.Stat(next); err == nil && info.IsDir() {
-		d.cwd = next
-		d.search.SetValue("")
-		d.loadDir()
-	}
+	next := joinPath(d.cwd, name)
+	d.cwd = next
+	d.search.SetValue("")
+	d.dirLoading = true
+	d.dirLoadErr = ""
+	return d.loadDirCmd(next)
 }
 
-func (d *NewSessionDialog) ascend() {
-	parent := filepath.Dir(d.cwd)
-	if parent == d.cwd {
-		return
+// ascend walks up one level. The current dir's basename is remembered
+// so the parent listing snaps to that entry once it lands.
+func (d *NewSessionDialog) ascend() tea.Cmd {
+	if d.cwd == "" {
+		return nil
 	}
-	prev := filepath.Base(d.cwd)
+	parent := parentPath(d.cwd)
+	if parent == "" || parent == d.cwd {
+		return nil
+	}
 	d.cwd = parent
 	d.search.SetValue("")
-	d.loadDir()
-	for i, idx := range d.filtered {
-		if d.entries[idx] == prev {
-			d.selected = i
-			break
-		}
-	}
+	d.dirLoading = true
+	d.dirLoadErr = ""
+	return d.loadDirCmd(parent)
 }
 
 func (d *NewSessionDialog) SetStyles(s Styles) { d.styles = s }
@@ -143,6 +177,7 @@ func (d *NewSessionDialog) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink}
 	if d.client != nil {
 		cmds = append(cmds, d.loadAgentsCmd())
+		cmds = append(cmds, d.loadDirCmd(d.cwd))
 	}
 	return tea.Batch(cmds...)
 }
@@ -166,7 +201,26 @@ func (d *NewSessionDialog) loadAgentsCmd() tea.Cmd {
 }
 
 func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
-	if m, ok := msg.(newSessionAgentsLoadedMsg); ok {
+	switch m := msg.(type) {
+	case dirLoadedMsg:
+		// Stale response (user moved on) — drop.
+		if m.Gen != d.loadGen {
+			return nil
+		}
+		d.dirLoading = false
+		if m.Err != nil {
+			d.dirLoadErr = m.Err.Error()
+			d.entries = nil
+			d.filtered = nil
+			return nil
+		}
+		d.dirLoadErr = ""
+		d.cwd = m.Path
+		d.entries = m.Entries
+		d.refilter()
+		d.selected = 0
+		return nil
+	case newSessionAgentsLoadedMsg:
 		d.agentLoading = false
 		if m.Err != nil {
 			d.agentLoadErr = m.Err.Error()
@@ -226,17 +280,14 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 				}
 				return nil
 			case "right":
-				d.descend()
-				return nil
+				return d.descend()
 			case "left":
 				if d.search.Value() == "" {
-					d.ascend()
-					return nil
+					return d.ascend()
 				}
 			case "backspace":
 				if d.search.Value() == "" {
-					d.ascend()
-					return nil
+					return d.ascend()
 				}
 			}
 			prev := d.search.Value()
@@ -265,14 +316,12 @@ func (d *NewSessionDialog) confirm() tea.Cmd {
 		d.err = "directorio vacío"
 		return nil
 	}
-	abs, err := filepath.Abs(cwd)
-	if err != nil {
-		d.err = err.Error()
+	if d.dirLoading {
+		d.err = "esperando listado del directorio"
 		return nil
 	}
-	info, err := os.Stat(abs)
-	if err != nil || !info.IsDir() {
-		d.err = "no es un directorio: " + abs
+	if d.dirLoadErr != "" {
+		d.err = "directorio inválido: " + d.dirLoadErr
 		return nil
 	}
 	// Pull model + effort from the picked agent so the sidebar's
@@ -287,12 +336,14 @@ func (d *NewSessionDialog) confirm() tea.Cmd {
 		model = picked.Model
 		effort = picked.Effort
 	}
+	host := d.host
 	return func() tea.Msg {
 		return CreateSessionMsg{
-			Cwd:       abs,
+			Cwd:       cwd,
 			Model:     model,
 			Effort:    effort,
 			AgentSlug: agentSlug,
+			Host:      host,
 		}
 	}
 }
@@ -316,12 +367,20 @@ func (d *NewSessionDialog) View(width, height int) string {
 		listH = 5
 	}
 
-	title := HatchedTitle("New Session", innerW, colPrimary, colAccent, d.styles.DialogTitle)
+	titleText := "New Session"
+	if d.host != "" && d.host != "local" {
+		titleText += " · " + d.host
+	}
+	title := HatchedTitle(titleText, innerW, colPrimary, colAccent, d.styles.DialogTitle)
 
 	agentLabel := d.fieldLabel("agent", d.focus == focusAgent)
 	agentRow := d.renderAgentRow(d.focus == focusAgent)
 
-	pickerLabel := d.fieldLabel("directorio · "+d.cwd, d.focus == focusPicker)
+	pickerHeader := "directorio"
+	if d.cwd != "" {
+		pickerHeader += " · " + d.cwd
+	}
+	pickerLabel := d.fieldLabel(pickerHeader, d.focus == focusPicker)
 	searchView := "  " + d.search.View()
 	listView := d.renderList(listH, innerW)
 	pickerHints := d.styles.Hint.Render("↑↓ navegar · → descender · ← atrás · type para filtrar")
@@ -370,6 +429,16 @@ func (d *NewSessionDialog) renderAgentRow(focused bool) string {
 }
 
 func (d *NewSessionDialog) renderList(maxRows, innerW int) string {
+	if d.dirLoading && len(d.entries) == 0 {
+		empty := "  " + d.styles.Hint.Render("loading…")
+		pad := strings.Repeat("\n", maxRows-1)
+		return empty + pad
+	}
+	if d.dirLoadErr != "" && len(d.entries) == 0 {
+		empty := "  " + d.styles.ResultError.Render("✗ "+d.dirLoadErr)
+		pad := strings.Repeat("\n", maxRows-1)
+		return empty + pad
+	}
 	if len(d.filtered) == 0 {
 		empty := "  " + d.styles.Hint.Render("(sin coincidencias)")
 		pad := strings.Repeat("\n", maxRows-1)
@@ -410,4 +479,37 @@ func (d *NewSessionDialog) fieldLabel(text string, focused bool) string {
 		return d.styles.UserPrompt.Render("▸ ") + d.styles.HeaderTitle.Render(text)
 	}
 	return "  " + d.styles.HeaderDim.Render(text)
+}
+
+// joinPath appends name to base using the daemon's path separator.
+// We use forward slashes regardless of TUI host because every sunny
+// daemon target today is unix-y (linux/macOS); switching to remote
+// Windows daemons is out of scope.
+func joinPath(base, name string) string {
+	if base == "" {
+		return name
+	}
+	if strings.HasSuffix(base, "/") {
+		return base + name
+	}
+	return base + "/" + name
+}
+
+// parentPath returns the parent directory of p, or "" if p is the
+// filesystem root. Mirrors filepath.Dir for unix paths but stays
+// host-agnostic so paths returned from a remote daemon are walked
+// correctly regardless of the local TUI's OS.
+func parentPath(p string) string {
+	if p == "" || p == "/" {
+		return ""
+	}
+	p = strings.TrimRight(p, "/")
+	idx := strings.LastIndex(p, "/")
+	if idx < 0 {
+		return ""
+	}
+	if idx == 0 {
+		return "/"
+	}
+	return p[:idx]
 }

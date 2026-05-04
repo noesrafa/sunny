@@ -128,6 +128,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /pairing/claim", srv.claimPairing)
 	mux.HandleFunc("GET /events", srv.streamEvents)
 	mux.HandleFunc("GET /sunny/identity", srv.streamIdentity)
+	mux.HandleFunc("GET /fs/list", srv.fsList)
 	mux.HandleFunc("GET /tabs", srv.listTabs)
 	mux.HandleFunc("POST /tabs", srv.openTab)
 	mux.HandleFunc("DELETE /tabs/{id}", srv.closeTab)

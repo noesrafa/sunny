@@ -40,7 +40,16 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		if cur := m.manager.Current(); cur != nil && cur.AgentSlug() != "" {
 			curAgent = cur.AgentSlug()
 		}
-		return m, m.overlay.Open(NewNewSessionDialog(m.client, m.initialCwd, curAgent, m.styles)), true
+		// New session targets the active peer. For local we keep
+		// initialCwd as a sensible starting point in the dir picker;
+		// for remote we leave it empty so the daemon returns its own
+		// home dir (the TUI's local cwd is meaningless there).
+		peerClient := m.clientFor(m.activePeer)
+		defaultCwd := ""
+		if m.activePeer == "local" {
+			defaultCwd = m.initialCwd
+		}
+		return m, m.overlay.Open(NewNewSessionDialog(peerClient, m.activePeer, defaultCwd, curAgent, m.styles)), true
 	case key.Matches(msg, m.keymap.NextSession):
 		m.cycleTab(1)
 		return m, nil, true

@@ -55,6 +55,8 @@ func main() {
 		err = doctorCmd(args)
 	case "setup":
 		err = setupCmd(args)
+	case "app":
+		err = appCmd(args)
 	case "version", "-v", "--version":
 		fmt.Println("sunny", version)
 	case "help", "-h", "--help":
@@ -89,6 +91,7 @@ commands:
   mesh      Manage shared tailnet mesh key. 'sunny mesh export' on one host, 'sunny mesh import <key>' on another → zero-config discovery between them.
   doctor    Print a checklist: providers (✓/⚠/✗), daemon, runtime. Run this first when something feels off.
   setup     Get a provider ready. 'sunny setup' walks you through it; 'sunny setup <p>' targets one.
+  app       Print a QR for the iOS/Android app — one scan and the phone is paired.
   version   Print version.
 
 common flags:

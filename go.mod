@@ -35,6 +35,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mdp/qrterminal/v3 v3.2.1 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
@@ -49,5 +50,7 @@ require (
 	golang.org/x/net v0.41.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/term v0.32.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )

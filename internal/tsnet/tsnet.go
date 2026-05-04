@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
@@ -84,13 +85,27 @@ func LocalIP() (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "tailscale", "ip", "-4").CombinedOutput()
+	// Keep stdout and stderr separate. The tailscale CLI emits
+	// non-fatal warnings (e.g. client/daemon version mismatch) on
+	// stderr — CombinedOutput mixed them into the address line and
+	// callers ended up using "Warning: ..." as the IP.
+	cmd := exec.CommandContext(ctx, "tailscale", "ip", "-4")
+	stdout, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("tsnet: tailscale ip: %s", strings.TrimSpace(string(out)))
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("tsnet: tailscale ip: %s", stderr)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(string(stdout), "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if line == "" {
+			continue
+		}
+		// Defense in depth: only accept lines that parse as an IP,
+		// in case future tailscale versions add hint lines on stdout.
+		if ip := net.ParseIP(line); ip != nil {
 			return line, nil
 		}
 	}

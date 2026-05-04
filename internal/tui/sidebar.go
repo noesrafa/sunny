@@ -172,7 +172,14 @@ func renderSidebarRow(sess *session.Session, active bool, s Styles) []string {
 	switch sess.State {
 	case session.StateThinking:
 		live := sess.LiveStatus()
-		secs := time.Since(sess.StartedAt).Seconds()
+		// Use the journal-derived turn-start time so this counter
+		// ticks correctly on EVERY viewer, not just the sender.
+		// Pre-v0.19 we used a local-only StartedAt that left the
+		// viewer's "thinking · Xs" reading 63 billion seconds.
+		secs := 0.0
+		if start := sess.TurnStart(); !start.IsZero() {
+			secs = time.Since(start).Seconds()
+		}
 		txt := fmt.Sprintf("%s · %.1fs", live, secs)
 		line2 = "    " + s.StatusBusy.Render(txt)
 	case session.StateError:

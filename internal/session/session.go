@@ -224,6 +224,13 @@ func (s *Session) loadHistory(ctx context.Context) error {
 // AgentSlug returns the slug of the agent this session is bound to.
 func (s *Session) AgentSlug() string { return s.agentSlug }
 
+// TurnStart returns the journal timestamp of the most recent user
+// message — the moment the in-flight turn (if any) began. Zero when
+// no turn has been observed yet on this session. The sidebar's
+// "thinking · X.Ys" counter reads from here; without it the viewer
+// would tick from time.Time{} which is year 1.
+func (s *Session) TurnStart() time.Time { return s.lastUserAt }
+
 // Host returns the federation peer name this session lives on
 // ("local" by default).
 func (s *Session) Host() string {
@@ -366,7 +373,13 @@ func (s *Session) Send(ctx context.Context, text string) error {
 	s.Attachments = nil
 	s.echoSkipSeq.Store(res.UserSeq)
 	s.State = StateThinking
-	s.StartedAt = time.Now()
+	now := time.Now()
+	s.StartedAt = now
+	// Sender pre-seeds lastUserAt so the sidebar's "thinking · X.Ys"
+	// counter ticks from a real moment instead of waiting for the
+	// watch echo (~10 ms but visible). The viewer sets lastUserAt
+	// from ev.At when the user event arrives via watch.
+	s.lastUserAt = now
 	s.turnHadOutput = false
 	if s.logger != nil {
 		s.logger.Debug("turn started", "session", s.ID, "conv_id", s.ConvID, "user_seq", res.UserSeq)

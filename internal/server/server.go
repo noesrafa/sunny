@@ -114,6 +114,9 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("DELETE /agents/{slug}", srv.deleteAgent)
 	mux.HandleFunc("GET /agents/{slug}/skills/{name}", srv.getSkill)
 	mux.HandleFunc("GET /agents/{slug}/knowledge/{file...}", srv.getKnowledge)
+	mux.HandleFunc("GET /agents/{slug}/avatar", srv.getAvatar)
+	mux.HandleFunc("PUT /agents/{slug}/avatar", srv.putAvatar)
+	mux.HandleFunc("DELETE /agents/{slug}/avatar", srv.deleteAvatar)
 	mux.HandleFunc("GET /agents/{slug}/conversations", srv.listConversations)
 	mux.HandleFunc("POST /agents/{slug}/conversations", srv.createConversation)
 	mux.HandleFunc("GET /agents/{slug}/conversations/{id}", srv.getConversation)
@@ -166,7 +169,7 @@ func requireBearer(token string, h http.Handler) http.Handler {
 		// has no token yet. /sunny/identity is intentionally public
 		// so the mesh discovery flow can ask "is this daemon part of
 		// my mesh?" before sending any credential.
-		if r.URL.Path == "/healthz" || pairingExempt(r.URL.Path) || identityExempt(r.URL.Path) {
+		if r.URL.Path == "/healthz" || pairingExempt(r.URL.Path) || identityExempt(r.URL.Path) || avatarExempt(r.Method, r.URL.Path) {
 			h.ServeHTTP(w, r)
 			return
 		}
@@ -225,6 +228,7 @@ type agentItem struct {
 	Provider    string `json:"provider,omitempty"`
 	Skills      int    `json:"skills"`
 	Knowledge   int    `json:"knowledge"`
+	HasAvatar   bool   `json:"has_avatar"`
 }
 
 func summarize(a *store.Agent) agentItem {
@@ -237,6 +241,7 @@ func summarize(a *store.Agent) agentItem {
 		Provider:    a.Config.Provider,
 		Skills:      len(a.Skills),
 		Knowledge:   len(a.Knowledge),
+		HasAvatar:   a.HasAvatar,
 	}
 }
 
@@ -270,6 +275,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Effort      string          `json:"effort,omitempty"`
 		Provider    string          `json:"provider,omitempty"`
 		Prompt      string          `json:"prompt,omitempty"`
+		HasAvatar   bool            `json:"has_avatar"`
 		Skills      []skillItem     `json:"skills"`
 		Knowledge   []knowledgeItem `json:"knowledge"`
 	}{
@@ -280,6 +286,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Effort:      a.Config.Effort,
 		Provider:    a.Config.Provider,
 		Prompt:      a.Prompt,
+		HasAvatar:   a.HasAvatar,
 		Skills:      []skillItem{},
 		Knowledge:   []knowledgeItem{},
 	}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/noesrafa/sunny/internal/agent"
+	"github.com/noesrafa/sunny/internal/avatar"
 	"github.com/noesrafa/sunny/internal/skill"
 )
 
@@ -37,6 +38,10 @@ type Agent struct {
 	// Prompt is the contents of prompt.md (the agent's persona). Loaded
 	// once at boot; CRUD keeps it in sync.
 	Prompt string
+	// HasAvatar reflects whether avatar.webp exists in Dir at load
+	// time. Mutating endpoints (PUT/DELETE /avatar) keep this in sync
+	// without a full reload.
+	HasAvatar bool
 }
 
 type KnowledgeFile struct {
@@ -241,7 +246,26 @@ func loadAgent(dir, slug string) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{Slug: slug, Dir: dir, Config: cfg, Knowledge: knowledge, Skills: skills, Prompt: prompt}, nil
+	return &Agent{
+		Slug:      slug,
+		Dir:       dir,
+		Config:    cfg,
+		Knowledge: knowledge,
+		Skills:    skills,
+		Prompt:    prompt,
+		HasAvatar: avatar.Path(dir) != "",
+	}, nil
+}
+
+// SetHasAvatar updates the in-memory flag for slug. Used by the
+// avatar HTTP handlers so the next /agents response reflects the
+// new state without a full reload. No-op if slug isn't loaded.
+func (s *Store) SetHasAvatar(slug string, has bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a, ok := s.agents[slug]; ok {
+		a.HasAvatar = has
+	}
 }
 
 // loadPrompt reads prompt.md from the agent dir. Returns "" (not error)

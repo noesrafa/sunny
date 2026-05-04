@@ -156,14 +156,20 @@ type Session struct {
 	// Engine wiring. The session holds a daemon client + agent +
 	// federation peer name. A long-lived watch goroutine forwards
 	// every journal event into watchCh; the TUI reads from there.
-	c           *client.Client
-	agentSlug   string
-	host        string
-	watchCh     chan client.JournalEvent
-	watchCancel context.CancelFunc
-	watchOpened atomic.Bool
-	lastSeq     atomic.Int64 // highest seq forwarded to watchCh; for resume
-	echoSkipSeq atomic.Int64 // user_seq returned by our last POST; watch echo of this seq is dropped
+	//
+	// lastSeq is per-watch (passed into runWatch as a local atomic) —
+	// keeping it on the Session would cross-contaminate seq counters
+	// across rotations (RebindConv spawns a new goroutine while the
+	// old one might still update a shared atomic, leading the new
+	// watch to start with an old-conv seq and miss events).
+	c            *client.Client
+	agentSlug    string
+	host         string
+	watchCh      chan client.JournalEvent
+	watchCancel  context.CancelFunc
+	watchOpened  atomic.Bool
+	initialSince int64 // seed for the next runWatch's lastSeq (set by loadHistory)
+	echoSkipSeq  atomic.Int64
 }
 
 // Bind configures the session's client + agent + host AND starts the
@@ -198,12 +204,62 @@ func (s *Session) Bind(ctx context.Context, c *client.Client, slug, host string)
 	s.watchCh = make(chan client.JournalEvent, 256)
 	watchCtx, cancel := context.WithCancel(ctx)
 	s.watchCancel = cancel
-	go s.runWatch(watchCtx)
+	go s.runWatch(watchCtx, s.watchCh, s.initialSince)
 }
 
-// loadHistory synchronously fetches the conversation's journal and
-// applies every event to Items + lastSeq. Used by Bind for restored
-// sessions; may also be useful in future "reload from disk" flows.
+// RebindConv asks the daemon to rebind this session's tab to a fresh
+// conversation, then resets local state so the transcript renders
+// empty and the next Send goes against the new conv. The old watch
+// goroutine is cancelled and a new one is spawned against the new
+// conv id; callers must re-arm waitForJournalEvent against the new
+// WatchEvents() channel.
+//
+// Stale events still buffered in the OLD channel are silently
+// dropped by the TUI's staleness check (channel-reference compare in
+// the journalEventMsg handler) — RebindConv does not block on them.
+//
+// ctx scopes the new watch goroutine's lifetime — pass the same root
+// ctx that Bind got.
+func (s *Session) RebindConv(ctx context.Context) error {
+	if s.c == nil {
+		return ErrNoEngine
+	}
+	if s.TabID == "" {
+		return fmt.Errorf("session: no tab_id (cannot rebind)")
+	}
+	tab, err := s.c.RebindTabConv(ctx, s.TabID)
+	if err != nil {
+		return err
+	}
+	if s.watchCancel != nil {
+		s.watchCancel()
+	}
+	s.ConvID = tab.ConvID
+	s.initialSince = 0
+	s.echoSkipSeq.Store(-1)
+	s.lastUserAt = time.Time{}
+	s.Items = nil
+	s.Turns = 0
+	s.TotalCost = 0
+	s.State = StateIdle
+	s.LastErr = nil
+	s.StartedAt = time.Time{}
+	s.turnHadOutput = false
+	s.Attachments = nil
+	s.attachmentSeq = 0
+
+	s.watchCh = make(chan client.JournalEvent, 256)
+	watchCtx, cancel := context.WithCancel(ctx)
+	s.watchCancel = cancel
+	go s.runWatch(watchCtx, s.watchCh, 0)
+	return nil
+}
+
+// loadHistory synchronously fetches the conversation's journal,
+// applies every event to Items, and records the highest seq in
+// initialSince so the next runWatch resumes from the right point.
+// Used by Bind for restored sessions; may also be useful in future
+// "reload from disk" flows.
 func (s *Session) loadHistory(ctx context.Context) error {
 	if s.c == nil || s.ConvID == "" {
 		return nil
@@ -216,7 +272,7 @@ func (s *Session) loadHistory(ctx context.Context) error {
 		s.applyKindLocked(ev.Kind, ev.At, ev.Payload)
 	}
 	if n := len(events); n > 0 {
-		s.lastSeq.Store(events[n-1].Seq)
+		s.initialSince = events[n-1].Seq
 	}
 	return nil
 }
@@ -429,8 +485,18 @@ func (s *Session) Close() {
 // the daemon, forwards every event to s.watchCh, and reconnects on
 // disconnect. Exits when ctx is cancelled (Close called or TUI
 // shutting down).
-func (s *Session) runWatch(ctx context.Context) {
-	defer close(s.watchCh)
+//
+// watchCh is captured at goroutine spawn so a concurrent RebindConv
+// can swap s.watchCh out from under us without this goroutine
+// pushing into the new channel by mistake. lastSeq is also local —
+// resume on reconnect is per-watch-instance, and a shared atomic
+// would let an old goroutine update the seq the new goroutine reads
+// (causing the new watch to start at the old conv's seq and miss
+// real events on the new conv).
+func (s *Session) runWatch(ctx context.Context, watchCh chan client.JournalEvent, initialSince int64) {
+	defer close(watchCh)
+	var lastSeq atomic.Int64
+	lastSeq.Store(initialSince)
 	const reconnectDelay = 2 * time.Second
 	for {
 		if ctx.Err() != nil {
@@ -440,7 +506,7 @@ func (s *Session) runWatch(ctx context.Context) {
 			return // session never got a conv (caller error); nothing to watch
 		}
 		s.watchOpened.Store(true)
-		ch, err := s.c.WatchConversation(ctx, s.agentSlug, s.ConvID, s.lastSeq.Load())
+		ch, err := s.c.WatchConversation(ctx, s.agentSlug, s.ConvID, lastSeq.Load())
 		if err != nil {
 			s.watchOpened.Store(false)
 			if !sleepCtx(ctx, reconnectDelay) {
@@ -448,7 +514,7 @@ func (s *Session) runWatch(ctx context.Context) {
 			}
 			continue
 		}
-		s.pumpWatch(ctx, ch)
+		s.pumpWatch(ctx, ch, watchCh, &lastSeq)
 		s.watchOpened.Store(false)
 		if !sleepCtx(ctx, reconnectDelay) {
 			return
@@ -456,11 +522,12 @@ func (s *Session) runWatch(ctx context.Context) {
 	}
 }
 
-// pumpWatch forwards events from one watch connection to s.watchCh
+// pumpWatch forwards events from one watch connection to watchCh
 // until the upstream closes (network drop, daemon shutdown).
 // Updates lastSeq as each event is forwarded so a reconnect can
-// resume cleanly.
-func (s *Session) pumpWatch(ctx context.Context, ch <-chan client.JournalEvent) {
+// resume cleanly. The seq atomic is per-runWatch (see runWatch's
+// doc comment for why it isn't a session field).
+func (s *Session) pumpWatch(ctx context.Context, ch <-chan client.JournalEvent, watchCh chan<- client.JournalEvent, lastSeq *atomic.Int64) {
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -468,9 +535,9 @@ func (s *Session) pumpWatch(ctx context.Context, ch <-chan client.JournalEvent) 
 				return
 			}
 			select {
-			case s.watchCh <- ev:
-				if ev.Seq > s.lastSeq.Load() {
-					s.lastSeq.Store(ev.Seq)
+			case watchCh <- ev:
+				if ev.Seq > lastSeq.Load() {
+					lastSeq.Store(ev.Seq)
 				}
 			case <-ctx.Done():
 				return

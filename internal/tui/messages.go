@@ -9,17 +9,29 @@ import (
 // (GET /watch). Pumped by waitForJournalEvent and consumed by
 // Update, which dispatches into the session's ApplyJournalEvent and
 // re-arms the next read.
+//
+// Ch holds the watch channel the event was read from; the handler
+// compares it against the session's current WatchEvents() to drop
+// stragglers from a previous watch (e.g. after RebindConv). Two
+// channels created with separate make() calls compare unequal even
+// when they carry the same element type.
 type journalEventMsg struct {
 	SessionID string
 	Event     client.JournalEvent
+	Ch        <-chan client.JournalEvent
 }
 
 // journalWatchClosedMsg fires when a session's watch channel closes
 // — typically because the session was Closed (TUI tearing down) or
 // the bubbletea ctx was cancelled. The model stops re-arming for
 // that session; live sessions stay subscribed.
+//
+// Ch is the channel that closed. The handler ignores closes from
+// channels that are no longer the session's current watch (e.g. an
+// old watch that was rotated out by RebindConv).
 type journalWatchClosedMsg struct {
 	SessionID string
+	Ch        <-chan client.JournalEvent
 }
 
 // branchTickMsg is fired every few seconds so the input-hint row can pick up

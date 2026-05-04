@@ -156,6 +156,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /tabs", srv.openTab)
 	mux.HandleFunc("DELETE /tabs/{id}", srv.closeTab)
 	mux.HandleFunc("PATCH /tabs/{id}", srv.patchTab)
+	mux.HandleFunc("POST /tabs/{id}/conversation", srv.rebindTabConv)
 	mux.HandleFunc("GET /stats", srv.stats)
 
 	// Compose middleware:

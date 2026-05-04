@@ -400,13 +400,19 @@ func (m *Model) clientFor(host string) *client.Client {
 // ApplyJournalEvent and re-arms with another waitForJournalEvent.
 // When the channel closes (session.Close or ctx cancellation), emits
 // journalWatchClosedMsg and the loop stops for that session.
+//
+// The channel reference is carried back in the message so the
+// handler can compare against the session's current WatchEvents()
+// and drop reads from a watch that has since been rotated out (e.g.
+// by RebindConv). Without this, a stale event buffered in the old
+// channel before the swap would be applied to the new conversation.
 func waitForJournalEvent(sessionID string, ch <-chan client.JournalEvent) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
-			return journalWatchClosedMsg{SessionID: sessionID}
+			return journalWatchClosedMsg{SessionID: sessionID, Ch: ch}
 		}
-		return journalEventMsg{SessionID: sessionID, Event: ev}
+		return journalEventMsg{SessionID: sessionID, Event: ev, Ch: ch}
 	}
 }
 

@@ -47,6 +47,21 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
 	}
+	peerClient := m.clientFor(host)
+	if peerClient == nil {
+		m.lastErr = errNoClient
+		m.logger.Error("switch agent: no client for peer", "peer", host)
+		return m, nil, true
+	}
+	tab, err := peerClient.OpenTab(m.ctx, client.OpenTabRequest{
+		AgentSlug: slug,
+		Cwd:       m.initialCwd,
+	})
+	if err != nil {
+		m.lastErr = err
+		m.logger.Error("switch agent: open tab failed", "err", err, "peer", host, "agent", slug)
+		return m, nil, true
+	}
 	s, err := session.New(m.ctx, m.initialCwd, session.Options{
 		Logger:                   m.logger,
 		Model:                    m.defaultModel,
@@ -54,23 +69,22 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 		DangerousSkipPermissions: m.skipPerms,
 		AgentSlug:                slug,
 		Host:                     host,
-		Title:                    slug,
+		TabID:                    tab.ID,
+		ConvID:                   tab.ConvID,
+		Title:                    tab.Title,
 	})
 	if err != nil {
 		m.lastErr = err
 		m.logger.Error("switch agent failed", "err", err, "slug", slug, "host", host)
 		return m, nil, true
 	}
-	peerClient := m.clientFor(host)
-	if peerClient != nil {
-		s.Bind(m.ctx, peerClient, slug, host)
-	}
+	s.Bind(m.ctx, peerClient, slug, host)
 	m.manager.Add(s)
 	m.textarea.Reset()
 	m.layout()
 	m.refreshViewport()
 	m.saveState()
-	return m, nil, true
+	return m, waitForJournalEvent(s.ID, s.WatchEvents()), true
 }
 
 // submitAgentForm runs the create/update API call asynchronously and

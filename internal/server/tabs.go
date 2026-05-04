@@ -117,6 +117,56 @@ func (s *server) openTab(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, stored)
 }
 
+// rebindTabConv creates a fresh conversation under the tab's agent
+// and points the tab at it. Used by the TUI's "Nueva conversación"
+// flow: the tab keeps its id (so other viewers don't see it churn),
+// but the underlying journal is replaced with an empty one. The old
+// conversation stays on disk under
+// ~/.sunny/agents/<slug>/conversations/<old_id>/ — only the tab's
+// pointer changes.
+//
+// Path: POST /tabs/{id}/conversation
+func (s *server) rebindTabConv(w http.ResponseWriter, r *http.Request) {
+	if s.tabs == nil {
+		http.Error(w, "tabs not configured", http.StatusServiceUnavailable)
+		return
+	}
+	id := r.PathValue("id")
+	existing, err := s.tabs.Get(id)
+	if err != nil {
+		if errors.Is(err, tabs.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a, ok := s.store.Agent(existing.AgentSlug)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	meta, err := s.conv.Create(existing.AgentSlug, existing.Title, a.Config.Model)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publish(evts.ConvCreated, existing.AgentSlug, meta.ID)
+	updated, err := s.tabs.Update(id, func(t *tabs.Tab) {
+		t.ConvID = meta.ID
+	})
+	if err != nil {
+		if errors.Is(err, tabs.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publishTab(evts.TabUpdated, updated)
+	writeJSON(w, http.StatusOK, updated)
+}
+
 // closeTab removes a tab from the daemon. The underlying
 // conversation is NOT deleted — the tab is just a "this is open in
 // the UI" pointer. Idempotent.

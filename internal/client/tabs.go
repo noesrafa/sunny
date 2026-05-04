@@ -79,6 +79,31 @@ func (c *Client) OpenTab(ctx context.Context, body OpenTabRequest) (*Tab, error)
 	return &out, nil
 }
 
+// RebindTabConv asks the daemon to spawn a fresh conversation under
+// the tab's agent and rebind the tab at it. The tab id stays stable;
+// only the conv_id changes. Returns the updated tab. Used by the
+// TUI's "Nueva conversación" flow.
+func (c *Client) RebindTabConv(ctx context.Context, tabID string) (*Tab, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/tabs/"+tabID+"/conversation", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFromBody("POST /tabs/"+tabID+"/conversation", resp)
+	}
+	var out Tab
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CloseTab removes a tab from the daemon. Idempotent — closing a
 // missing tab returns nil. Does NOT delete the underlying
 // conversation; the journal stays under

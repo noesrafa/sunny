@@ -60,6 +60,26 @@ func TestUpdate(t *testing.T) {
 	}
 }
 
+func TestGet(t *testing.T) {
+	s, _ := Load(t.TempDir())
+	a, _ := s.Add(&Tab{AgentSlug: "x", ConvID: "c1", Title: "hi"})
+	got, err := s.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != a.ID || got.AgentSlug != "x" || got.ConvID != "c1" {
+		t.Fatalf("Get returned wrong tab: %+v", got)
+	}
+	got.Title = "mutated"
+	tabs := s.List()
+	if tabs[0].Title != "hi" {
+		t.Fatal("Get returned a live pointer; should return a copy")
+	}
+	if _, err := s.Get("tab_missing"); err != ErrNotFound {
+		t.Fatalf("Get missing: got %v, want ErrNotFound", err)
+	}
+}
+
 func TestLoadCorruptFileStartsFresh(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "tabs.json"), []byte("not json"), 0o644); err != nil {

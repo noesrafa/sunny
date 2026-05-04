@@ -44,26 +44,32 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.handleCloseTab()
 		return m, nil, true
 	case ConfirmNewConvMsg:
-		// "Reset chat" used to spawn a fresh claude subprocess. Now the
-		// engine owns the conversation lifecycle, so we just clear local
-		// items + the conv binding and let the next send create a new one.
+		// Rebind the tab to a fresh conversation on the daemon —
+		// the daemon owns "what conv this tab points at", so the
+		// TUI does not mutate ConvID locally. RebindConv handles
+		// cancelling the old watch and starting a new one against
+		// the fresh conv id; we re-arm waitForJournalEvent on the
+		// new channel so events keep flowing.
 		m.overlay.CloseTop()
 		cur := m.manager.Current()
 		if cur == nil {
 			return m, nil, true
 		}
-		cur.Items = nil
-		cur.State = session.StateIdle
-		cur.LastErr = nil
-		cur.ConvID = ""
-		cur.Turns = 0
-		cur.TotalCost = 0
+		if err := cur.RebindConv(m.ctx); err != nil {
+			cur.LastErr = err
+			cur.State = session.StateError
+			m.logger.Error("rebind conv failed", "err", err, "session", cur.ID)
+			m.layout()
+			m.refreshViewport()
+			return m, nil, true
+		}
 		m.textarea.Reset()
+		cur.Draft = ""
 		m.layout()
 		m.refreshViewport()
 		m.chat.ScrollToBottom()
 		m.saveState()
-		return m, nil, true
+		return m, waitForJournalEvent(cur.ID, cur.WatchEvents()), true
 	case CreateSessionMsg:
 		return m.createSession(v)
 	case RenameSessionMsg:
@@ -331,6 +337,12 @@ func (m *Model) handleJournalEvent(msg journalEventMsg) tea.Cmd {
 	if sess == nil {
 		return nil
 	}
+	// Stale event from an old watch (rotated out by RebindConv).
+	// Drop it; a fresh waitForJournalEvent is already armed against
+	// the session's current channel.
+	if msg.Ch != sess.WatchEvents() {
+		return nil
+	}
 	terminal := sess.ApplyJournalEvent(msg.Event)
 	if sess.Host() == m.activePeer {
 		if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
@@ -358,6 +370,11 @@ func (m *Model) handleJournalEvent(msg journalEventMsg) tea.Cmd {
 func (m *Model) handleJournalWatchClosed(msg journalWatchClosedMsg) {
 	sess := m.findSession(msg.SessionID)
 	if sess == nil {
+		return
+	}
+	// Old watch closing after a RebindConv rotation — the new watch
+	// is live, leave the session alone.
+	if msg.Ch != sess.WatchEvents() {
 		return
 	}
 	if sess.State == session.StateThinking {

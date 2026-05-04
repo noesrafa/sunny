@@ -205,6 +205,16 @@ func update(args []string) error {
 	if *noRestart {
 		return nil
 	}
+	// Under sudo the auto-restart would spawn a new daemon as root
+	// — which collides with the user's existing daemon and looks
+	// at /root/.sunny instead of the real home. Skip and tell the
+	// user to restart themselves.
+	if os.Getenv("SUDO_USER") != "" {
+		fmt.Println()
+		fmt.Println("running under sudo — daemon NOT auto-restarted to avoid spawning a root-owned daemon.")
+		fmt.Println("run as your normal user:  sunny restart")
+		return nil
+	}
 	fmt.Println()
 	return restart(nil)
 }
@@ -279,11 +289,17 @@ func updateViaRelease() error {
 	dir := filepath.Dir(cur)
 	tmpPath := filepath.Join(dir, ".sunny.update.tmp")
 	if err := os.WriteFile(tmpPath, binData, 0o755); err != nil {
-		return fmt.Errorf("write new binary to %s: %w (try sudo if permission denied)", tmpPath, err)
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("can't write to %s without root — re-run as: sudo sunny update", dir)
+		}
+		return fmt.Errorf("write new binary to %s: %w", tmpPath, err)
 	}
 	if err := os.Rename(tmpPath, cur); err != nil {
 		_ = os.Remove(tmpPath)
-		return fmt.Errorf("install new binary at %s: %w (try sudo if permission denied)", cur, err)
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf("can't replace %s without root — re-run as: sudo sunny update", cur)
+		}
+		return fmt.Errorf("install new binary at %s: %w", cur, err)
 	}
 	fmt.Printf("installed %s at %s\n", rel.TagName, cur)
 	return nil

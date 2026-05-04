@@ -150,6 +150,63 @@ func stop(args []string) error {
 	return nil
 }
 
+// restart stops the running daemon (if any) and starts a fresh one
+// on the same address. The default --addr matches whatever the
+// running daemon is bound to, so a bare `sunny restart` is the
+// idiomatic "I just upgraded the binary, swap the daemon" command.
+func restart(args []string) error {
+	fs := flag.NewFlagSet("restart", flag.ExitOnError)
+	addr := fs.String("addr", "", "HTTP listen address (defaults to the running daemon's addr, or 127.0.0.1:7777)")
+	root := fs.String("root", defaultRoot(), "sunny runtime directory")
+	timeout := fs.Duration("timeout", 5*time.Second, "graceful shutdown wait before SIGKILL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	paths := lifecycle.PathsFor(*root)
+
+	// Inherit the running daemon's addr by default. Falling back to
+	// the documented default keeps `sunny restart` working on a
+	// fresh install where no daemon is up yet.
+	resolvedAddr := *addr
+	if state, err := paths.LoadState(); err == nil {
+		if resolvedAddr == "" {
+			resolvedAddr = state.Addr
+		}
+		if lifecycle.IsAlive(state.PID) {
+			proc, err := os.FindProcess(state.PID)
+			if err != nil {
+				return err
+			}
+			if err := proc.Signal(syscall.SIGTERM); err != nil {
+				return fmt.Errorf("signal: %w", err)
+			}
+			deadline := time.Now().Add(*timeout)
+			for time.Now().Before(deadline) {
+				if !lifecycle.IsAlive(state.PID) {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			if lifecycle.IsAlive(state.PID) {
+				_ = proc.Signal(syscall.SIGKILL)
+				fmt.Printf("stopped  pid=%d  (SIGKILL after %s)\n", state.PID, *timeout)
+			} else {
+				fmt.Printf("stopped  pid=%d\n", state.PID)
+			}
+		}
+		_ = paths.ClearState()
+	}
+
+	if resolvedAddr == "" {
+		resolvedAddr = "127.0.0.1:7777"
+	}
+	if _, err := startDaemon(resolvedAddr, *root, false); err != nil {
+		return err
+	}
+	return nil
+}
+
 func status(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "sunny runtime directory")

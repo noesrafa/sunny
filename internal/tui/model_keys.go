@@ -37,6 +37,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, m.overlay.Open(NewSettingsDialog(m.themeID, m.bgIsLight, m.styles)), true
 	case key.Matches(msg, m.keymap.Runs):
 		return m, m.overlay.Open(NewRunManagerDialog(m.activePeer, m.runsForActivePeer(), m.styles)), true
+	case key.Matches(msg, m.keymap.Monitors):
+		return m, m.overlay.Open(NewMonitorManagerDialog(m.activePeer, m.allMonitorsForActivePeer(), m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
 		curAgent := m.defaultAgent
 		if cur := m.manager.Current(); cur != nil && cur.AgentSlug() != "" {

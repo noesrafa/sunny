@@ -28,7 +28,7 @@ type PeerStatus struct {
 	HasActivity bool // dot ON when a non-active peer pinged us recently
 }
 
-func renderSidebar(mgr *session.Manager, peers []PeerStatus, runs []client.Run, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
+func renderSidebar(mgr *session.Manager, peers []PeerStatus, runs []client.Run, monitors []client.Monitor, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s, logoFrame), ""}
@@ -39,6 +39,8 @@ func renderSidebar(mgr *session.Manager, peers []PeerStatus, runs []client.Run, 
 	rows = append(rows, renderSessionsSection(mgr, innerW, s)...)
 	rows = append(rows, "")
 	rows = append(rows, renderRunsSection(runs, innerW, s)...)
+	rows = append(rows, "")
+	rows = append(rows, renderMonitorsSection(monitors, innerW, s)...)
 	if section := renderUsageSection(mgr, sys, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
@@ -123,6 +125,38 @@ func renderRunsSection(runs []client.Run, innerW int, s Styles) []string {
 		rows = append(rows, renderRunsRow(r, innerW, s))
 	}
 	return rows
+}
+
+// renderMonitorsSection draws the active-peer's enabled monitors.
+// Disabled ones don't appear here — the manager dialog (Ctrl+B)
+// shows the full set.
+func renderMonitorsSection(mons []client.Monitor, innerW int, s Styles) []string {
+	rows := sectionHeader("monitors", innerW, s)
+	if len(mons) == 0 {
+		return append(rows, s.Hint.Render("(ninguno — ctrl+b)"))
+	}
+	for _, mon := range mons {
+		rows = append(rows, renderMonitorsRow(mon, innerW, s))
+	}
+	return rows
+}
+
+func renderMonitorsRow(mon client.Monitor, innerW int, s Styles) string {
+	var pill string
+	switch {
+	case mon.LastErr != "":
+		pill = lipgloss.NewStyle().Foreground(colDanger).Bold(true).Render("✗")
+	case mon.Running:
+		pill = lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("●")
+	default:
+		pill = s.Hint.Render("○")
+	}
+	maxName := innerW - 4
+	name := mon.Name
+	if maxName > 0 && len(name) > maxName {
+		name = name[:maxName-1] + "…"
+	}
+	return pill + " " + s.AssistantText.Render(name)
 }
 
 func renderRunsRow(r client.Run, innerW int, s Styles) string {

@@ -186,6 +186,10 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			// the open dialog (if any) so the manager / form / logs
 			// view refreshes in lockstep.
 			return m, tea.Batch(next, m.fetchRunsCmd(v.Event.Host)), true
+		case "monitor.toggled", "monitor.fired", "monitor.error":
+			// Monitor state change → refresh that peer's list so the
+			// sidebar pill + manager dialog update.
+			return m, tea.Batch(next, m.fetchMonitorsCmd(v.Event.Host)), true
 		}
 		return m, next, true
 	case tabsRefreshedMsg:
@@ -271,6 +275,44 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, m.runActionCmd(m.activePeer, v.ID, "stop"), true
 	case RestartRunMsg:
 		return m, m.runActionCmd(m.activePeer, v.ID, "restart"), true
+
+	// --- monitors ---
+	case monitorsLoadedMsg:
+		// Refresh trigger: caller passes Host with no Monitors/Err so
+		// we re-fetch fresh. Same pattern as runsLoadedMsg.
+		if v.Err == nil && v.Monitors == nil {
+			return m, m.fetchMonitorsCmd(v.Host), true
+		}
+		m.applyMonitorsLoaded(v)
+		if m.overlay.HasOpen() {
+			return m, m.overlay.UpdateTop(v), true
+		}
+		return m, nil, true
+	case monitorActionFailedMsg:
+		m.logger.Warn("monitor action failed", "peer", v.Host, "name", v.Name, "action", v.Action, "err", v.Err)
+		if m.overlay.HasOpen() {
+			return m, m.overlay.UpdateTop(v), true
+		}
+		return m, nil, true
+	case monitorHistoryLoadedMsg:
+		if m.overlay.HasOpen() {
+			return m, m.overlay.UpdateTop(v), true
+		}
+		return m, nil, true
+	case OpenMonitorsMsg:
+		return m, m.overlay.Open(NewMonitorManagerDialog(m.activePeer, m.allMonitorsForActivePeer(), m.styles)), true
+	case OpenMonitorHistoryMsg:
+		host, name := m.activePeer, v.Name
+		// Replace the manager with the history viewer so esc returns
+		// straight to chat. The viewer fires its own load command.
+		m.overlay.CloseTop()
+		dialog := NewMonitorHistoryDialog(host, name, m.styles)
+		return m, tea.Batch(
+			m.overlay.Open(dialog),
+			m.fetchMonitorHistoryCmd(host, name, 100),
+		), true
+	case ToggleMonitorMsg:
+		return m, m.toggleMonitorCmd(m.activePeer, v.Name, v.Enabled), true
 	case busEventClosedMsg:
 		// Multiplexer terminated (ctx cancelled, peers gone). Stop
 		// re-arming; future versions can show a "real-time sync

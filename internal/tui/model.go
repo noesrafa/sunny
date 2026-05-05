@@ -48,6 +48,9 @@ type Model struct {
 	// Populated at boot and refreshed on run.* bus events. Sidebar
 	// reads peerRuns[activePeer] to render the always-on runs strip.
 	peerRuns map[string]*peerRunsState
+	// peerMonitors[name] is the per-peer list of monitors. Same
+	// shape as peerRuns; sidebar shows only enabled monitors.
+	peerMonitors map[string]*peerMonitorsState
 
 	client       *client.Client     // local daemon client; CRUD ops still go here
 	fed          *client.Federation // peer roster — chat routing flows through For(host)
@@ -300,6 +303,7 @@ func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, pee
 		activePeer:    activePeer,
 		peerActivity:  map[string]time.Time{},
 		peerRuns:      map[string]*peerRunsState{},
+		peerMonitors:  map[string]*peerMonitorsState{},
 		client:        cli,
 		fed:           fed,
 		busEvents:     busCh,
@@ -322,6 +326,13 @@ func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, pee
 // every render; the manager dialog reads it at open time.
 type peerRunsState struct {
 	list    []client.Run
+	loading bool
+	err     string
+}
+
+// peerMonitorsState mirrors peerRunsState for the monitors list.
+type peerMonitorsState struct {
+	list    []client.Monitor
 	loading bool
 	err     string
 }
@@ -354,6 +365,53 @@ func (m Model) fetchRunsCmd(host string) tea.Cmd {
 // renders an empty section in that case).
 func (m *Model) runsForActivePeer() []client.Run {
 	st, ok := m.peerRuns[m.activePeer]
+	if !ok {
+		return nil
+	}
+	return st.list
+}
+
+// fetchMonitorsCmd kicks off an async GET /monitors against host's
+// client. The response lands as monitorsLoadedMsg. Same value-
+// receiver pattern as fetchRunsCmd so it's safe to call from Init.
+func (m Model) fetchMonitorsCmd(host string) tea.Cmd {
+	if m.fed == nil {
+		return nil
+	}
+	c := m.fed.For(host)
+	if c == nil {
+		return nil
+	}
+	ctx := m.ctx
+	return func() tea.Msg {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		mons, err := c.ListMonitors(cctx)
+		return monitorsLoadedMsg{Host: host, Monitors: mons, Err: err}
+	}
+}
+
+// monitorsForActivePeer returns the monitors visible in the
+// sidebar (enabled only — disabled live in the manager dialog
+// when the user opens it).
+func (m *Model) monitorsForActivePeer() []client.Monitor {
+	st, ok := m.peerMonitors[m.activePeer]
+	if !ok {
+		return nil
+	}
+	out := make([]client.Monitor, 0, len(st.list))
+	for _, mon := range st.list {
+		if mon.Enabled {
+			out = append(out, mon)
+		}
+	}
+	return out
+}
+
+// allMonitorsForActivePeer returns every monitor (enabled +
+// disabled) for the manager dialog.
+func (m *Model) allMonitorsForActivePeer() []client.Monitor {
+	st, ok := m.peerMonitors[m.activePeer]
 	if !ok {
 		return nil
 	}
@@ -486,6 +544,9 @@ func (m Model) Init() tea.Cmd {
 	// discovery get their first fetch from peerSyncTick.
 	for _, host := range m.peerOrder {
 		if cmd := m.fetchRunsCmd(host); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if cmd := m.fetchMonitorsCmd(host); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}

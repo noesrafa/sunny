@@ -119,3 +119,28 @@ type runActionFailedMsg struct {
 	Action string
 	Err    error
 }
+
+// monitorsLoadedMsg carries one peer's GET /monitors response.
+// Triggered at startup, on monitor.* bus events, and after a
+// toggle action.
+type monitorsLoadedMsg struct {
+	Host     string
+	Monitors []client.Monitor
+	Err      error
+}
+
+// monitorActionFailedMsg surfaces a failed toggle/history-fetch.
+type monitorActionFailedMsg struct {
+	Host    string
+	Name    string
+	Action  string
+	Err     error
+}
+
+// monitorHistoryLoadedMsg carries the result of GET /monitors/{name}/history.
+type monitorHistoryLoadedMsg struct {
+	Host    string
+	Name    string
+	Entries []client.MonitorHistoryEntry
+	Err     error
+}

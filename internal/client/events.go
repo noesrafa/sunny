@@ -15,12 +15,13 @@ import (
 // from Event in this package to avoid colliding with the chat
 // stream's Event interface.
 type BusEvent struct {
-	Type     string `json:"type"`
-	Slug     string `json:"slug,omitempty"`
-	ConvID   string `json:"conv_id,omitempty"`
-	TabID    string `json:"tab_id,omitempty"`
-	RunID    string `json:"run_id,omitempty"`
-	Provider string `json:"provider,omitempty"`
+	Type        string `json:"type"`
+	Slug        string `json:"slug,omitempty"`
+	ConvID      string `json:"conv_id,omitempty"`
+	TabID       string `json:"tab_id,omitempty"`
+	RunID       string `json:"run_id,omitempty"`
+	MonitorName string `json:"monitor_name,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 }
 
 // SubscribeEvents opens a Server-Sent-Events connection to GET

@@ -151,6 +151,16 @@ type RestartRunMsg struct{ ID string }
 // for grep continuity but unused; new code uses OpenRunFormMsg.
 type OpenRunEditMsg struct{}
 
+// Monitor management messages — emitted by the manager dialog,
+// handled at the root model. Targets the active peer; agents own
+// the YAML files (no create/edit/delete dialogs).
+type OpenMonitorsMsg struct{}
+type OpenMonitorHistoryMsg struct{ Name string }
+type ToggleMonitorMsg struct {
+	Name    string
+	Enabled bool
+}
+
 // Terminal-pane messages — flow from the new-pane dialog to the root model.
 type CreatePaneMsg struct{ Name, Command, Cwd string }
 type ClosePaneMsg struct{ ID string }

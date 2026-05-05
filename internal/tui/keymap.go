@@ -14,7 +14,8 @@ type KeyMap struct {
 	Rename        key.Binding // ctrl+r — rename the active session
 	NewConv       key.Binding // ctrl+l — fresh claude conversation in the same session/cwd
 	Diff          key.Binding // ctrl+d — open the git diff viewer
-	Runs          key.Binding // open the runs manager modal
+	Runs          key.Binding // ctrl+u — open the runs manager modal
+	Monitors      key.Binding // ctrl+b — open the monitors manager modal
 	TilePicker    key.Binding // ctrl+k — searchable tab switcher
 	Agents        key.Binding // ctrl+a — agent picker / manager
 	Secrets       key.Binding // ctrl+y — secrets manager (api keys)
@@ -45,6 +46,10 @@ func DefaultKeyMap() KeyMap {
 		NewConv:       key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "reset chat")),
 		Diff:          key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diff")),
 		Runs:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "runs")),
+		// Ctrl+B for monitors — Ctrl+M would collide with Enter on
+		// terminals without the kitty keyboard protocol (CR sends
+		// the same byte as Ctrl+M).
+		Monitors:      key.NewBinding(key.WithKeys("ctrl+b"), key.WithHelp("ctrl+b", "monitors")),
 		TilePicker:    key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "switch tab")),
 		Agents:        key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "agents")),
 		Secrets:       key.NewBinding(key.WithKeys("ctrl+y"), key.WithHelp("ctrl+y", "secrets")),

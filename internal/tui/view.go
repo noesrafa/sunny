@@ -118,7 +118,7 @@ func (m Model) renderBody() string {
 		bodyH = 6
 	}
 	main := m.renderMain(bodyH)
-	sidebar := renderSidebar(m.manager, m.peerStatuses(), m.runsForActivePeer(), bodyH, m.styles, m.logoFrame, m.sysStats)
+	sidebar := renderSidebar(m.manager, m.peerStatuses(), m.runsForActivePeer(), m.monitorsForActivePeer(), bodyH, m.styles, m.logoFrame, m.sysStats)
 	// 3-col gap between main and sidebar — Crush-style breathing room, no
 	// vertical divider line. Sidebar sits on the RIGHT (Rafael's preference,
 	// keeps the chat anchored to the left edge where the eye lands first).

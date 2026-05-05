@@ -379,10 +379,55 @@ const skillKnowledgeRules = "SKILL.md is YAML frontmatter (`name`, `description`
 	"`knowledge/` plus an `INDEX.md` whose body opens with one line\n" +
 	"describing what lives there."
 
+// monitorsPrimer teaches the agent the monitor YAML schema, where
+// the daemon-side scheduler picks them up, and the v1 source/action
+// types. The agent creates monitors with its own write/edit tools;
+// the TUI is read-only with an enable/disable toggle.
+const monitorsPrimer = "Monitors are YAML files the daemon's scheduler picks up\n" +
+	"automatically — write or edit them like any other file. The\n" +
+	"watchdog scans this directory every few seconds; rule edits to\n" +
+	"an enabled monitor apply on its next tick without a restart.\n" +
+	"\n" +
+	"File shape (one per `.yaml`, the file's basename is the monitor\n" +
+	"name when `name` is omitted):\n" +
+	"\n" +
+	"```yaml\n" +
+	"name: example\n" +
+	"enabled: true            # toggle off → scheduler stops it on next scan\n" +
+	"interval: 30s            # 1s, 5m, 1h — Go duration\n" +
+	"source:\n" +
+	"  type: shell            # v1: only `shell`\n" +
+	"  command: |             # must print a JSON array of objects to stdout\n" +
+	"    curl -s https://api.example.com/items\n" +
+	"rules:\n" +
+	"  - name: react-on-error\n" +
+	"    when:\n" +
+	"      text_matches: \"error\"   # regex on item.text; also `all`/`any` composers\n" +
+	"    then:\n" +
+	"      - dispatch:                # v1: only `dispatch`\n" +
+	"          agent: sunny           # any agent slug — runs a one-shot turn\n" +
+	"          prompt: \"Issue: ${item.text}\"\n" +
+	"```\n" +
+	"\n" +
+	"Each item the source produces should have an `id` field for\n" +
+	"deduplication (the same id won't fire rules twice across ticks).\n" +
+	"Variable substitution: `${item.<field>}` resolves to that field\n" +
+	"of the matched item; `${dispatch.result}` is the model's\n" +
+	"response from a previous `dispatch` action in the same rule\n" +
+	"(handy for chaining: dispatch → reply with the result)."
+
 // buildRuntimeContext stitches the meta-prompt together for one
 // agent: header + safety rules + the agent's own skills/knowledge
-// paths + the categorization/priority rules.
+// paths + monitors path + the categorization/priority rules.
 func buildRuntimeContext(a *store.Agent) string {
+	// monitors live alongside agents/ under the daemon root; derive
+	// the path from a.Dir so we don't need to thread the root.
+	root := a.Dir
+	if i := strings.LastIndex(root, "/agents/"); i >= 0 {
+		root = root[:i]
+	}
+	monitorsDir := root + "/monitors"
+
 	return runtimeContextHeader + "\n" +
 		"\n" +
 		"## Skills & knowledge\n" +
@@ -393,7 +438,15 @@ func buildRuntimeContext(a *store.Agent) string {
 		"- Skills:    `" + a.Dir + "/skills/<category>/<name>/SKILL.md`\n" +
 		"- Knowledge: `" + a.Dir + "/knowledge/<category>/<file>.md`\n" +
 		"\n" +
-		skillKnowledgeRules
+		skillKnowledgeRules + "\n" +
+		"\n" +
+		"## Monitors\n" +
+		"\n" +
+		"Monitors live at `" + monitorsDir + "/<name>.yaml`. Each is a\n" +
+		"polling rule chain (interval + source + rules) the daemon\n" +
+		"runs in the background.\n" +
+		"\n" +
+		monitorsPrimer
 }
 
 // shouldInjectRuntimeContext is the gate. Off when the agent opted

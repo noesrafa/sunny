@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
+	"github.com/noesrafa/sunny/internal/monitors"
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
@@ -107,6 +109,44 @@ func serve(args []string) error {
 	hub := events.New(log)
 	runtime := runs.New(runsStore, hub, log, *root+"/runs")
 
+	// Monitors scheduler. Wired here (not inside server.New) so the
+	// dispatch action can close over the engine atomic — the
+	// monitors package itself stays free of engine/store imports.
+	monReg := monitors.NewRegistry()
+	monReg.RegisterSource(monitors.ShellSource{})
+	monReg.RegisterAction(monitors.NewDispatchAction(func(ctx context.Context, slug, prompt string) (string, error) {
+		eng := enginePtr.Load()
+		if eng == nil {
+			return "", fmt.Errorf("dispatch: no engine configured")
+		}
+		ag, ok := st.Agent(slug)
+		if !ok {
+			return "", fmt.Errorf("dispatch: agent %q not found", slug)
+		}
+		msgs := []provider.Message{{Role: "user", Content: prompt}}
+		evCh, err := eng.Turn(ctx, ag, msgs, engine.TurnOptions{})
+		if err != nil {
+			return "", err
+		}
+		var sb strings.Builder
+		for ev := range evCh {
+			switch v := ev.(type) {
+			case provider.TextDelta:
+				sb.WriteString(v.Text)
+			case provider.Error:
+				return sb.String(), v.Err
+			case provider.Done:
+				return sb.String(), nil
+			}
+		}
+		return sb.String(), nil
+	}))
+	monitorsDir := filepath.Join(*root, "monitors")
+	if err := os.MkdirAll(monitorsDir, 0o755); err != nil {
+		log.Warn("monitors dir", "err", err)
+	}
+	scheduler := monitors.New(monitorsDir, monReg, hub, log)
+
 	// Mesh key: load if present, generate-and-save if absent so a
 	// fresh install is mesh-ready by default. Failure to write is
 	// non-fatal — daemon still serves bearer-only.
@@ -132,6 +172,7 @@ func serve(args []string) error {
 			Tabs:             tabsStore,
 			Runs:             runsStore,
 			Runtime:          runtime,
+			Scheduler:        scheduler,
 			Secrets:          secretsStore,
 			Engine:           &enginePtr,
 			Log:              log,
@@ -187,6 +228,8 @@ func serve(args []string) error {
 		}()
 	}
 
+	scheduler.Start(ctx)
+
 	select {
 	case err := <-errCh:
 		return err
@@ -201,6 +244,7 @@ func serve(args []string) error {
 		// StopAll fires the same SIGTERM redundantly.
 		shutdownErr := srv.Shutdown(shutdownCtx)
 		runtime.StopAll(shutdownCtx)
+		scheduler.Stop()
 		return shutdownErr
 	}
 }

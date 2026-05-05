@@ -55,19 +55,27 @@ const (
 	RunStarted Type = "run.started"
 	RunStopped Type = "run.stopped"
 	RunExited  Type = "run.exited"
+	// Monitor lifecycle. Toggled fires on enable/disable; fired
+	// fires every time a rule matches and runs its actions.
+	// Subscribers refresh the sidebar on toggle and the history
+	// viewer on fire.
+	MonitorToggled Type = "monitor.toggled"
+	MonitorFired   Type = "monitor.fired"
+	MonitorError   Type = "monitor.error"
 )
 
-// Event is one bus message. Slug + ConvID + TabID + RunID + Provider
-// are union-typed per Type — empty when not applicable. We
-// deliberately avoid an `any` payload field so the wire shape stays
-// predictable.
+// Event is one bus message. Slug + ConvID + TabID + RunID +
+// MonitorName + Provider are union-typed per Type — empty when not
+// applicable. We deliberately avoid an `any` payload field so the
+// wire shape stays predictable.
 type Event struct {
-	Type     Type   `json:"type"`
-	Slug     string `json:"slug,omitempty"`
-	ConvID   string `json:"conv_id,omitempty"`
-	TabID    string `json:"tab_id,omitempty"`
-	RunID    string `json:"run_id,omitempty"`
-	Provider string `json:"provider,omitempty"`
+	Type        Type   `json:"type"`
+	Slug        string `json:"slug,omitempty"`
+	ConvID      string `json:"conv_id,omitempty"`
+	TabID       string `json:"tab_id,omitempty"`
+	RunID       string `json:"run_id,omitempty"`
+	MonitorName string `json:"monitor_name,omitempty"`
+	Provider    string `json:"provider,omitempty"`
 }
 
 // Hub is the singleton bus. The daemon constructs one in serve.go

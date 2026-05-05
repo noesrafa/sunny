@@ -19,6 +19,7 @@ import (
 	"github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
+	"github.com/noesrafa/sunny/internal/monitors"
 	"github.com/noesrafa/sunny/internal/runs"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/skill"
@@ -50,7 +51,11 @@ type Options struct {
 	// optional — if nil the /runs routes return 503.
 	Runs    *runs.Store
 	Runtime *runs.Runtime
-	Secrets *secrets.Store
+	// Scheduler runs agent-authored monitor YAML files at their
+	// configured intervals. Optional — if nil, /monitors routes
+	// return 503.
+	Scheduler *monitors.Scheduler
+	Secrets   *secrets.Store
 	Engine  *atomic.Pointer[engine.Engine]
 	Log     *slog.Logger
 	// Token is the bearer credential clients must send. Empty disables
@@ -114,6 +119,7 @@ func New(opts Options) http.Handler {
 		tabs:          opts.Tabs,
 		runs:          opts.Runs,
 		runtime:       opts.Runtime,
+		scheduler:     opts.Scheduler,
 		secrets:       opts.Secrets,
 		engine:        opts.Engine,
 		log:           opts.Log,
@@ -176,6 +182,9 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("POST /runs/{id}/restart", srv.restartRun)
 	mux.HandleFunc("GET /runs/{id}/logs", srv.getRunLogs)
 	mux.HandleFunc("GET /runs/{id}/logs/watch", srv.watchRunLogs)
+	mux.HandleFunc("GET /monitors", srv.listMonitors)
+	mux.HandleFunc("PATCH /monitors/{name}", srv.patchMonitor)
+	mux.HandleFunc("GET /monitors/{name}/history", srv.getMonitorHistory)
 	mux.HandleFunc("GET /stats", srv.stats)
 
 	// Compose middleware:
@@ -236,6 +245,7 @@ type server struct {
 	tabs          *tabs.Store
 	runs          *runs.Store
 	runtime       *runs.Runtime
+	scheduler     *monitors.Scheduler
 	secrets       *secrets.Store
 	engine        *atomic.Pointer[engine.Engine]
 	log           *slog.Logger

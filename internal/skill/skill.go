@@ -17,10 +17,14 @@ type Frontmatter struct {
 	AllowedTools []string `yaml:"allowed-tools,omitempty"`
 }
 
+// Skill is the in-memory handle for a single skill on disk. The
+// markdown body is intentionally NOT cached here — progressive
+// disclosure means callers load it on demand via LoadBody(s.Dir)
+// (or by viewing s.Dir/SKILL.md directly).
 type Skill struct {
-	Dir   string
-	Front Frontmatter
-	Body  string
+	Dir      string
+	Category string
+	Front    Frontmatter
 }
 
 func (s Skill) Validate() error {
@@ -39,7 +43,7 @@ func Load(dir string) (*Skill, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	front, body, err := splitFrontmatter(raw)
+	front, _, err := splitFrontmatter(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -47,11 +51,26 @@ func Load(dir string) (*Skill, error) {
 	if err := yaml.Unmarshal(front, &fm); err != nil {
 		return nil, fmt.Errorf("parse frontmatter %s: %w", path, err)
 	}
-	s := &Skill{Dir: dir, Front: fm, Body: body}
+	s := &Skill{Dir: dir, Front: fm}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return s, nil
+}
+
+// LoadBody returns just the markdown body of dir/SKILL.md (no
+// frontmatter). Used by callers that don't keep the body in memory.
+func LoadBody(dir string) (string, error) {
+	path := filepath.Join(dir, "SKILL.md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	_, body, err := splitFrontmatter(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	return body, nil
 }
 
 // splitFrontmatter expects the file to start with `---` on its own line,

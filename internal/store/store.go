@@ -30,11 +30,13 @@ var ErrNotFound = errors.New("agent not found")
 var ErrConflict = errors.New("agent already exists")
 
 type Agent struct {
-	Slug      string
-	Dir       string
-	Config    *agent.Config
-	Knowledge []KnowledgeFile
-	Skills    []*skill.Skill
+	Slug                string
+	Dir                 string
+	Config              *agent.Config
+	Knowledge           []KnowledgeFile
+	KnowledgeCategories []Category
+	Skills              []*skill.Skill
+	SkillCategories     []Category
 	// Prompt is the contents of prompt.md (the agent's persona). Loaded
 	// once at boot; CRUD keeps it in sync.
 	Prompt string
@@ -44,9 +46,18 @@ type Agent struct {
 	HasAvatar bool
 }
 
+// Category is a top-level subdirectory of skills/ or knowledge/.
+// Description is the first non-empty, non-heading line of an
+// optional INDEX.md inside the directory.
+type Category struct {
+	Name        string
+	Description string
+}
+
 type KnowledgeFile struct {
-	Name string // relative path under knowledge/
-	Path string // absolute path on disk
+	Name     string // relative path under knowledge/, e.g. "general/about.md"
+	Category string // top-level subdir name under knowledge/
+	Path     string // absolute path on disk
 }
 
 type Store struct {
@@ -234,11 +245,11 @@ func loadAgent(dir, slug string) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	knowledge, err := loadKnowledge(filepath.Join(dir, "knowledge"))
+	knowledge, knowCats, err := loadKnowledge(filepath.Join(dir, "knowledge"))
 	if err != nil {
 		return nil, err
 	}
-	skills, err := loadSkills(filepath.Join(dir, "skills"))
+	skills, skillCats, err := loadSkills(filepath.Join(dir, "skills"))
 	if err != nil {
 		return nil, err
 	}
@@ -247,13 +258,15 @@ func loadAgent(dir, slug string) (*Agent, error) {
 		return nil, err
 	}
 	return &Agent{
-		Slug:      slug,
-		Dir:       dir,
-		Config:    cfg,
-		Knowledge: knowledge,
-		Skills:    skills,
-		Prompt:    prompt,
-		HasAvatar: avatar.Path(dir) != "",
+		Slug:                slug,
+		Dir:                 dir,
+		Config:              cfg,
+		Knowledge:           knowledge,
+		KnowledgeCategories: knowCats,
+		Skills:              skills,
+		SkillCategories:     skillCats,
+		Prompt:              prompt,
+		HasAvatar:           avatar.Path(dir) != "",
 	}, nil
 }
 
@@ -266,6 +279,26 @@ func (s *Store) SetHasAvatar(slug string, has bool) {
 	if a, ok := s.agents[slug]; ok {
 		a.HasAvatar = has
 	}
+}
+
+// Reload re-reads slug's agent dir from disk and replaces the cached
+// *Agent. Called at turn boundaries so any skill or knowledge file
+// the agent itself wrote during a previous turn (via its provider's
+// write/edit tools) shows up in the next system prompt without a
+// full daemon restart. ErrNotFound when the slug isn't tracked.
+func (s *Store) Reload(slug string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.agents[slug]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNotFound, slug)
+	}
+	a, err := loadAgent(cur.Dir, slug)
+	if err != nil {
+		return err
+	}
+	s.agents[slug] = a
+	return nil
 }
 
 // loadPrompt reads prompt.md from the agent dir. Returns "" (not error)
@@ -281,52 +314,128 @@ func loadPrompt(dir string) (string, error) {
 	return string(data), nil
 }
 
-func loadKnowledge(dir string) ([]KnowledgeFile, error) {
+// loadKnowledge walks dir/<category>/**/*.md and returns the flat
+// file list plus the list of categories. Each top-level subdir of
+// dir is a category; its description (if any) comes from INDEX.md
+// inside it. INDEX.md files themselves are excluded from the file
+// list — they carry category metadata, not knowledge.
+func loadKnowledge(dir string) ([]KnowledgeFile, []Category, error) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return nil, nil
+		return nil, nil, nil
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var files []KnowledgeFile
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
-			return nil
-		}
-		rel, _ := filepath.Rel(dir, path)
-		files = append(files, KnowledgeFile{Name: filepath.ToSlash(rel), Path: path})
-		return nil
-	})
+	catEntries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-	return files, nil
-}
-
-func loadSkills(dir string) ([]*skill.Skill, error) {
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var skills []*skill.Skill
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+	var (
+		files []KnowledgeFile
+		cats  []Category
+	)
+	for _, ce := range catEntries {
+		if !ce.IsDir() || strings.HasPrefix(ce.Name(), ".") {
 			continue
 		}
-		sk, err := skill.Load(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return nil, err
+		catDir := filepath.Join(dir, ce.Name())
+		cats = append(cats, Category{
+			Name:        ce.Name(),
+			Description: readIndexDescription(catDir),
+		})
+		walkErr := filepath.WalkDir(catDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || strings.HasPrefix(d.Name(), ".") {
+				return nil
+			}
+			if d.Name() == "INDEX.md" {
+				return nil
+			}
+			rel, _ := filepath.Rel(dir, path)
+			files = append(files, KnowledgeFile{
+				Name:     filepath.ToSlash(rel),
+				Category: ce.Name(),
+				Path:     path,
+			})
+			return nil
+		})
+		if walkErr != nil {
+			return nil, nil, walkErr
 		}
-		skills = append(skills, sk)
 	}
-	sort.Slice(skills, func(i, j int) bool { return skills[i].Front.Name < skills[j].Front.Name })
-	return skills, nil
+	sort.Slice(cats, func(i, j int) bool { return cats[i].Name < cats[j].Name })
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	return files, cats, nil
+}
+
+// loadSkills walks dir/<category>/<name>/SKILL.md and returns the
+// flat skill list plus the list of categories. A skill is any
+// subdirectory of a category dir that contains SKILL.md.
+func loadSkills(dir string) ([]*skill.Skill, []Category, error) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return nil, nil, nil
+	} else if err != nil {
+		return nil, nil, err
+	}
+	catEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var (
+		skills []*skill.Skill
+		cats   []Category
+	)
+	for _, ce := range catEntries {
+		if !ce.IsDir() || strings.HasPrefix(ce.Name(), ".") {
+			continue
+		}
+		catDir := filepath.Join(dir, ce.Name())
+		cats = append(cats, Category{
+			Name:        ce.Name(),
+			Description: readIndexDescription(catDir),
+		})
+		skillEntries, err := os.ReadDir(catDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, se := range skillEntries {
+			if !se.IsDir() || strings.HasPrefix(se.Name(), ".") {
+				continue
+			}
+			sk, err := skill.Load(filepath.Join(catDir, se.Name()))
+			if err != nil {
+				return nil, nil, err
+			}
+			sk.Category = ce.Name()
+			skills = append(skills, sk)
+		}
+	}
+	sort.Slice(cats, func(i, j int) bool { return cats[i].Name < cats[j].Name })
+	sort.Slice(skills, func(i, j int) bool {
+		if skills[i].Category != skills[j].Category {
+			return skills[i].Category < skills[j].Category
+		}
+		return skills[i].Front.Name < skills[j].Front.Name
+	})
+	return skills, cats, nil
+}
+
+// readIndexDescription returns the first non-empty, non-heading line
+// of INDEX.md in dir, or "" if INDEX.md is missing or has no body.
+// Used as the one-liner shown to agents so they can pick the right
+// category when creating new skills/knowledge.
+func readIndexDescription(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, "INDEX.md"))
+	if err != nil {
+		return ""
+	}
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line
+	}
+	return ""
 }

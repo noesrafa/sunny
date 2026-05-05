@@ -26,6 +26,7 @@ import (
 
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/opencode"
+	"github.com/noesrafa/sunny/internal/skill"
 	"github.com/noesrafa/sunny/internal/store"
 	"github.com/noesrafa/sunny/internal/tools"
 )
@@ -337,13 +338,10 @@ func (e *Engine) HasProviders() bool {
 	return e != nil && len(e.providers) > 0
 }
 
-// runtimeContext is the sunny-aware preamble we prepend to every
-// agent's system prompt unless explicitly opted out. The intent is
-// purely defensive: tell the agent it's running inside sunny so it
-// doesn't suggest commands that would terminate its own session
-// (`sunny stop` and friends), and orient it toward the daemon's
-// data layout in case a question lands here that needs that context.
-const runtimeContext = `# Runtime context (injected by sunny)
+// runtimeContextHeader is the agent-independent part of the sunny
+// meta-prompt: tells the model it's running inside sunny and lists
+// the safety constraints (commands that would kill the daemon).
+const runtimeContextHeader = `# Runtime context (injected by sunny)
 
 You are running inside sunny (https://github.com/noesrafa/sunny), a
 local daemon at http://localhost:7777 that orchestrates AI agents.
@@ -360,6 +358,44 @@ local daemon at http://localhost:7777 that orchestrates AI agents.
 - The user can talk to other sunny daemons across their tailscale
   network; if they say "in the vps" they may mean a remote daemon.`
 
+// skillKnowledgeRules is the static guidance about how skills and
+// knowledge are organized on disk: format, priority over
+// environment skills, and the categorization rule for new entries.
+// Paired with a path block built from the agent's Dir so the model
+// has absolute paths to work with.
+const skillKnowledgeRules = "SKILL.md is YAML frontmatter (`name`, `description`, optional\n" +
+	"`allowed-tools`) followed by a markdown body. Knowledge files\n" +
+	"are plain markdown (`.md`).\n" +
+	"\n" +
+	"**Prefer your own skills** over any skills your provider exposes\n" +
+	"(claude-code's, opencode's, or others) — yours are curated for\n" +
+	"this agent. Read SKILL.md files with the view tool. Do NOT call\n" +
+	"any Skill or load_skill tool with these names — they are not in\n" +
+	"any external registry.\n" +
+	"\n" +
+	"When you create a new skill or knowledge file, **place it under\n" +
+	"the category that best fits**. If no existing category fits,\n" +
+	"create a new one: a fresh subdirectory under `skills/` or\n" +
+	"`knowledge/` plus an `INDEX.md` whose body opens with one line\n" +
+	"describing what lives there."
+
+// buildRuntimeContext stitches the meta-prompt together for one
+// agent: header + safety rules + the agent's own skills/knowledge
+// paths + the categorization/priority rules.
+func buildRuntimeContext(a *store.Agent) string {
+	return runtimeContextHeader + "\n" +
+		"\n" +
+		"## Skills & knowledge\n" +
+		"\n" +
+		"Your skills and knowledge are markdown files on disk,\n" +
+		"organized by category subdirectory:\n" +
+		"\n" +
+		"- Skills:    `" + a.Dir + "/skills/<category>/<name>/SKILL.md`\n" +
+		"- Knowledge: `" + a.Dir + "/knowledge/<category>/<file>.md`\n" +
+		"\n" +
+		skillKnowledgeRules
+}
+
 // shouldInjectRuntimeContext is the gate. Off when the agent opted
 // out via agent.yaml or when the operator set SUNNY_NO_META_PROMPT
 // in the environment (test/dev escape hatch).
@@ -374,24 +410,21 @@ func shouldInjectRuntimeContext(a *store.Agent) bool {
 }
 
 // BuildSystemPrompt assembles the system prompt from the agent's
-// on-disk definition. Order is: runtime context (sunny meta) →
-// prompt.md → skills (each as a labeled section) → knowledge file
-// index. The last block carries a cache_control breakpoint so the
-// entire prefix caches across turns; per-request user content sits
-// outside this prefix.
+// on-disk definition. Order is: runtime context (sunny meta + the
+// agent's own paths/rules) → prompt.md → skills+knowledge catalog
+// (per-category listing of names + descriptions only — bodies are
+// loaded on demand via the view tool). The last block carries a
+// cache_control breakpoint so the prefix caches across turns;
+// per-request user content sits outside this prefix.
 //
-// **Skill framing note**: we deliberately frame skills as pre-loaded
-// behavioural guidelines, NOT as invocable tools. The claude-code
-// provider has its own Skill tool that loads named skills from a
-// separate registry; without the framing below the model would try
-// to call Skill("greet") and get "Unknown skill" because our skills
-// aren't registered there — they're already inlined in this very
-// prompt.
+// Progressive disclosure is deliberate: even with dozens of skills
+// the prompt stays compact. The agent reads SKILL.md (or knowledge
+// .md files) only when they're relevant.
 func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 	var blocks []provider.SystemBlock
 
 	if shouldInjectRuntimeContext(a) {
-		blocks = append(blocks, provider.SystemBlock{Text: runtimeContext})
+		blocks = append(blocks, provider.SystemBlock{Text: buildRuntimeContext(a)})
 	}
 
 	// Track where agent-specific blocks begin so the fallback below
@@ -406,38 +439,8 @@ func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 		}
 	}
 
-	if len(a.Skills) > 0 {
-		var b strings.Builder
-		b.WriteString("# Operational guidelines\n\n")
-		b.WriteString("The named guidelines below are pre-loaded into this conversation. They are CONTEXT, not invocable tools — apply each guideline directly when its situation matches.\n\n")
-		b.WriteString("**Important**: do NOT call any Skill, load_skill, or similar tool with these names — the full guidance is already in the sections below; calling a skill tool will fail because these are not registered there.\n\n")
-		for _, sk := range a.Skills {
-			b.WriteString("## ")
-			b.WriteString(sk.Front.Name)
-			b.WriteString("\n\n")
-			if sk.Front.Description != "" {
-				b.WriteString(strings.TrimSpace(sk.Front.Description))
-				b.WriteString("\n\n")
-			}
-			body := strings.TrimSpace(sk.Body)
-			if body != "" {
-				b.WriteString(body)
-				b.WriteString("\n\n")
-			}
-		}
-		blocks = append(blocks, provider.SystemBlock{Text: strings.TrimRight(b.String(), "\n")})
-	}
-
-	if len(a.Knowledge) > 0 {
-		var b strings.Builder
-		b.WriteString("# Available knowledge\n\n")
-		b.WriteString("Files under your knowledge directory. Use the `view` tool to open them by name (relative path under knowledge/).\n\n")
-		for _, k := range a.Knowledge {
-			b.WriteString("- ")
-			b.WriteString(k.Name)
-			b.WriteString("\n")
-		}
-		blocks = append(blocks, provider.SystemBlock{Text: strings.TrimRight(b.String(), "\n")})
+	if catalog := buildSkillKnowledgeCatalog(a); catalog != "" {
+		blocks = append(blocks, provider.SystemBlock{Text: catalog})
 	}
 
 	if len(blocks) == agentBlocksStart {
@@ -451,6 +454,80 @@ func BuildSystemPrompt(a *store.Agent) ([]provider.SystemBlock, error) {
 	// end of system.
 	blocks[len(blocks)-1].CacheControl = true
 	return blocks, nil
+}
+
+// buildSkillKnowledgeCatalog renders the per-category index of the
+// agent's skills and knowledge files. Returns "" when the agent has
+// neither, so the caller can omit the block entirely. Skills are
+// shown as `name — description`; knowledge files as their relative
+// path (so the model can pass the path straight to view).
+func buildSkillKnowledgeCatalog(a *store.Agent) string {
+	if len(a.Skills) == 0 && len(a.Knowledge) == 0 {
+		return ""
+	}
+	var b strings.Builder
+
+	if len(a.Skills) > 0 {
+		b.WriteString("# Skills available\n\n")
+		b.WriteString("Names + descriptions only. Read the body with the `view` tool when a skill applies.\n\n")
+		bySkillCat := map[string][]*skill.Skill{}
+		for _, sk := range a.Skills {
+			bySkillCat[sk.Category] = append(bySkillCat[sk.Category], sk)
+		}
+		for _, cat := range a.SkillCategories {
+			b.WriteString("## ")
+			b.WriteString(cat.Name)
+			if cat.Description != "" {
+				b.WriteString(" — ")
+				b.WriteString(cat.Description)
+			}
+			b.WriteString("\n\n")
+			list := bySkillCat[cat.Name]
+			if len(list) == 0 {
+				b.WriteString("_(no skills in this category yet)_\n\n")
+				continue
+			}
+			for _, sk := range list {
+				b.WriteString("- `")
+				b.WriteString(sk.Front.Name)
+				b.WriteString("` — ")
+				b.WriteString(strings.TrimSpace(sk.Front.Description))
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if len(a.Knowledge) > 0 {
+		b.WriteString("# Knowledge available\n\n")
+		b.WriteString("Markdown files under your knowledge directory. Open them with the `view` tool.\n\n")
+		byKnowCat := map[string][]store.KnowledgeFile{}
+		for _, k := range a.Knowledge {
+			byKnowCat[k.Category] = append(byKnowCat[k.Category], k)
+		}
+		for _, cat := range a.KnowledgeCategories {
+			b.WriteString("## ")
+			b.WriteString(cat.Name)
+			if cat.Description != "" {
+				b.WriteString(" — ")
+				b.WriteString(cat.Description)
+			}
+			b.WriteString("\n\n")
+			list := byKnowCat[cat.Name]
+			if len(list) == 0 {
+				b.WriteString("_(no files in this category yet)_\n\n")
+				continue
+			}
+			for _, k := range list {
+				b.WriteString("- ")
+				b.WriteString(k.Name)
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // agentPromptPath returns the absolute path of an agent's prompt.md,

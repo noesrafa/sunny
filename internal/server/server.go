@@ -20,6 +20,7 @@ import (
 	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/secrets"
+	"github.com/noesrafa/sunny/internal/skill"
 	"github.com/noesrafa/sunny/internal/store"
 	"github.com/noesrafa/sunny/internal/tabs"
 )
@@ -331,20 +332,28 @@ func (s *server) getSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("name")
 	for _, sk := range a.Skills {
-		if sk.Front.Name == name {
-			writeJSON(w, http.StatusOK, struct {
-				Name         string   `json:"name"`
-				Description  string   `json:"description"`
-				AllowedTools []string `json:"allowed_tools,omitempty"`
-				Body         string   `json:"body"`
-			}{
-				Name:         sk.Front.Name,
-				Description:  sk.Front.Description,
-				AllowedTools: sk.Front.AllowedTools,
-				Body:         sk.Body,
-			})
+		if sk.Front.Name != name {
+			continue
+		}
+		body, err := skill.LoadBody(sk.Dir)
+		if err != nil {
+			http.Error(w, "read error", http.StatusInternalServerError)
 			return
 		}
+		writeJSON(w, http.StatusOK, struct {
+			Name         string   `json:"name"`
+			Description  string   `json:"description"`
+			Category     string   `json:"category,omitempty"`
+			AllowedTools []string `json:"allowed_tools,omitempty"`
+			Body         string   `json:"body"`
+		}{
+			Name:         sk.Front.Name,
+			Description:  sk.Front.Description,
+			Category:     sk.Category,
+			AllowedTools: sk.Front.AllowedTools,
+			Body:         body,
+		})
+		return
 	}
 	http.NotFound(w, r)
 }

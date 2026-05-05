@@ -142,6 +142,12 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 
 	slug := r.PathValue("slug")
 	convID := r.PathValue("id")
+	// Pick up any skill / knowledge files the agent wrote during a
+	// previous turn. Reload failures are non-fatal — fall back to the
+	// cached state and let the turn proceed.
+	if err := s.store.Reload(slug); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.log.Warn("reload agent before turn", "slug", slug, "err", err)
+	}
 	a, ok := s.store.Agent(slug)
 	if !ok {
 		http.NotFound(w, r)

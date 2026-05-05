@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/noesrafa/sunny/internal/agent"
+	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/store"
 )
 
@@ -125,4 +126,100 @@ func TestBuildSystemPromptMetaWithoutPrompt(t *testing.T) {
 	if !strings.Contains(blocks[1].Text, "Bare") {
 		t.Errorf("second block should be the fallback")
 	}
+}
+
+// TestBuildSystemPromptMetaCarriesAgentPaths verifies the meta-prompt
+// includes the agent's absolute skills/knowledge paths and the
+// priority/categorization rules — without this guidance the model
+// has no way to find or extend its own skills.
+func TestBuildSystemPromptMetaCarriesAgentPaths(t *testing.T) {
+	a := newTestAgent(t, agent.Config{Name: "Test", Model: "x"}, "Soy.")
+	blocks, err := BuildSystemPrompt(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := blocks[0].Text
+	for _, want := range []string{
+		a.Dir + "/skills/<category>/<name>/SKILL.md",
+		a.Dir + "/knowledge/<category>/<file>.md",
+		"Prefer your own skills",
+		"place it under",
+		"INDEX.md",
+	} {
+		if !strings.Contains(meta, want) {
+			t.Errorf("meta-prompt missing %q\n--- meta ---\n%s", want, meta)
+		}
+	}
+}
+
+// TestBuildSystemPromptCatalogListsSkillsAndKnowledge: an agent with
+// a categorized skill and a categorized knowledge file should get a
+// catalog block enumerating both — name + description for skills,
+// relative path for knowledge.
+func TestBuildSystemPromptCatalogListsSkillsAndKnowledge(t *testing.T) {
+	a := newTestAgent(t, agent.Config{Name: "Test", Model: "x"}, "Soy.")
+	// Seed a skill under skills/general/greet/SKILL.md.
+	skillDir := filepath.Join(a.Dir, "skills", "general", "greet")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: greet\ndescription: warm hello\n---\n\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a knowledge file under knowledge/general/about.md and an
+	// INDEX.md whose first body line is the category description.
+	knowDir := filepath.Join(a.Dir, "knowledge", "general")
+	if err := os.MkdirAll(knowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(knowDir, "about.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(knowDir, "INDEX.md"),
+		[]byte("# Index\n\nGeneral knowledge bucket.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reload so the store sees the new files.
+	a2 := reloadTestAgent(t, a)
+	blocks, err := BuildSystemPrompt(a2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := strings.Join(blockTexts(blocks), "\n---BLOCK---\n")
+	for _, want := range []string{
+		"# Skills available",
+		"## general",
+		"`greet` — warm hello",
+		"# Knowledge available",
+		"General knowledge bucket.",
+		"general/about.md",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Errorf("catalog missing %q\n--- combined ---\n%s", want, combined)
+		}
+	}
+}
+
+func blockTexts(blocks []provider.SystemBlock) []string {
+	out := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		out = append(out, b.Text)
+	}
+	return out
+}
+
+func reloadTestAgent(t *testing.T, a *store.Agent) *store.Agent {
+	t.Helper()
+	root := filepath.Dir(filepath.Dir(a.Dir)) // a.Dir = <root>/agents/<slug>
+	st, err := store.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, ok := st.Agent(a.Slug)
+	if !ok {
+		t.Fatal("agent not loaded after reload")
+	}
+	return out
 }

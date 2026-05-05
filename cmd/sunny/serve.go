@@ -62,6 +62,10 @@ func serve(args []string) error {
 		log.Info("using existing runtime", "root", *root)
 	}
 
+	if err := bootstrap.MigrateLayout(*root); err != nil {
+		return fmt.Errorf("migrate layout: %w", err)
+	}
+
 	st, err := store.Load(*root)
 	if err != nil {
 		return fmt.Errorf("load store: %w", err)

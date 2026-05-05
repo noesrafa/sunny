@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
+	"github.com/noesrafa/sunny/internal/client"
 	"github.com/noesrafa/sunny/internal/session"
 	"github.com/noesrafa/sunny/internal/sysstats"
 )
@@ -27,7 +28,7 @@ type PeerStatus struct {
 	HasActivity bool // dot ON when a non-active peer pinged us recently
 }
 
-func renderSidebar(mgr *session.Manager, peers []PeerStatus, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
+func renderSidebar(mgr *session.Manager, peers []PeerStatus, runs []client.Run, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s, logoFrame), ""}
@@ -36,6 +37,8 @@ func renderSidebar(mgr *session.Manager, peers []PeerStatus, height int, s Style
 		rows = append(rows, "")
 	}
 	rows = append(rows, renderSessionsSection(mgr, innerW, s)...)
+	rows = append(rows, "")
+	rows = append(rows, renderRunsSection(runs, innerW, s)...)
 	if section := renderUsageSection(mgr, sys, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
@@ -104,6 +107,45 @@ func renderSessionsSection(mgr *session.Manager, innerW int, s Styles) []string 
 		rows = append(rows, renderSidebarRow(sess, i == mgr.Active, s)...)
 	}
 	return rows
+}
+
+// renderRunsSection draws the per-peer background-services strip
+// below sessions. Each row shows a colored status pill (green
+// running / dim stopped / red failed / blue exited) plus the run
+// name. Empty list shows the Ctrl+U hint so the user knows where
+// to manage them.
+func renderRunsSection(runs []client.Run, innerW int, s Styles) []string {
+	rows := sectionHeader("runs", innerW, s)
+	if len(runs) == 0 {
+		return append(rows, s.Hint.Render("(ninguno — ctrl+u)"))
+	}
+	for _, r := range runs {
+		rows = append(rows, renderRunsRow(r, innerW, s))
+	}
+	return rows
+}
+
+func renderRunsRow(r client.Run, innerW int, s Styles) string {
+	var pill string
+	switch r.State.Status {
+	case client.RunRunning:
+		pill = lipgloss.NewStyle().Foreground(colSuccess).Bold(true).Render("●")
+	case client.RunFailed:
+		pill = lipgloss.NewStyle().Foreground(colDanger).Bold(true).Render("✗")
+	case client.RunExited:
+		pill = lipgloss.NewStyle().Foreground(colSecondary).Render("○")
+	default:
+		pill = s.Hint.Render("○")
+	}
+	maxName := innerW - 4
+	name := r.Name
+	if maxName > 0 && len(name) > maxName {
+		name = name[:maxName-1] + "…"
+	}
+	if r.State.Status == client.RunRunning {
+		return pill + " " + s.AssistantText.Render(name)
+	}
+	return pill + " " + s.HeaderDim.Render(name)
 }
 
 func renderUsageSection(mgr *session.Manager, sys sysstats.Stats, innerW int, s Styles) []string {

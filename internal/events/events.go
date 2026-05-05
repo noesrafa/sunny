@@ -45,16 +45,28 @@ const (
 	TurnStarted   Type = "turn.started"
 	TurnDone      Type = "turn.done"
 	TurnCancelled Type = "turn.cancelled"
+	// Background run lifecycle. Created/updated/deleted fire on
+	// the run definition; started/stopped/exited mark process
+	// boundaries. Subscribers (mainly the TUI sidebar) refresh
+	// the runs list on any of these.
+	RunCreated Type = "run.created"
+	RunUpdated Type = "run.updated"
+	RunDeleted Type = "run.deleted"
+	RunStarted Type = "run.started"
+	RunStopped Type = "run.stopped"
+	RunExited  Type = "run.exited"
 )
 
-// Event is one bus message. Slug + ConvID + TabID + Provider are
-// union-typed per Type — empty when not applicable. We deliberately
-// avoid an `any` payload field so the wire shape stays predictable.
+// Event is one bus message. Slug + ConvID + TabID + RunID + Provider
+// are union-typed per Type — empty when not applicable. We
+// deliberately avoid an `any` payload field so the wire shape stays
+// predictable.
 type Event struct {
 	Type     Type   `json:"type"`
 	Slug     string `json:"slug,omitempty"`
 	ConvID   string `json:"conv_id,omitempty"`
 	TabID    string `json:"tab_id,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
 	Provider string `json:"provider,omitempty"`
 }
 

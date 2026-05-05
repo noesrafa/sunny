@@ -99,3 +99,23 @@ type tabPatchFailedMsg struct {
 	TabID string
 	Err   error
 }
+
+// runsLoadedMsg carries one peer's GET /runs response. Triggered at
+// startup, when a new peer joins the federation, and on run.* bus
+// events. The handler replaces peerRuns[Host] with the result.
+type runsLoadedMsg struct {
+	Host string
+	Runs []client.Run
+	Err  error
+}
+
+// runActionFailedMsg surfaces a failed start/stop/restart/delete so
+// the manager dialog can show it. The peer's run list is refreshed
+// regardless via the bus event the daemon emits, so we don't carry
+// the run id forward — the message is purely for error display.
+type runActionFailedMsg struct {
+	Host   string
+	RunID  string
+	Action string
+	Err    error
+}

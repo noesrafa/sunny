@@ -19,6 +19,7 @@ import (
 	"github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
+	"github.com/noesrafa/sunny/internal/runs"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/skill"
 	"github.com/noesrafa/sunny/internal/store"
@@ -43,7 +44,12 @@ type Options struct {
 	// viewer sync (the same conversation visible in multiple TUIs
 	// at once) is built on top of this — every TUI fetches the same
 	// list and listens for tab.* bus events.
-	Tabs    *tabs.Store
+	Tabs *tabs.Store
+	// Runs is the file-backed store of background-service
+	// definitions; Runtime supervises their live processes. Both
+	// optional — if nil the /runs routes return 503.
+	Runs    *runs.Store
+	Runtime *runs.Runtime
 	Secrets *secrets.Store
 	Engine  *atomic.Pointer[engine.Engine]
 	Log     *slog.Logger
@@ -106,6 +112,8 @@ func New(opts Options) http.Handler {
 		conv:          opts.Conversations,
 		sink:          opts.Sink,
 		tabs:          opts.Tabs,
+		runs:          opts.Runs,
+		runtime:       opts.Runtime,
 		secrets:       opts.Secrets,
 		engine:        opts.Engine,
 		log:           opts.Log,
@@ -158,6 +166,16 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("DELETE /tabs/{id}", srv.closeTab)
 	mux.HandleFunc("PATCH /tabs/{id}", srv.patchTab)
 	mux.HandleFunc("POST /tabs/{id}/conversation", srv.rebindTabConv)
+	mux.HandleFunc("GET /runs", srv.listRuns)
+	mux.HandleFunc("POST /runs", srv.createRun)
+	mux.HandleFunc("GET /runs/{id}", srv.getRun)
+	mux.HandleFunc("PATCH /runs/{id}", srv.updateRun)
+	mux.HandleFunc("DELETE /runs/{id}", srv.deleteRun)
+	mux.HandleFunc("POST /runs/{id}/start", srv.startRun)
+	mux.HandleFunc("POST /runs/{id}/stop", srv.stopRun)
+	mux.HandleFunc("POST /runs/{id}/restart", srv.restartRun)
+	mux.HandleFunc("GET /runs/{id}/logs", srv.getRunLogs)
+	mux.HandleFunc("GET /runs/{id}/logs/watch", srv.watchRunLogs)
 	mux.HandleFunc("GET /stats", srv.stats)
 
 	// Compose middleware:
@@ -216,6 +234,8 @@ type server struct {
 	conv          *conversation.Store
 	sink          *conv.Sink
 	tabs          *tabs.Store
+	runs          *runs.Store
+	runtime       *runs.Runtime
 	secrets       *secrets.Store
 	engine        *atomic.Pointer[engine.Engine]
 	log           *slog.Logger

@@ -44,6 +44,10 @@ type Model struct {
 	// from a non-active peer. Used to render the activity dot in
 	// the header switcher.
 	peerActivity map[string]time.Time
+	// peerRuns[name] is the per-peer list of background services.
+	// Populated at boot and refreshed on run.* bus events. Sidebar
+	// reads peerRuns[activePeer] to render the always-on runs strip.
+	peerRuns map[string]*peerRunsState
 
 	client       *client.Client     // local daemon client; CRUD ops still go here
 	fed          *client.Federation // peer roster — chat routing flows through For(host)
@@ -295,6 +299,7 @@ func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, pee
 		peerOrder:     peerOrder,
 		activePeer:    activePeer,
 		peerActivity:  map[string]time.Time{},
+		peerRuns:      map[string]*peerRunsState{},
 		client:        cli,
 		fed:           fed,
 		busEvents:     busCh,
@@ -310,6 +315,49 @@ func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, pee
 		themeID:       themeID,
 		skipPerms:     opts.DangerousSkipPermissions,
 	}
+}
+
+// peerRunsState holds the per-peer view of the background-runs
+// list plus its async-load status flags. The sidebar reads it
+// every render; the manager dialog reads it at open time.
+type peerRunsState struct {
+	list    []client.Run
+	loading bool
+	err     string
+}
+
+// fetchRunsCmd kicks off an async GET /runs against host's client.
+// The response lands as runsLoadedMsg, which the appmsg handler
+// stores in peerRuns. Safe to call repeatedly — bus event refreshes
+// just queue another fetch and the latest result wins. Loading
+// state is tracked by the appmsg handler, not here, so this is
+// safe to call from value-receiver methods (Init) too.
+func (m Model) fetchRunsCmd(host string) tea.Cmd {
+	if m.fed == nil {
+		return nil
+	}
+	c := m.fed.For(host)
+	if c == nil {
+		return nil
+	}
+	ctx := m.ctx
+	return func() tea.Msg {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		runs, err := c.ListRuns(cctx)
+		return runsLoadedMsg{Host: host, Runs: runs, Err: err}
+	}
+}
+
+// runsForActivePeer returns the runs visible in the sidebar right
+// now. Returns nil for peers we haven't fetched yet (sidebar
+// renders an empty section in that case).
+func (m *Model) runsForActivePeer() []client.Run {
+	st, ok := m.peerRuns[m.activePeer]
+	if !ok {
+		return nil
+	}
+	return st.list
 }
 
 // switchToPeer makes peerName the active peer. Saves the current
@@ -431,6 +479,15 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd(), peerSyncTickCmd()}
 	if m.busEvents != nil {
 		cmds = append(cmds, m.waitForBusEvent())
+	}
+	// Prime each peer's runs list so the sidebar has something to
+	// render before the user does anything. Subsequent refreshes
+	// happen on run.* bus events; new peers joining via tailnet
+	// discovery get their first fetch from peerSyncTick.
+	for _, host := range m.peerOrder {
+		if cmd := m.fetchRunsCmd(host); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)

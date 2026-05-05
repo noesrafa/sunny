@@ -119,11 +119,37 @@ type ConfirmCloseSessionMsg struct{}
 // the current transcript.
 type ConfirmNewConvMsg struct{}
 
-// Run management messages — emitted by run dialogs and consumed at the root.
-type OpenRunEditMsg struct{}
+// Run management messages — emitted by run dialogs, handled at the
+// root model. All commands target the active peer; the dialog never
+// needs to know which peer it's on.
+//
+// OpenRunsMsg requests the manager dialog (the Ctrl+U dialog) to
+// open. OpenRunFormMsg opens the create/edit form: empty ID = create,
+// non-empty = edit. OpenRunLogsMsg opens the log viewer for one run.
+// CreateRunMsg / UpdateRunMsg / DeleteRunMsg / StartRunMsg /
+// StopRunMsg / RestartRunMsg are the side-effecting commands fired
+// when the user confirms an action; the root performs the HTTP call
+// against the active peer's client.
+type OpenRunsMsg struct{}
+type OpenRunFormMsg struct {
+	ID string // "" = create
+}
 type OpenRunLogsMsg struct{ ID string }
-type CreateRunMsg struct{ Name, Command, Cwd string }
+type CreateRunMsg struct{ Name, Cwd, Command string }
+type UpdateRunMsg struct {
+	ID      string
+	Name    string
+	Cwd     string
+	Command string
+}
 type DeleteRunMsg struct{ ID string }
+type StartRunMsg struct{ ID string }
+type StopRunMsg struct{ ID string }
+type RestartRunMsg struct{ ID string }
+
+// OpenRunEditMsg is the legacy stub from the v0.18 placeholder. Kept
+// for grep continuity but unused; new code uses OpenRunFormMsg.
+type OpenRunEditMsg struct{}
 
 // Terminal-pane messages — flow from the new-pane dialog to the root model.
 type CreatePaneMsg struct{ Name, Command, Cwd string }

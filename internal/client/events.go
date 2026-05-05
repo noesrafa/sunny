@@ -19,6 +19,7 @@ type BusEvent struct {
 	Slug     string `json:"slug,omitempty"`
 	ConvID   string `json:"conv_id,omitempty"`
 	TabID    string `json:"tab_id,omitempty"`
+	RunID    string `json:"run_id,omitempty"`
 	Provider string `json:"provider,omitempty"`
 }
 

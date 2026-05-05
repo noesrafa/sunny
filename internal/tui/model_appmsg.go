@@ -179,6 +179,13 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			// changes from another TUI on the same daemon.
 			cmds := []tea.Cmd{next, m.refetchTabsCmd(v.Event.Host)}
 			return m, tea.Batch(cmds...), true
+		case "run.created", "run.updated", "run.deleted",
+			"run.started", "run.stopped", "run.exited":
+			// Any run-state change → refetch the list for that peer.
+			// The handler above stores the new list and forwards to
+			// the open dialog (if any) so the manager / form / logs
+			// view refreshes in lockstep.
+			return m, tea.Batch(next, m.fetchRunsCmd(v.Event.Host)), true
 		}
 		return m, next, true
 	case tabsRefreshedMsg:
@@ -193,6 +200,77 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	case tabPatchFailedMsg:
 		m.logger.Warn("tab patch failed", "peer", v.Host, "tab", v.TabID, "err", v.Err)
 		return m, nil, true
+
+	// --- runs ---
+	case runsLoadedMsg:
+		// Fired by both the initial fetch and the runActionCmd
+		// follow-ups. When Runs is nil but Err is also nil, the
+		// caller asked us to fetch fresh — e.g. after a successful
+		// start/stop. Distinguish by whether the message originated
+		// from a real HTTP response (Runs slice non-nil OR Err
+		// non-nil) vs a refresh trigger (both nil).
+		if v.Err == nil && v.Runs == nil {
+			return m, m.fetchRunsCmd(v.Host), true
+		}
+		m.applyRunsLoaded(v)
+		// Forward to any open run dialog so it can refresh its view.
+		if m.overlay.HasOpen() {
+			return m, m.overlay.UpdateTop(v), true
+		}
+		return m, nil, true
+	case runActionFailedMsg:
+		m.logger.Warn("run action failed", "peer", v.Host, "run", v.RunID, "action", v.Action, "err", v.Err)
+		// Surface to the open dialog (manager / form / logs) which
+		// chooses what to render — list dialogs show inline; form
+		// dialogs show in their err line.
+		if m.overlay.HasOpen() {
+			return m, m.overlay.UpdateTop(v), true
+		}
+		return m, nil, true
+	case OpenRunsMsg:
+		return m, m.overlay.Open(NewRunManagerDialog(m.activePeer, m.runsForActivePeer(), m.styles)), true
+	case OpenRunFormMsg:
+		// Edit when ID is non-empty, create otherwise. The form is
+		// a sibling of the manager (we close it before opening so
+		// esc returns straight to chat).
+		var existing *client.Run
+		if v.ID != "" {
+			for _, r := range m.runsForActivePeer() {
+				if r.ID == v.ID {
+					rc := r
+					existing = &rc
+					break
+				}
+			}
+		}
+		m.overlay.CloseTop()
+		return m, m.overlay.Open(NewRunFormDialog(m.clientFor(m.activePeer), m.activePeer, existing, m.styles)), true
+	case OpenRunLogsMsg:
+		c := m.clientFor(m.activePeer)
+		var name string
+		for _, r := range m.runsForActivePeer() {
+			if r.ID == v.ID {
+				name = r.Name
+				break
+			}
+		}
+		m.overlay.CloseTop()
+		return m, m.overlay.Open(NewRunLogsDialog(c, v.ID, name, m.styles)), true
+	case CreateRunMsg:
+		m.overlay.CloseTop()
+		return m, m.createRunCmd(m.activePeer, v), true
+	case UpdateRunMsg:
+		m.overlay.CloseTop()
+		return m, m.updateRunCmd(m.activePeer, v), true
+	case DeleteRunMsg:
+		m.overlay.CloseTop()
+		return m, m.runActionCmd(m.activePeer, v.ID, "delete"), true
+	case StartRunMsg:
+		return m, m.runActionCmd(m.activePeer, v.ID, "start"), true
+	case StopRunMsg:
+		return m, m.runActionCmd(m.activePeer, v.ID, "stop"), true
+	case RestartRunMsg:
+		return m, m.runActionCmd(m.activePeer, v.ID, "restart"), true
 	case busEventClosedMsg:
 		// Multiplexer terminated (ctx cancelled, peers gone). Stop
 		// re-arming; future versions can show a "real-time sync

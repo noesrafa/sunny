@@ -28,6 +28,7 @@ import (
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
 	"github.com/noesrafa/sunny/internal/provider/ollama"
 	"github.com/noesrafa/sunny/internal/provider/opencode"
+	"github.com/noesrafa/sunny/internal/runs"
 	"github.com/noesrafa/sunny/internal/secrets"
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
@@ -92,6 +93,10 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load tabs.json: %w", err)
 	}
+	runsStore, err := runs.Load(*root)
+	if err != nil {
+		return fmt.Errorf("load runs.json: %w", err)
+	}
 
 	rebuild := func() {
 		log.Info("rebuilding engine after secrets change")
@@ -100,6 +105,7 @@ func serve(args []string) error {
 
 	pairs := pairing.NewService(tok)
 	hub := events.New(log)
+	runtime := runs.New(runsStore, hub, log, *root+"/runs")
 
 	// Mesh key: load if present, generate-and-save if absent so a
 	// fresh install is mesh-ready by default. Failure to write is
@@ -124,6 +130,8 @@ func serve(args []string) error {
 			Conversations:    convs,
 			Sink:             sink,
 			Tabs:             tabsStore,
+			Runs:             runsStore,
+			Runtime:          runtime,
 			Secrets:          secretsStore,
 			Engine:           &enginePtr,
 			Log:              log,
@@ -184,9 +192,16 @@ func serve(args []string) error {
 		return err
 	case <-ctx.Done():
 		log.Info("shutting down")
-		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, c := context.WithTimeout(context.Background(), 10*time.Second)
 		defer c()
-		return srv.Shutdown(shutdownCtx)
+		// HTTP first: drain in-flight requests, stop accepting new
+		// ones. Then kill the run children so they don't outlive the
+		// daemon. Doing it in this order means a stop-run request
+		// arriving during shutdown gets to finish naturally before
+		// StopAll fires the same SIGTERM redundantly.
+		shutdownErr := srv.Shutdown(shutdownCtx)
+		runtime.StopAll(shutdownCtx)
+		return shutdownErr
 	}
 }
 

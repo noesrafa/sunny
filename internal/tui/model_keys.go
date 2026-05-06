@@ -89,6 +89,20 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			return m, m.overlay.Open(d), true
 		}
 		return m, nil, true
+	case key.Matches(msg, m.keymap.Regenerate):
+		// "Go again" — regenerate the last assistant turn against the
+		// current conv. Session.Regenerate handles the optimistic
+		// prune; the watch stream paints the new reply as it streams.
+		cur := m.manager.Current()
+		if cur == nil {
+			return m, nil, true
+		}
+		if err := cur.Regenerate(m.ctx); err != nil {
+			cur.LastErr = err
+			m.logger.Warn("regenerate", "err", err, "session", cur.ID)
+		}
+		m.refreshViewport()
+		return m, nil, true
 	case key.Matches(msg, m.keymap.NewConv):
 		if cur := m.manager.Current(); cur != nil {
 			body := []string{

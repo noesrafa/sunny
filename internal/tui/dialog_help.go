@@ -52,6 +52,7 @@ func (d *HelpDialog) View(width, height int) string {
 			{"enter", "send"},
 			{"ctrl+j / alt+enter", "newline"},
 			{"ctrl+c", "cancel current turn"},
+			{"ctrl+g", "regenerate last reply"},
 			{"ctrl+l", "reset chat (new conversation)"},
 			{"ctrl+v", "paste image/text"},
 		}},

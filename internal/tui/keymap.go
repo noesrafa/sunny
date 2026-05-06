@@ -12,6 +12,7 @@ type KeyMap struct {
 	PrevSession   key.Binding
 	CloseSession  key.Binding
 	Rename        key.Binding // ctrl+r — rename the active session
+	Regenerate    key.Binding // ctrl+g — re-run last assistant turn ("go again")
 	NewConv       key.Binding // ctrl+l — fresh claude conversation in the same session/cwd
 	Diff          key.Binding // ctrl+d — open the git diff viewer
 	Runs          key.Binding // ctrl+u — open the runs manager modal
@@ -43,6 +44,7 @@ func DefaultKeyMap() KeyMap {
 		PrevSession:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev")),
 		CloseSession:  key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "close")),
 		Rename:        key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "rename")),
+		Regenerate:    key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "regenerate")),
 		NewConv:       key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "reset chat")),
 		Diff:          key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diff")),
 		Runs:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "runs")),

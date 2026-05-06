@@ -214,6 +214,56 @@ func (s *Store) Delete(agentID, convID string) error {
 	return os.Rename(dir, target)
 }
 
+// Truncate rewrites events.jsonl to keep only events whose seq is
+// <= keepUntil. Used by the regenerate flow: drop the last assistant
+// turn (every text_delta / tool_use / tool_result / done after the
+// last user event) so the engine can re-run from that point.
+//
+// Atomic: writes to a sibling .tmp file, then renames over events.jsonl.
+// A concurrent watcher reading the file mid-rename is safe — POSIX
+// rename is atomic and the watcher's open fd keeps pointing at the
+// old inode until it reopens.
+//
+// The sink's seq counter is NOT rolled back. New events appended
+// after a truncate get higher seqs (with a gap) which keeps watcher
+// resume semantics correct.
+func (s *Store) Truncate(agentID, convID string, keepUntil int64) error {
+	dir, err := s.requireConv(agentID, convID)
+	if err != nil {
+		return err
+	}
+	events, err := readEvents(dir)
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, "events.jsonl.tmp")
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open tmp: %w", err)
+	}
+	for _, e := range events {
+		if e.Seq > keepUntil {
+			continue
+		}
+		data, err := json.Marshal(e)
+		if err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("marshal event: %w", err)
+		}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("write event: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	return os.Rename(tmp, filepath.Join(dir, "events.jsonl"))
+}
+
 // Append adds one event to the JSONL journal. Stamps Now() if At is zero.
 func (s *Store) Append(agentID, convID string, ev Event) error {
 	dir, err := s.requireConv(agentID, convID)

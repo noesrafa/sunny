@@ -13,6 +13,7 @@ import (
 	evts "github.com/noesrafa/sunny/internal/events"
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/store"
+	"github.com/noesrafa/sunny/internal/tabs"
 )
 
 // turnRequest is the body of POST /agents/{id}/conversations/{conv_id}/turns.
@@ -196,6 +197,29 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auto-rename the conversation off the first user message when
+	// the title is still a placeholder (agent name on tab-spawned
+	// convs, "untitled" on bare creates). Mutates meta in place so
+	// the engine's runTurn picks it up. Best-effort — failures are
+	// swallowed so a quirky title write never blocks the turn.
+	//
+	// Tabs that point at this conv get the new title too: the TUI
+	// sidebar renders the *tab* title, not the conv title, so
+	// without this sync the rename would be invisible to the user.
+	// publishTab fires tab.updated so every TUI's applyTabsRefresh
+	// picks it up via the existing reconciliation path.
+	if meta.MsgCount == 0 && isPlaceholderTitle(meta.Title, a.Config.Name) {
+		newTitle := summarizeUserText(last.Content)
+		if newTitle != "" && newTitle != meta.Title {
+			_ = s.conv.UpdateMeta(agentID, convID, func(m *conversation.Meta) {
+				m.Title = newTitle
+			})
+			meta.Title = newTitle
+			s.publish(evts.ConvTurnAppended, agentID, convID)
+			s.syncTabTitlesForConv(agentID, convID, newTitle)
+		}
+	}
+
 	go s.runTurn(turnCtx, release, a, eng, req, meta)
 
 	// Returning the user_seq lets the sender's TUI dedup the
@@ -205,6 +229,190 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 		"conv_id":  convID,
 		"user_seq": userEv.Seq,
 	})
+}
+
+// isPlaceholderTitle reports whether a conversation title is still
+// the daemon's auto-assigned default — either the bare "untitled"
+// fallback from conv.Create, or the tab-spawned "<agent name>"
+// fallback from openTab. We rename only these on the first turn so a
+// user-set title (via PATCH /tabs/{id} or POST /agents/{id}/conversations
+// with an explicit body.title) is never silently overwritten.
+func isPlaceholderTitle(title, agentName string) bool {
+	return title == "" || title == "untitled" || title == agentName
+}
+
+// syncTabTitlesForConv updates every tab whose conv_id matches and
+// whose current title is still a placeholder, so the auto-rename
+// reaches the sidebar. Tabs the user has already renamed (via PATCH
+// /tabs/{id}) keep their title — same "never silently overwrite"
+// rule the conv-rename uses. Best-effort: tab updates that fail are
+// swallowed so a stale tab can't block the turn.
+func (s *server) syncTabTitlesForConv(agentID, convID, newTitle string) {
+	if s.tabs == nil {
+		return
+	}
+	a, ok := s.store.Agent(agentID)
+	if !ok {
+		return
+	}
+	for _, t := range s.tabs.List() {
+		if t.ConvID != convID {
+			continue
+		}
+		if !isPlaceholderTitle(t.Title, a.Config.Name) {
+			continue
+		}
+		updated, err := s.tabs.Update(t.ID, func(tb *tabs.Tab) {
+			tb.Title = newTitle
+		})
+		if err != nil {
+			s.log.Warn("sync tab title", "tab", t.ID, "err", err)
+			continue
+		}
+		s.publishTab(evts.TabUpdated, updated)
+	}
+}
+
+// summarizeUserText turns a raw user prompt into a one-line
+// conversation title: collapse whitespace, take the first ~60 runes,
+// and ellipsize. We deliberately don't call out to a model — fast
+// and stays offline. Callers can rename later via PATCH /tabs.
+func summarizeUserText(s string) string {
+	const maxRunes = 60
+	// Collapse any whitespace run (newlines, tabs, multiple spaces) to
+	// a single space so a multi-paragraph prompt still fits on one row.
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	joined := strings.Join(fields, " ")
+	runes := []rune(joined)
+	if len(runes) <= maxRunes {
+		return joined
+	}
+	// Trim a trailing partial word so the cut doesn't land mid-token —
+	// "Why does my Postgr…" reads better than "Why does my Postgre…"
+	// when "Postgres" got split.
+	cut := string(runes[:maxRunes])
+	if i := strings.LastIndexByte(cut, ' '); i > maxRunes/2 {
+		cut = cut[:i]
+	}
+	return cut + "…"
+}
+
+// regenerateLastTurn truncates the journal back to the last user
+// event and re-runs engine.Turn so the assistant produces a fresh
+// reply. The user message stays in place; only the assistant's
+// previous text_delta / tool_use / tool_result / done events are
+// removed.
+//
+// Body shape mirrors POST /turns: the client sends the full message
+// transcript up to and including the user prompt to be regenerated.
+// The daemon trusts the client to construct it (same trust model
+// every other turn endpoint uses).
+//
+// Path: POST /agents/{id}/conversations/{conv_id}/regenerate
+//
+// Responses match POST /turns: 202 on accepted, 400 on bad body,
+// 404 on missing agent/conv, 409 on contention, 503 on no provider.
+// Returns 400 when there's no user event in the journal (nothing to
+// regenerate from).
+func (s *server) regenerateLastTurn(w http.ResponseWriter, r *http.Request) {
+	var eng *engine.Engine
+	if s.engine != nil {
+		eng = s.engine.Load()
+	}
+	if eng == nil || !eng.HasProviders() {
+		http.Error(w, "engine not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if s.sink == nil {
+		http.Error(w, "sink not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	agentID := r.PathValue("id")
+	convID := r.PathValue("conv_id")
+	if err := s.store.Reload(agentID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.log.Warn("reload agent before regenerate", "agent_id", agentID, "err", err)
+	}
+	a, ok := s.store.Agent(agentID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	meta, events, err := s.conv.Get(agentID, convID)
+	if err != nil {
+		if errors.Is(err, conversation.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var req turnRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "decode body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(req.Messages) == 0 {
+		http.Error(w, "messages: required", http.StatusBadRequest)
+		return
+	}
+	last := req.Messages[len(req.Messages)-1]
+	if last.Role != "user" {
+		http.Error(w, "messages: last entry must have role=user", http.StatusBadRequest)
+		return
+	}
+
+	// Walk the journal back to find the last user event — that's the
+	// boundary we keep when truncating.
+	lastUserSeq := int64(-1)
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Kind == "user" {
+			lastUserSeq = events[i].Seq
+			break
+		}
+	}
+	if lastUserSeq < 0 {
+		http.Error(w, "no user message in journal to regenerate from", http.StatusBadRequest)
+		return
+	}
+
+	// Reserve the per-conv slot before mutating the journal — if a
+	// turn is already running we don't want to half-truncate and bail.
+	turnCtx, release, ok := s.activeTurns.claim(agentID, convID)
+	if !ok {
+		http.Error(w, "another turn is already running on this conversation", http.StatusConflict)
+		return
+	}
+
+	if err := s.conv.Truncate(agentID, convID, lastUserSeq); err != nil {
+		release()
+		http.Error(w, "truncate journal: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Resync meta: drop the assistant from msg_count and clear the
+	// provider state — claude-code's session id no longer matches the
+	// truncated journal, and a stale --resume target would confuse
+	// the next turn.
+	_ = s.conv.UpdateMeta(agentID, convID, func(m *conversation.Meta) {
+		if m.MsgCount > 1 {
+			m.MsgCount--
+		}
+		m.ProviderState = ""
+	})
+	// Refresh meta so runTurn sees the cleared ProviderState.
+	if refreshed, _, err := s.conv.Get(agentID, convID); err == nil {
+		meta = refreshed
+	}
+	// Tell every list/watch client the conv changed so they refetch.
+	s.publish(evts.ConvTurnAppended, agentID, convID)
+
+	go s.runTurn(turnCtx, release, a, eng, req, meta)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"conv_id": convID})
 }
 
 // deleteTurn cancels the in-flight turn on a conversation, if any.

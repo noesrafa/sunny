@@ -473,6 +473,71 @@ func (s *Session) Cancel(ctx context.Context) error {
 	return s.c.CancelTurn(ctx, s.agentID, s.ConvID)
 }
 
+// Regenerate asks the daemon to drop the most recent assistant turn
+// and replay the engine from the previous user message. Side effects:
+//
+//   - locally prunes Items back to (and including) the last UserItem
+//     so the UI matches the server-truncated journal immediately —
+//     without this the user would briefly see the old assistant turn
+//     alongside the new one streaming in.
+//   - sets State=Thinking + resets per-turn counters.
+//   - posts the trimmed transcript to /regenerate.
+//
+// Returns ErrSessionBusy when a turn is already in flight (the user
+// has to cancel first), ErrNoEngine when the session isn't bound,
+// and the daemon's error verbatim otherwise. A nil error means the
+// regenerate is in progress; the watch stream will deliver new
+// events as they arrive.
+func (s *Session) Regenerate(ctx context.Context) error {
+	if s.c == nil {
+		return ErrNoEngine
+	}
+	if s.ConvID == "" {
+		return fmt.Errorf("session: no conv_id (tab not initialised)")
+	}
+	if s.State == StateThinking {
+		return ErrSessionBusy
+	}
+
+	// Find the last UserItem in the local transcript. Everything
+	// after it is the assistant turn we're about to discard
+	// server-side, so prune locally too. If there's no UserItem,
+	// there's nothing to regenerate from.
+	cut := -1
+	for i := len(s.Items) - 1; i >= 0; i-- {
+		if _, ok := s.Items[i].(UserItem); ok {
+			cut = i
+			break
+		}
+	}
+	if cut < 0 {
+		return fmt.Errorf("session: no user message to regenerate from")
+	}
+	userItem := s.Items[cut].(UserItem)
+
+	wire := buildWireMessages(s.Items[:cut], userItem.Text)
+	if err := s.c.RegenerateLastTurn(ctx, s.agentID, s.ConvID, client.TurnRequest{
+		Messages: wire,
+		Cwd:      s.Cwd,
+	}); err != nil {
+		return err
+	}
+
+	// Server has truncated the journal — match local state so the
+	// next watch deltas don't render below stale assistant content.
+	s.Items = s.Items[:cut+1]
+	s.State = StateThinking
+	now := time.Now()
+	s.StartedAt = now
+	s.lastUserAt = now
+	s.turnHadOutput = false
+	s.LastErr = nil
+	if s.logger != nil {
+		s.logger.Debug("regenerate started", "session", s.ID, "conv_id", s.ConvID)
+	}
+	return nil
+}
+
 // Close cancels the watch goroutine and closes the events channel.
 // Safe to call multiple times.
 func (s *Session) Close() {

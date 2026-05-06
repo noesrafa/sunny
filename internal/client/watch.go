@@ -115,6 +115,39 @@ func (c *Client) SendTurn(ctx context.Context, agentID, convID string, body Turn
 	}
 }
 
+// RegenerateLastTurn truncates the conversation's journal back to the
+// most recent user message and re-runs the engine so the assistant
+// produces a fresh reply. Same trust model as SendTurn — the client
+// constructs the message slice up to and including the user prompt
+// to regenerate from. The daemon clears claude-code's session state
+// so --resume doesn't try to chain off a now-deleted assistant turn.
+//
+// Streaming is identical to SendTurn: 202, then watch the conv for
+// new events. The watcher's seq counter doesn't roll back, so
+// resume-from-seq still works seamlessly.
+//
+// Returns ErrConvNotFound, ErrTurnBusy, and other errors verbatim
+// like SendTurn. Returns a wrapped error when the journal has no
+// user event to regenerate from (a fresh conv with zero turns).
+func (c *Client) RegenerateLastTurn(ctx context.Context, agentID, convID string, body TurnRequest) error {
+	resp, err := c.doJSON(ctx, http.MethodPost,
+		"/agents/"+agentID+"/conversations/"+convID+"/regenerate", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusAccepted:
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("%w: %s", ErrConvNotFound, errorFromBody("POST /regenerate", resp).Error())
+	case http.StatusConflict:
+		return ErrTurnBusy
+	default:
+		return errorFromBody("POST /regenerate", resp)
+	}
+}
+
 // CancelTurn signals the daemon to interrupt the in-flight turn on
 // this conversation. Idempotent — succeeds whether or not a turn was
 // actually running.

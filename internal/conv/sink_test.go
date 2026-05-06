@@ -20,7 +20,7 @@ func newTestSink(t *testing.T) (*Sink, string, string) {
 		t.Fatal(err)
 	}
 	store := conversation.NewStore(root)
-	meta, err := store.Create("test", "t", "")
+	meta, err := store.Create("test", "t", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestSinkPrimesCounterFromJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := conversation.NewStore(root)
-	meta, err := store.Create("test", "t", "")
+	meta, err := store.Create("test", "t", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

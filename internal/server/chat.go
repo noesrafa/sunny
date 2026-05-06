@@ -493,6 +493,20 @@ func (s *server) runTurn(
 				"content":     v.Content,
 				"is_error":    v.IsError,
 			})
+		case provider.SessionState:
+			// Persist the resume token as soon as the driver knows it
+			// (well before Done) so a cancel or error mid-turn still
+			// leaves a valid `--resume` target. Side-channel update —
+			// not journalled, since the journal is the conversation
+			// transcript and resume tokens are provider plumbing.
+			if v.State != "" {
+				err := s.conv.UpdateMeta(agentID, convID, func(m *conversation.Meta) {
+					m.ProviderState = v.State
+				})
+				if err != nil {
+					s.log.Warn("update provider state", "err", err, "agent_id", agentID, "conv", convID)
+				}
+			}
 		case provider.Done:
 			payload := map[string]any{
 				"stop_reason": v.StopReason,

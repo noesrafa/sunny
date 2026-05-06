@@ -42,7 +42,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *conv.Sink, string, string) 
 		t.Fatal(err)
 	}
 	convs := conversation.NewStore(root)
-	meta, err := convs.Create("test", "t", "")
+	meta, err := convs.Create("test", "t", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

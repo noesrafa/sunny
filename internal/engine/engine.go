@@ -196,6 +196,11 @@ func (e *Engine) runTurnLoop(
 				out <- ev
 			case provider.ToolResult:
 				out <- ev
+			case provider.SessionState:
+				// Pass through so the server can persist the resume
+				// token before the turn ends. claude-code emits this
+				// on its first system.init.
+				out <- ev
 			case provider.Done:
 				// Hold on to Done until we know whether this is the
 				// final iteration. If tool calls are pending, the

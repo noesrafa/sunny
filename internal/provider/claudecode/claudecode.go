@@ -182,6 +182,7 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			cost       float64
 			lastUsage  *usage
 			idleKilled atomic.Bool
+			sawResult  bool
 		)
 
 		// Inactivity watchdog: if no decoder event arrives for
@@ -191,6 +192,19 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		// (vs user-cancel) so the TUI can render the right message.
 		activity := make(chan struct{}, 1)
 		go runIdleWatchdog(turnCtx, activity, &idleKilled, turnCancel)
+
+		// Run cmd.Wait concurrently. Without this we can only call
+		// Wait after the decoder loop ends, but the loop won't end
+		// when a backgrounded bash claude spawned (`run_in_background:
+		// true`) inherits claude's stdout — bash typically detaches
+		// via setsid into its own session but still holds the pipe's
+		// write end, so EOF never arrives even though claude itself
+		// has exited cleanly. Running Wait in parallel lets WaitDelay
+		// force-close our parent pipe end as a safety net, and lets
+		// the result-event handler below close stdout proactively
+		// without losing the wait error.
+		waitDone := make(chan error, 1)
+		go func() { waitDone <- cmd.Wait() }()
 
 		// Skill memo: the first `system` event carries session_id; on
 		// streaming runs claude re-emits init at the start of each
@@ -208,6 +222,13 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			case "system":
 				if ev.Subtype == "init" && sessionID == "" {
 					sessionID = ev.SessionID
+					// Surface the resume id immediately so the daemon
+					// can persist it before the turn ends. Otherwise a
+					// cancel/error before "result" would leave
+					// meta.json without a session id, and the next
+					// turn would spawn claude fresh ("no tengo
+					// contexto previo").
+					out <- provider.SessionState{State: sessionID}
 				}
 			case "assistant":
 				if ev.Message == nil {
@@ -255,6 +276,16 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 				stopReason = ev.StopReason
 				isError = ev.IsError
 				cost = ev.TotalCostUSD
+				sawResult = true
+				// Definitive turn boundary. Force EOF on the decoder
+				// so we unwind even when a backgrounded bash claude
+				// detached still owns the pipe's write end. Closing
+				// our read end doesn't kill the bash — it just gives
+				// it EPIPE on its next write, which it ignores. The
+				// dev server (or whatever was started in background)
+				// keeps running for the next turn to use, which is
+				// the whole point of `run_in_background: true`.
+				_ = stdout.Close()
 			case "rate_limit_event":
 				// Surfaced as a sidebar widget by future versions; for
 				// now just informational. Drop silently.
@@ -266,20 +297,30 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 			}
 		}
 
-		if err := cmd.Wait(); err != nil {
-			// Distinguish three cancellation paths:
-			//   - Idle watchdog fired: claude went silent for too long
-			//   - Caller's ctx cancelled: user hit Ctrl+C / daemon shutdown
-			//   - Anything else: real exit error from the CLI
-			if idleKilled.Load() {
-				out <- provider.Error{Err: fmt.Errorf("claudecode: unresponsive — no output for %s", idleTimeout)}
-				return
-			}
-			if ctx.Err() != nil {
-				out <- provider.Error{Err: ctx.Err()}
-				return
-			}
-			out <- provider.Error{Err: fmt.Errorf("claudecode: process exited: %w", err)}
+		// cmd.Wait was started in a goroutine when the loop began; read
+		// its result now that the decoder has unwound. It will already
+		// have completed in the common case (claude exits right after
+		// emitting "result") or will complete within WaitDelay once
+		// our stdout.Close above lets pipes drain.
+		waitErr := <-waitDone
+
+		// Distinguish four exit paths:
+		//   - Idle watchdog fired: claude went silent for too long
+		//   - Caller's ctx cancelled: user hit Ctrl+C / daemon shutdown
+		//   - sawResult + waitErr: benign — closing stdout to unwind
+		//     the decoder makes Wait surface "use of closed file"-style
+		//     errors. The protocol-level turn already succeeded.
+		//   - Anything else: real exit error from the CLI
+		if idleKilled.Load() {
+			out <- provider.Error{Err: fmt.Errorf("claudecode: unresponsive — no output for %s", idleTimeout)}
+			return
+		}
+		if ctx.Err() != nil {
+			out <- provider.Error{Err: ctx.Err()}
+			return
+		}
+		if waitErr != nil && !sawResult {
+			out <- provider.Error{Err: fmt.Errorf("claudecode: process exited: %w", waitErr)}
 			return
 		}
 

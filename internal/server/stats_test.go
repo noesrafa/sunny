@@ -40,7 +40,7 @@ func newStatsImpl(t *testing.T) (*server, string, string) {
 		t.Fatal(err)
 	}
 	convs := conversation.NewStore(root)
-	meta, err := convs.Create("test", "t", "")
+	meta, err := convs.Create("test", "t", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

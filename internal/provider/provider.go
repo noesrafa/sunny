@@ -113,6 +113,18 @@ type Done struct {
 	CostUSD float64
 }
 
+// SessionState carries an opaque resume token mid-turn so callers can
+// persist it before the turn finishes. Drivers emit this as soon as
+// they know the token (claude-code: at the first `system.init` event)
+// so a cancel or error before Done still leaves a valid `--resume`
+// target in the conversation's meta.json. Without it, a turn that
+// streams output for minutes and then gets cancelled would lose all
+// session continuity even though the underlying provider already had
+// the context loaded.
+type SessionState struct{ State string }
+
+func (SessionState) providerEvent() {}
+
 // ToolUse is emitted when the provider's underlying engine starts a tool
 // call. The claude-code provider surfaces these for visibility; the
 // anthropic API provider does not yet (tools land in v0.4).

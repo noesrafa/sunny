@@ -73,14 +73,14 @@ func uninstallCmd(args []string) error {
 			fmt.Fprintf(os.Stderr, "  ✗ brew uninstall failed: %v\n", err)
 		}
 		// Tap removal — only ask if `brew tap` shows our tap.
-		if hasBrewTap("noesrafa/sunny") {
+		if hasBrewTap("noesrafa/tap") {
 			fmt.Println()
 			untap := *yes
 			if !untap {
-				untap = promptYesNo("  remove the brew tap noesrafa/sunny too?", true)
+				untap = promptYesNo("  remove the brew tap noesrafa/tap too?", true)
 			}
 			if untap {
-				if err := runStreaming("brew", "untap", "noesrafa/sunny"); err != nil {
+				if err := runStreaming("brew", "untap", "noesrafa/tap"); err != nil {
 					fmt.Fprintf(os.Stderr, "  ✗ brew untap failed: %v\n", err)
 				}
 			}

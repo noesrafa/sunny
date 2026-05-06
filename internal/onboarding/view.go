@@ -137,7 +137,7 @@ func (m *Model) viewTailscale(w int) string {
 func (m *Model) viewBrew(w int) string {
 	body := wrap(
 		"Homebrew es como sunny y los providers se instalan en macOS. El tap "+
-			"`noesrafa/sunny` despliega los paquetes que vamos a usar más abajo "+
+			"`noesrafa/tap` despliega los paquetes que vamos a usar más abajo "+
 			"(claude-code, sunny mismo).",
 		w,
 	)
@@ -148,9 +148,9 @@ func (m *Model) viewBrew(w int) string {
 		lines = append(lines, failBadge("brew missing — install desde https://brew.sh y vuelve"))
 	}
 	if m.probes.brew && m.probes.tap {
-		lines = append(lines, okBadge("tap noesrafa/sunny present"))
+		lines = append(lines, okBadge("tap noesrafa/tap present"))
 	} else if m.probes.brew {
-		lines = append(lines, dimBadge("tap noesrafa/sunny — pulsa enter para agregarlo"))
+		lines = append(lines, dimBadge("tap noesrafa/tap — pulsa enter para agregarlo"))
 	}
 	return body + "\n\n" + strings.Join(lines, "\n")
 }
@@ -264,30 +264,28 @@ func (m *Model) footer() string {
 
 	switch m.step {
 	case stepWelcome:
-		return join([2]string{"enter", "start"}, [2]string{"esc", "quit"})
+		return join([2]string{"enter", "start"}, [2]string{"→", "next"}, [2]string{"esc", "quit"})
 	case stepDone:
-		return join([2]string{"enter", "exit"}, [2]string{"esc", "exit"})
+		return join([2]string{"enter", "exit"})
 	case stepAgent:
 		return join(
+			[2]string{"enter", "save"},
+			[2]string{"shift+enter", "newline"},
 			[2]string{"tab", "next field"},
-			[2]string{"ctrl+s", "save"},
-			[2]string{"s", "skip"},
-			[2]string{"b", "back"},
-			[2]string{"esc", "back"},
+			[2]string{"→", "skip"},
+			[2]string{"←", "back"},
 		)
 	case stepOllama:
 		return join(
 			[2]string{"enter", "save"},
-			[2]string{"s", "skip"},
-			[2]string{"b", "back"},
-			[2]string{"esc", "back"},
+			[2]string{"→", "skip"},
+			[2]string{"←", "back"},
 		)
 	default:
 		return join(
 			[2]string{"enter", "do it"},
-			[2]string{"s", "skip"},
-			[2]string{"b", "back"},
-			[2]string{"esc", "back"},
+			[2]string{"→", "skip"},
+			[2]string{"←", "back"},
 		)
 	}
 }

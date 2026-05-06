@@ -17,7 +17,7 @@ import (
 //
 // Idempotent: a daemon whose tree is already categorized has nothing
 // to do and the call is a cheap directory walk. Per-agent backups
-// land at root/.trash/migrate-<ts>/<slug>/ before the move so the
+// land at root/.trash/migrate-<ts>/<id>/ before the move so the
 // operation is reversible.
 func MigrateLayout(root string) error {
 	agentsRoot := filepath.Join(root, "agents")

@@ -113,7 +113,7 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 		}
 		d.agents = m.Agents
 		for i, a := range d.agents {
-			if a.Slug == d.defaultAgent {
+			if a.ID == d.defaultAgent {
 				d.agentIdx = i
 				break
 			}
@@ -185,22 +185,22 @@ func (d *NewSessionDialog) confirm() tea.Cmd {
 	// readout shows the right thing immediately. Empty if the agent
 	// list hasn't loaded yet — createSession falls back to the model
 	// defaults in that case.
-	agentSlug := d.defaultAgent
+	agentID := d.defaultAgent
 	model, effort := "", ""
 	if len(d.agents) > 0 && d.agentIdx >= 0 && d.agentIdx < len(d.agents) {
 		picked := d.agents[d.agentIdx]
-		agentSlug = picked.Slug
+		agentID = picked.ID
 		model = picked.Model
 		effort = picked.Effort
 	}
 	host := d.host
 	return func() tea.Msg {
 		return CreateSessionMsg{
-			Cwd:       cwd,
-			Model:     model,
-			Effort:    effort,
-			AgentSlug: agentSlug,
-			Host:      host,
+			Cwd:     cwd,
+			Model:   model,
+			Effort:  effort,
+			AgentID: agentID,
+			Host:    host,
 		}
 	}
 }
@@ -277,7 +277,7 @@ func (d *NewSessionDialog) renderAgentRow(focused bool) string {
 	}
 	opts := make([]string, len(d.agents))
 	for i, a := range d.agents {
-		opts[i] = a.Slug
+		opts[i] = a.Name
 	}
 	return renderRadioRow(opts, d.agentIdx, focused, d.styles)
 }

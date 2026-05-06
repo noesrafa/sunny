@@ -131,16 +131,25 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		// Close the form, reopen the picker so the user sees the change.
 		m.overlay.CloseTop()
-		curSlug, curHost := "", ""
+		curID, curHost := "", ""
 		if cur := m.manager.Current(); cur != nil {
-			curSlug = cur.AgentSlug()
+			curID = cur.AgentID()
 			curHost = cur.Host()
 		}
-		return m, m.overlay.Open(NewAgentPickerDialog(m.fed, curSlug, curHost, m.styles)), true
+		return m, m.overlay.Open(NewAgentPickerDialog(m.fed, curID, curHost, m.styles)), true
+	case OpenAgentRenameMsg:
+		// Picker → rename dialog. Close the picker first so esc on the
+		// rename dialog returns straight to chat (not back to the
+		// picker), matching the form/archive flows.
+		m.overlay.CloseTop()
+		return m, m.overlay.Open(NewAgentRenameDialog(v.ID, v.Name, m.styles)), true
+	case SubmitAgentRenameMsg:
+		m.overlay.CloseTop()
+		return m, m.renameAgentCmd(v), true
 	case DeleteAgentMsg:
 		// Confirm dialog approved; close confirm, archive async.
 		m.overlay.CloseTop()
-		return m, m.deleteAgentCmd(v.Slug), true
+		return m, m.deleteAgentCmd(v.ID), true
 	case AgentChangedMsg:
 		// Bubbles down to the open picker so it refreshes.
 		return m, m.overlay.UpdateTop(v), true
@@ -171,7 +180,7 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		case "agent.created", "agent.updated", "agent.deleted":
 			// Refresh the picker if it's open. Hint string surfaces
 			// the change inline so the user notices.
-			status := v.Event.Host + " · " + v.Event.Type + " " + v.Event.Slug
+			status := v.Event.Host + " · " + v.Event.Type
 			return m, tea.Batch(next, m.overlay.UpdateTop(AgentChangedMsg{Status: status})), true
 		case "tab.opened", "tab.closed", "tab.updated":
 			// Refetch tabs for the originating peer and reconcile.
@@ -368,9 +377,9 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
 	}
-	slug := v.AgentSlug
-	if slug == "" {
-		slug = m.defaultAgent
+	agentID := v.AgentID
+	if agentID == "" {
+		agentID = m.defaultAgent
 	}
 	host := v.Host
 	if host == "" {
@@ -383,12 +392,12 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	tab, err := peerClient.OpenTab(m.ctx, client.OpenTabRequest{
-		AgentSlug: slug,
-		Cwd:       v.Cwd,
+		AgentID: agentID,
+		Cwd:     v.Cwd,
 	})
 	if err != nil {
 		m.lastErr = err
-		m.logger.Error("open tab failed", "err", err, "peer", host, "agent", slug)
+		m.logger.Error("open tab failed", "err", err, "peer", host, "agent", agentID)
 		return m, nil, true
 	}
 	s, err := session.New(m.ctx, v.Cwd, session.Options{
@@ -396,7 +405,7 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 		Model:                    v.Model,
 		Effort:                   v.Effort,
 		DangerousSkipPermissions: m.skipPerms,
-		AgentSlug:                slug,
+		AgentID:                  agentID,
 		Host:                     host,
 		TabID:                    tab.ID,
 		ConvID:                   tab.ConvID,
@@ -407,7 +416,7 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 		m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
 		return m, nil, true
 	}
-	s.Bind(m.ctx, peerClient, slug, host)
+	s.Bind(m.ctx, peerClient, agentID, host)
 
 	mgr := m.peerManagers[host]
 	if mgr == nil {
@@ -598,18 +607,18 @@ func (m *Model) applyTabsRefresh(msg tabsRefreshedMsg) tea.Cmd {
 			continue
 		}
 		s, err := session.New(m.ctx, fallbackCwd(t.Cwd), session.Options{
-			Logger:    m.logger,
-			Title:     t.Title,
-			AgentSlug: t.AgentSlug,
-			Host:      msg.Host,
-			TabID:     t.ID,
-			ConvID:    t.ConvID,
+			Logger:  m.logger,
+			Title:   t.Title,
+			AgentID: t.AgentID,
+			Host:    msg.Host,
+			TabID:   t.ID,
+			ConvID:  t.ConvID,
 		})
 		if err != nil {
 			m.logger.Warn("session for new tab", "peer", msg.Host, "tab", t.ID, "err", err)
 			continue
 		}
-		s.Bind(m.ctx, c, t.AgentSlug, msg.Host)
+		s.Bind(m.ctx, c, t.AgentID, msg.Host)
 		mgr.Add(s)
 		cmds = append(cmds, waitForJournalEvent(s.ID, s.WatchEvents()))
 	}

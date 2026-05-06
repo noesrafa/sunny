@@ -106,10 +106,10 @@ func (e *Engine) Turn(ctx context.Context, agent *store.Agent, messages []provid
 		return nil, fmt.Errorf("build system prompt: %w", err)
 	}
 
-	// opencode driver writes ~/.config/opencode/agent/sunny-<slug>.md
-	// before its first spawn — needs the slug from context.
+	// opencode driver writes ~/.config/opencode/agent/sunny-<id>.md
+	// before its first spawn — needs the id from context.
 	if p.Name() == "opencode" {
-		ctx = opencode.WithAgentSlug(ctx, agent.Slug)
+		ctx = opencode.WithAgentID(ctx, agent.ID)
 	}
 
 	out := make(chan provider.Event, 32)
@@ -318,7 +318,7 @@ func (e *Engine) pick(agent *store.Agent) (provider.Provider, error) {
 	if want != "" {
 		p, ok := e.providers[want]
 		if !ok {
-			return nil, fmt.Errorf("engine: agent %q wants provider %q which isn't configured", agent.Slug, want)
+			return nil, fmt.Errorf("engine: agent %q wants provider %q which isn't configured", agent.ID, want)
 		}
 		return p, nil
 	}

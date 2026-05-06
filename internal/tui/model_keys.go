@@ -25,12 +25,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.TilePicker):
 		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles)), true
 	case key.Matches(msg, m.keymap.Agents):
-		curSlug, curHost := "", ""
+		curID, curHost := "", ""
 		if cur := m.manager.Current(); cur != nil {
-			curSlug = cur.AgentSlug()
+			curID = cur.AgentID()
 			curHost = cur.Host()
 		}
-		return m, m.overlay.Open(NewAgentPickerDialog(m.fed, curSlug, curHost, m.styles)), true
+		return m, m.overlay.Open(NewAgentPickerDialog(m.fed, curID, curHost, m.styles)), true
 	case key.Matches(msg, m.keymap.Secrets):
 		return m, m.overlay.Open(NewSecretsDialog(m.client, m.styles)), true
 	case key.Matches(msg, m.keymap.Settings):
@@ -41,8 +41,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, m.overlay.Open(NewMonitorManagerDialog(m.activePeer, m.allMonitorsForActivePeer(), m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
 		curAgent := m.defaultAgent
-		if cur := m.manager.Current(); cur != nil && cur.AgentSlug() != "" {
-			curAgent = cur.AgentSlug()
+		if cur := m.manager.Current(); cur != nil && cur.AgentID() != "" {
+			curAgent = cur.AgentID()
 		}
 		// New session targets the active peer. For local we keep
 		// initialCwd as a sensible starting point in the dir picker;

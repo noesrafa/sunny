@@ -10,7 +10,7 @@ import (
 // ConversationMeta mirrors internal/conversation.Meta over the wire.
 type ConversationMeta struct {
 	ID            string  `json:"id"`
-	AgentSlug     string  `json:"agent_slug"`
+	AgentID       string  `json:"agent_id"`
 	Title         string  `json:"title"`
 	CreatedAt     string  `json:"created_at"`
 	UpdatedAt     string  `json:"updated_at"`
@@ -32,9 +32,9 @@ type JournalEvent struct {
 // CreateConversation allocates a new conversation under an agent.
 // Title and model are optional — empty falls back to "untitled" /
 // the agent's default model.
-func (c *Client) CreateConversation(ctx context.Context, slug, title, model string) (*ConversationMeta, error) {
+func (c *Client) CreateConversation(ctx context.Context, agentID, title, model string) (*ConversationMeta, error) {
 	body := map[string]string{"title": title, "model": model}
-	resp, err := c.doJSON(ctx, http.MethodPost, "/agents/"+slug+"/conversations", body)
+	resp, err := c.doJSON(ctx, http.MethodPost, "/agents/"+agentID+"/conversations", body)
 	if err != nil {
 		return nil, err
 	}
@@ -50,8 +50,8 @@ func (c *Client) CreateConversation(ctx context.Context, slug, title, model stri
 }
 
 // ListConversations returns metas (newest first) for an agent.
-func (c *Client) ListConversations(ctx context.Context, slug string) ([]ConversationMeta, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+slug+"/conversations", nil)
+func (c *Client) ListConversations(ctx context.Context, agentID string) ([]ConversationMeta, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+agentID+"/conversations", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -72,8 +72,8 @@ func (c *Client) ListConversations(ctx context.Context, slug string) ([]Conversa
 }
 
 // GetConversation returns the conversation meta + the full event journal.
-func (c *Client) GetConversation(ctx context.Context, slug, convID string) (*ConversationMeta, []JournalEvent, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+slug+"/conversations/"+convID, nil)
+func (c *Client) GetConversation(ctx context.Context, agentID, convID string) (*ConversationMeta, []JournalEvent, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+agentID+"/conversations/"+convID, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -97,8 +97,8 @@ func (c *Client) GetConversation(ctx context.Context, slug, convID string) (*Con
 }
 
 // DeleteConversation moves a conversation to ~/.sunny/.archive/. Idempotent.
-func (c *Client) DeleteConversation(ctx context.Context, slug, convID string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+slug+"/conversations/"+convID, nil)
+func (c *Client) DeleteConversation(ctx context.Context, agentID, convID string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+agentID+"/conversations/"+convID, nil)
 	if err != nil {
 		return err
 	}

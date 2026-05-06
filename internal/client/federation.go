@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,7 +133,7 @@ type FederatedListResult struct {
 // failing doesn't fail the whole call — its error lands in
 // result.Errors and the rest of the federation still surfaces.
 //
-// Output is sorted by (host, slug) so the TUI gets stable row order
+// Output is sorted by (host, name) so the TUI gets stable row order
 // without having to sort downstream.
 func (f *Federation) ListAgents(ctx context.Context) FederatedListResult {
 	f.mu.RLock()
@@ -175,7 +176,9 @@ func (f *Federation) ListAgents(ctx context.Context) FederatedListResult {
 		if out.Agents[i].Host != out.Agents[j].Host {
 			return out.Agents[i].Host < out.Agents[j].Host
 		}
-		return out.Agents[i].Slug < out.Agents[j].Slug
+		// Display order is by name (case-insensitive); ID order is
+		// meaningless to humans now that IDs are opaque.
+		return strings.ToLower(out.Agents[i].Name) < strings.ToLower(out.Agents[j].Name)
 	})
 	return out
 }

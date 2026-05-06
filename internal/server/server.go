@@ -140,21 +140,21 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /agents", srv.listAgents)
 	mux.HandleFunc("POST /agents", srv.createAgent)
-	mux.HandleFunc("GET /agents/{slug}", srv.getAgent)
-	mux.HandleFunc("PATCH /agents/{slug}", srv.updateAgent)
-	mux.HandleFunc("DELETE /agents/{slug}", srv.deleteAgent)
-	mux.HandleFunc("GET /agents/{slug}/skills/{name}", srv.getSkill)
-	mux.HandleFunc("GET /agents/{slug}/knowledge/{file...}", srv.getKnowledge)
-	mux.HandleFunc("GET /agents/{slug}/avatar", srv.getAvatar)
-	mux.HandleFunc("PUT /agents/{slug}/avatar", srv.putAvatar)
-	mux.HandleFunc("DELETE /agents/{slug}/avatar", srv.deleteAvatar)
-	mux.HandleFunc("GET /agents/{slug}/conversations", srv.listConversations)
-	mux.HandleFunc("POST /agents/{slug}/conversations", srv.createConversation)
-	mux.HandleFunc("GET /agents/{slug}/conversations/{id}", srv.getConversation)
-	mux.HandleFunc("DELETE /agents/{slug}/conversations/{id}", srv.deleteConversation)
-	mux.HandleFunc("POST /agents/{slug}/conversations/{id}/turns", srv.postTurns)
-	mux.HandleFunc("DELETE /agents/{slug}/conversations/{id}/turn", srv.deleteTurn)
-	mux.HandleFunc("GET /agents/{slug}/conversations/{id}/watch", srv.watchConversation)
+	mux.HandleFunc("GET /agents/{id}", srv.getAgent)
+	mux.HandleFunc("PATCH /agents/{id}", srv.updateAgent)
+	mux.HandleFunc("DELETE /agents/{id}", srv.deleteAgent)
+	mux.HandleFunc("GET /agents/{id}/skills/{name}", srv.getSkill)
+	mux.HandleFunc("GET /agents/{id}/knowledge/{file...}", srv.getKnowledge)
+	mux.HandleFunc("GET /agents/{id}/avatar", srv.getAvatar)
+	mux.HandleFunc("PUT /agents/{id}/avatar", srv.putAvatar)
+	mux.HandleFunc("DELETE /agents/{id}/avatar", srv.deleteAvatar)
+	mux.HandleFunc("GET /agents/{id}/conversations", srv.listConversations)
+	mux.HandleFunc("POST /agents/{id}/conversations", srv.createConversation)
+	mux.HandleFunc("GET /agents/{id}/conversations/{conv_id}", srv.getConversation)
+	mux.HandleFunc("DELETE /agents/{id}/conversations/{conv_id}", srv.deleteConversation)
+	mux.HandleFunc("POST /agents/{id}/conversations/{conv_id}/turns", srv.postTurns)
+	mux.HandleFunc("DELETE /agents/{id}/conversations/{conv_id}/turn", srv.deleteTurn)
+	mux.HandleFunc("GET /agents/{id}/conversations/{conv_id}/watch", srv.watchConversation)
 	mux.HandleFunc("GET /secrets", srv.listSecrets)
 	mux.HandleFunc("PUT /secrets/{provider}", srv.putSecrets)
 	mux.HandleFunc("DELETE /secrets/{provider}", srv.deleteSecrets)
@@ -163,6 +163,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("GET /events", srv.streamEvents)
 	mux.HandleFunc("GET /sunny/identity", srv.streamIdentity)
 	mux.HandleFunc("GET /sunny/version", srv.getSunnyVersion)
+	mux.HandleFunc("GET /sunny/version/check", srv.getSunnyVersionCheck)
 	mux.HandleFunc("POST /sunny/restart", srv.postSunnyRestart)
 	mux.HandleFunc("POST /sunny/update", srv.postSunnyUpdate)
 	mux.HandleFunc("POST /sunny/stop", srv.postSunnyStop)
@@ -186,6 +187,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("PATCH /monitors/{name}", srv.patchMonitor)
 	mux.HandleFunc("GET /monitors/{name}/history", srv.getMonitorHistory)
 	mux.HandleFunc("GET /stats", srv.stats)
+	mux.HandleFunc("GET /providers", srv.listProviders)
 
 	// Compose middleware:
 	//   logging → tailnetIdentity → meshAuth → requireBearer → mux
@@ -275,7 +277,7 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type agentItem struct {
-	Slug        string `json:"slug"`
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
@@ -288,7 +290,7 @@ type agentItem struct {
 
 func summarize(a *store.Agent) agentItem {
 	return agentItem{
-		Slug:        a.Slug,
+		ID:          a.ID,
 		Name:        a.Config.Name,
 		Description: a.Config.Description,
 		Model:       a.Config.Model,
@@ -310,7 +312,7 @@ func (s *server) listAgents(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.store.Agent(r.PathValue("slug"))
+	a, ok := s.store.Agent(r.PathValue("id"))
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -323,7 +325,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 	}
 	out := struct {
-		Slug        string          `json:"slug"`
+		ID          string          `json:"id"`
 		Name        string          `json:"name"`
 		Description string          `json:"description,omitempty"`
 		Model       string          `json:"model"`
@@ -334,7 +336,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 		Skills      []skillItem     `json:"skills"`
 		Knowledge   []knowledgeItem `json:"knowledge"`
 	}{
-		Slug:        a.Slug,
+		ID:          a.ID,
 		Name:        a.Config.Name,
 		Description: a.Config.Description,
 		Model:       a.Config.Model,
@@ -355,7 +357,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getSkill(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.store.Agent(r.PathValue("slug"))
+	a, ok := s.store.Agent(r.PathValue("id"))
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -389,7 +391,7 @@ func (s *server) getSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) getKnowledge(w http.ResponseWriter, r *http.Request) {
-	a, ok := s.store.Agent(r.PathValue("slug"))
+	a, ok := s.store.Agent(r.PathValue("id"))
 	if !ok {
 		http.NotFound(w, r)
 		return

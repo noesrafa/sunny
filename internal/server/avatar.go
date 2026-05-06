@@ -15,8 +15,8 @@ import (
 // to a 512×512 lossless WebP, and stores it as avatar.webp in the
 // agent's directory. Replaces any existing avatar atomically.
 func (s *server) putAvatar(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	a, ok := s.store.Agent(slug)
+	agentID := r.PathValue("id")
+	a, ok := s.store.Agent(agentID)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -38,8 +38,8 @@ func (s *server) putAvatar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.store.SetHasAvatar(slug, true)
-	s.publish(events.AgentUpdated, slug, "")
+	s.store.SetHasAvatar(agentID, true)
+	s.publish(events.AgentUpdated, agentID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -47,8 +47,8 @@ func (s *server) putAvatar(w http.ResponseWriter, r *http.Request) {
 // app can render avatars via a plain <Image> tag without juggling
 // auth headers. The route is exempted by avatarExempt below.
 func (s *server) getAvatar(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	a, ok := s.store.Agent(slug)
+	agentID := r.PathValue("id")
+	a, ok := s.store.Agent(agentID)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -66,8 +66,8 @@ func (s *server) getAvatar(w http.ResponseWriter, r *http.Request) {
 // deleteAvatar removes avatar.webp from the agent's directory.
 // Idempotent — already-missing returns 204.
 func (s *server) deleteAvatar(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	a, ok := s.store.Agent(slug)
+	agentID := r.PathValue("id")
+	a, ok := s.store.Agent(agentID)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -76,12 +76,12 @@ func (s *server) deleteAvatar(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.store.SetHasAvatar(slug, false)
-	s.publish(events.AgentUpdated, slug, "")
+	s.store.SetHasAvatar(agentID, false)
+	s.publish(events.AgentUpdated, agentID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// avatarExempt reports whether path is `GET /agents/<slug>/avatar`.
+// avatarExempt reports whether path is `GET /agents/<id>/avatar`.
 // requireBearer skips bearer enforcement for these so the app can
 // render <Image source={{uri: ...}}/> without auth-header gymnastics.
 // Only GETs are exempt — PUT/DELETE still require the bearer.
@@ -89,7 +89,7 @@ func avatarExempt(method, path string) bool {
 	if method != http.MethodGet {
 		return false
 	}
-	// /agents/{slug}/avatar — exactly four segments, last == "avatar".
+	// /agents/{id}/avatar — exactly three segments, last == "avatar".
 	clean := strings.TrimPrefix(filepath.ToSlash(path), "/")
 	parts := strings.Split(clean, "/")
 	return len(parts) == 3 && parts[0] == "agents" && parts[2] == "avatar"

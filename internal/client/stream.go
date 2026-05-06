@@ -14,7 +14,7 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-// TurnRequest is the body of POST /agents/{slug}/conversations/{id}/turns.
+// TurnRequest is the body of POST /agents/{id}/conversations/{conv_id}/turns.
 //
 // ProviderState is intentionally absent: the daemon tracks it in the
 // conversation's meta.json so it survives daemon restarts. Clients

@@ -12,25 +12,27 @@ import (
 
 // AgentPickerDialog lists every agent across the federation (local
 // daemon + ~/.sunny/peers.yaml) and lets the user switch to one
-// (enter), create a new one (n), edit (e), or archive (a/d).
+// (enter), create a new one (n), edit (e), rename (r), or
+// archive (a/d).
 //
 // The agent list loads asynchronously via Init() so the dialog opens
 // instantly even if any peer is slow. Per-peer failures don't fail
 // the whole load — they show up as a footer status line, the rest of
 // the federation still renders.
 //
-// Edit and archive only target local agents in v0.12 — remote CRUD
-// over federated peers is intentionally deferred (auth flow first).
+// Edit, rename, and archive only target local agents in v0.19 —
+// remote CRUD over federated peers is intentionally deferred (auth
+// flow first).
 type AgentPickerDialog struct {
 	fed       *client.Federation
-	currSlug  string // current session's agent — highlighted in the list
-	currHost  string // current session's peer (used with currSlug for the highlight)
+	currID    string // current session's agent — highlighted in the list
+	currHost  string // current session's peer (used with currID for the highlight)
 	agents    []client.FederatedAgent
 	loadErrs  map[string]error
 	multiHost bool // true when at least one peer beyond local is in the roster
 	selected  int
 	loading   bool
-	statusMsg string // ephemeral feedback ("agent X deleted", etc.)
+	statusMsg string // ephemeral feedback ("agent X archived", etc.)
 	styles    Styles
 }
 
@@ -41,15 +43,15 @@ type AgentsLoadedMsg struct {
 }
 
 // SwitchAgentMsg asks the root model to spawn a new session bound to
-// slug on the named federation peer. Host empty = local.
+// id on the named federation peer. Host empty = local.
 type SwitchAgentMsg struct {
-	Slug string
+	ID   string
 	Host string
 }
 
-// OpenAgentFormMsg opens the create/edit form. Empty Slug = create mode.
+// OpenAgentFormMsg opens the create/edit form. Empty EditID = create mode.
 type OpenAgentFormMsg struct {
-	EditSlug    string
+	EditID      string
 	Name        string
 	Description string
 	Model       string
@@ -58,8 +60,15 @@ type OpenAgentFormMsg struct {
 	Prompt      string
 }
 
+// OpenAgentRenameMsg opens the lightweight rename dialog (just Name).
+// Local agents only.
+type OpenAgentRenameMsg struct {
+	ID   string
+	Name string
+}
+
 // DeleteAgentMsg requests deletion of an agent, confirmed by the picker.
-type DeleteAgentMsg struct{ Slug string }
+type DeleteAgentMsg struct{ ID string }
 
 // AgentChangedMsg is emitted by the root after a mutation lands so any
 // open AgentPickerDialog can refresh.
@@ -67,14 +76,14 @@ type AgentChangedMsg struct {
 	Status string // human-readable, shown briefly under the list
 }
 
-func NewAgentPickerDialog(fed *client.Federation, currSlug, currHost string, s Styles) *AgentPickerDialog {
+func NewAgentPickerDialog(fed *client.Federation, currID, currHost string, s Styles) *AgentPickerDialog {
 	multi := false
 	if fed != nil {
 		multi = len(fed.Names()) > 1
 	}
 	return &AgentPickerDialog{
 		fed:       fed,
-		currSlug:  currSlug,
+		currID:    currID,
 		currHost:  currHost,
 		loading:   true,
 		multiHost: multi,
@@ -109,9 +118,9 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 		d.loading = false
 		d.loadErrs = m.Errors
 		d.agents = m.Agents
-		// Snap selection to the current (host, slug) if visible.
+		// Snap selection to the current (host, id) if visible.
 		for i, a := range d.agents {
-			if a.Slug == d.currSlug && a.Host == d.currHost {
+			if a.ID == d.currID && a.Host == d.currHost {
 				d.selected = i
 				break
 			}
@@ -140,7 +149,7 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 				return nil
 			}
 			pick := d.agents[d.selected]
-			return func() tea.Msg { return SwitchAgentMsg{Slug: pick.Slug, Host: pick.Host} }
+			return func() tea.Msg { return SwitchAgentMsg{ID: pick.ID, Host: pick.Host} }
 		case "n":
 			return func() tea.Msg {
 				return OpenAgentFormMsg{Model: "claude-opus-4-7"}
@@ -151,12 +160,12 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 			}
 			pick := d.agents[d.selected]
 			if pick.Host != "local" {
-				d.statusMsg = "Edit only works on local agents (v0.12)"
+				d.statusMsg = "Edit only works on local agents (v0.19)"
 				return nil
 			}
 			return func() tea.Msg {
 				return OpenAgentFormMsg{
-					EditSlug:    pick.Slug,
+					EditID:      pick.ID,
 					Name:        pick.Name,
 					Description: pick.Description,
 					Model:       pick.Model,
@@ -165,6 +174,18 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 					// Prompt is fetched by the form itself via GetAgent —
 					// AgentSummary doesn't carry it.
 				}
+			}
+		case "r":
+			if len(d.agents) == 0 {
+				return nil
+			}
+			pick := d.agents[d.selected]
+			if pick.Host != "local" {
+				d.statusMsg = "Rename only works on local agents (v0.19)"
+				return nil
+			}
+			return func() tea.Msg {
+				return OpenAgentRenameMsg{ID: pick.ID, Name: pick.Name}
 			}
 		case "d", "a":
 			// Both 'd' (legacy "delete") and 'a' (archive) trigger the
@@ -175,16 +196,16 @@ func (d *AgentPickerDialog) Update(msg tea.Msg) tea.Cmd {
 			}
 			pick := d.agents[d.selected]
 			if pick.Host != "local" {
-				d.statusMsg = "Archive only works on local agents (v0.12)"
+				d.statusMsg = "Archive only works on local agents (v0.19)"
 				return nil
 			}
 			body := []string{
-				"Archive agent \"" + pick.Name + "\" (slug " + pick.Slug + ")?",
+				"Archive agent \"" + pick.Name + "\"?",
 				"",
 				"Moved to ~/.sunny/.archive/. Conversations go with it.",
 				"Restore later by moving the folder back under ~/.sunny/agents/.",
 			}
-			confirm := NewConfirmDialog(d.styles, "Archive agent", body, DeleteAgentMsg{Slug: pick.Slug})
+			confirm := NewConfirmDialog(d.styles, "Archive agent", body, DeleteAgentMsg{ID: pick.ID})
 			return func() tea.Msg { return OpenSubDialogMsg{Dialog: confirm} }
 		}
 	}
@@ -229,6 +250,7 @@ func (d *AgentPickerDialog) View(width, height int) string {
 	hints := d.styles.StatusKey.Render("enter") + d.styles.Hint.Render(" use  ") +
 		d.styles.StatusKey.Render("n") + d.styles.Hint.Render(" new  ") +
 		d.styles.StatusKey.Render("e") + d.styles.Hint.Render(" edit  ") +
+		d.styles.StatusKey.Render("r") + d.styles.Hint.Render(" rename  ") +
 		d.styles.StatusKey.Render("a") + d.styles.Hint.Render(" archive  ") +
 		d.styles.StatusKey.Render("esc") + d.styles.Hint.Render(" close")
 	lines = append(lines, "", hints)
@@ -243,16 +265,16 @@ func (d *AgentPickerDialog) renderRow(a client.FederatedAgent, selected bool) st
 		titleStyle = d.styles.HeaderTitle
 	}
 	suffix := ""
-	if a.Slug == d.currSlug && a.Host == d.currHost {
+	if a.ID == d.currID && a.Host == d.currHost {
 		suffix = " " + d.styles.StatusIdle.Render("●")
 	}
-	// Drop the host label when the federation is local-only — keeps
-	// the picker uncluttered for the common single-machine case.
-	slugLabel := a.Slug
+	// Display name only. For multi-host federations append the peer
+	// label so the user can disambiguate same-named agents on
+	// different daemons. The opaque id never surfaces in the UI.
+	first := marker + titleStyle.Render(a.Name) + suffix
 	if d.multiHost {
-		slugLabel = a.Host + "/" + a.Slug
+		first += " " + d.styles.Hint.Render("·"+a.Host)
 	}
-	first := marker + titleStyle.Render(a.Name) + " " + d.styles.Hint.Render("·"+slugLabel) + suffix
 	desc := a.Description
 	if desc == "" {
 		desc = "(no description)"

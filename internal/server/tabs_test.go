@@ -12,7 +12,7 @@ import (
 
 func TestRebindTabConvSwapsConvAndPreservesTab(t *testing.T) {
 	impl, slug, oldConvID := newStatsImpl(t)
-	tab, err := impl.tabs.Add(&tabs.Tab{AgentSlug: slug, ConvID: oldConvID, Title: "t"})
+	tab, err := impl.tabs.Add(&tabs.Tab{AgentID: slug, ConvID: oldConvID, Title: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +42,8 @@ func TestRebindTabConvSwapsConvAndPreservesTab(t *testing.T) {
 	if got.ConvID == "" || got.ConvID == oldConvID {
 		t.Errorf("conv_id not rotated: got %q, old %q", got.ConvID, oldConvID)
 	}
-	if got.AgentSlug != slug {
-		t.Errorf("agent slug changed: got %s, want %s", got.AgentSlug, slug)
+	if got.AgentID != slug {
+		t.Errorf("agent id changed: got %s, want %s", got.AgentID, slug)
 	}
 
 	stored, err := impl.tabs.Get(tab.ID)

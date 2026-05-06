@@ -5,8 +5,38 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.18.0`** (per-peer TUI + multi-viewer real-
-time + server-side tabs). Three big shifts on top of v0.17:
+**Latest release: `v0.28.0`** (opaque agent IDs + version-check
+endpoint, on top of the v0.18→v0.27 line of TUI/runs/monitors/avatar
+work). Two new shifts in v0.28:
+
+1. **Agent identity is opaque.** Every agent has an `id` (shape
+   `agt_<unix_ms>_<8hex>`, generated server-side) plus a mutable
+   `name`. The id is the only handle on disk + on the wire; the
+   name is display-only. Renaming = `PATCH /agents/{id}
+   {"name":"…"}` — no file moves, no journal rewrites. The TUI
+   picker hides the id entirely; `r` opens a lightweight rename
+   dialog. The seeded default keeps `id: sunny` for stability;
+   user-created agents get fresh `agt_…` ids.
+2. **Self-update awareness.** `GET /sunny/version/check` hits the
+   GitHub releases API (cached 5 min server-side) and returns
+   `{current, latest, update_available, release_url}`. Pair it with
+   the existing `POST /sunny/update` to offer in-app update flow.
+   `dev` builds and unreachable GitHub never trigger update prompts.
+
+**v0.18 → v0.27 highlights** (background since the doc was
+updated): runs (background services with per-peer manager +
+sidebar, `Ctrl+R`), monitors (scheduler + dispatch action +
+history viewer, `Ctrl+B`), per-agent avatars at `/agents/{id}/
+avatar`, dir picker that walks the target peer's filesystem,
+self-update via `sunny update` (brew + GitHub fallback) and
+HTTP `POST /sunny/update`, `/stats` snapshot endpoint,
+`turn.{started,done,cancelled}` bus events, runtime-context
+auto-injection into the system prompt.
+
+The original v0.18 release notes are kept below for context.
+
+**v0.18 (per-peer TUI + multi-viewer real-time + server-side
+tabs).** Three big shifts on top of v0.17:
 
 1. **Tabs live on the daemon**, not in each TUI. `~/.sunny/tabs.json`
    is the source of truth; the TUI fetches via `GET /tabs` at boot
@@ -405,22 +435,30 @@ Each driver translates this to its native shape.
 
 ## Multi-agent
 
-- Agents live at `~/.sunny/agents/<slug>/`. Each owns its skills,
+- Agents live at `~/.sunny/agents/<id>/`. Each owns its skills,
   knowledge, conversations, and persona.
+- **Identity model (v0.19+):** every agent has an opaque, immutable
+  `id` (shape `agt_<unix_ms>_<8hex>`, generated server-side on
+  create) plus a mutable display `name` in `agent.yaml`. The id
+  doubles as the directory name on disk and is the only handle on
+  the wire (URLs, JSON, journal references). Renaming an agent
+  patches `name` only — no files move, no journal references break.
+  Hand-authored agent.yaml files may use any string matching
+  `[a-z0-9][a-z0-9_-]*` as their id (the seeded default uses
+  `id: sunny`).
 - CRUD over HTTP:
-  - `GET /agents` — list summaries
-  - `POST /agents` — create (`{slug,name,description,model,prompt}`)
-  - `GET /agents/{slug}` — full detail (now includes `prompt`)
-  - `PATCH /agents/{slug}` — partial update; nil fields untouched
-  - `DELETE /agents/{slug}` — moves dir to `~/.sunny/.trash/`,
+  - `GET /agents` — list summaries (returns `id` + `name` + …)
+  - `POST /agents` — create (`{name, description, model, prompt, …}`).
+    Server mints the id; clients never supply one.
+  - `GET /agents/{id}` — full detail (includes `prompt`)
+  - `PATCH /agents/{id}` — partial update; rename is just a name patch
+  - `DELETE /agents/{id}` — moves dir to `~/.sunny/.archive/`,
     idempotent
-- Slug shape: `[a-z0-9][a-z0-9-]*`. Immutable after creation. To
-  rename an agent, copy/move on disk and reload the daemon — the
-  HTTP API doesn't support rename in v0.6.
 - TUI: `ctrl+a` opens the agent picker. Enter spawns a new session
   bound to the chosen agent; `n` opens the create form, `e` edits,
-  `d` deletes (with confirm). Each TUI session is bound to one
-  agent for its lifetime — switching means a new session/tab.
+  `r` renames (name patch only), `a/d` archives. Each TUI session
+  is bound to one agent for its lifetime — switching means a new
+  session/tab.
 - The in-memory `store.Store` is mutated atomically with the
   filesystem on every CRUD op. No fsnotify (yet).
 
@@ -429,8 +467,9 @@ Each driver translates this to its native shape.
 Every chat lives under its agent:
 
 ```
-~/.sunny/agents/<slug>/conversations/<conv_id>/
+~/.sunny/agents/<agent_id>/conversations/<conv_id>/
   meta.json     — title, timestamps, msg_count, model, provider_state
+                  (carries `agent_id`, not slug)
   events.jsonl  — append-only journal (user, text_delta, thinking_delta,
                   tool_use, tool_result, done, error, cancelled)
 ```

@@ -16,7 +16,7 @@ import (
 // stream's Event interface.
 type BusEvent struct {
 	Type        string `json:"type"`
-	Slug        string `json:"slug,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
 	ConvID      string `json:"conv_id,omitempty"`
 	TabID       string `json:"tab_id,omitempty"`
 	RunID       string `json:"run_id,omitempty"`

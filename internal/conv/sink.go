@@ -37,7 +37,7 @@ type Sink struct {
 	log   *slog.Logger
 
 	mu   sync.Mutex
-	hubs map[string]*hub // key = slug + "/" + convID
+	hubs map[string]*hub // key = agentID + "/" + convID
 }
 
 type hub struct {
@@ -69,13 +69,13 @@ func NewSink(store *conversation.Store, log *slog.Logger) *Sink {
 // rewind the counter — a gap is less harmful than a duplicate seq).
 // The error propagates so the caller can decide whether to retry or
 // fail the turn.
-func (s *Sink) Append(slug, convID, kind string, payload any) (Event, error) {
+func (s *Sink) Append(agentID, convID, kind string, payload any) (Event, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return Event{}, fmt.Errorf("conv.Sink: marshal payload: %w", err)
 	}
 
-	h := s.hubFor(slug, convID)
+	h := s.hubFor(agentID, convID)
 	h.mu.Lock()
 	h.seq++
 	seq := h.seq
@@ -87,7 +87,7 @@ func (s *Sink) Append(slug, convID, kind string, payload any) (Event, error) {
 	// we publish below with a zero time — watchers on the live tail
 	// would then see At=0001-01-01.
 	ev := Event{Seq: seq, Kind: kind, At: time.Now().UTC(), Payload: raw}
-	if err := s.store.Append(slug, convID, ev); err != nil {
+	if err := s.store.Append(agentID, convID, ev); err != nil {
 		// Still publish: subscribers see the event in real time even
 		// if the journal write failed. Watchers won't be able to
 		// resume past it via ?since=, but live viewers stay in sync.
@@ -106,7 +106,7 @@ func (s *Sink) Append(slug, convID, kind string, payload any) (Event, error) {
 //
 // The recipe for a resumable watcher:
 //
-//	ch, current, cancel := sink.Subscribe(slug, convID)
+//	ch, current, cancel := sink.Subscribe(agentID, convID)
 //	defer cancel()
 //	for ev := range journal where since < ev.Seq && ev.Seq <= current {
 //	    forward(ev)
@@ -117,8 +117,8 @@ func (s *Sink) Append(slug, convID, kind string, payload any) (Event, error) {
 //
 // Always defer cancel — a leaked subscription holds a buffered chan
 // and a slot in the hub forever.
-func (s *Sink) Subscribe(slug, convID string) (<-chan Event, int64, func()) {
-	h := s.hubFor(slug, convID)
+func (s *Sink) Subscribe(agentID, convID string) (<-chan Event, int64, func()) {
+	h := s.hubFor(agentID, convID)
 	sub := &subscription{ch: make(chan Event, 256)}
 	h.mu.Lock()
 	current := h.seq
@@ -135,12 +135,12 @@ func (s *Sink) Subscribe(slug, convID string) (<-chan Event, int64, func()) {
 	return sub.ch, current, cancel
 }
 
-// hubFor returns the hub for (slug, convID), creating it on first
+// hubFor returns the hub for (agentID, convID), creating it on first
 // touch. First touch primes the seq counter from the on-disk journal
 // so freshly-loaded conversations don't start at seq=1 and shadow
 // existing events.
-func (s *Sink) hubFor(slug, convID string) *hub {
-	key := slug + "/" + convID
+func (s *Sink) hubFor(agentID, convID string) *hub {
+	key := agentID + "/" + convID
 	s.mu.Lock()
 	h, ok := s.hubs[key]
 	if ok {
@@ -155,7 +155,7 @@ func (s *Sink) hubFor(slug, convID string) *hub {
 	// a missing or unreadable journal just leaves seq at 0 and new
 	// events start at 1. The caller will see the journal error on
 	// the first Append/Get if it's a real problem.
-	if _, events, err := s.store.Get(slug, convID); err == nil {
+	if _, events, err := s.store.Get(agentID, convID); err == nil {
 		var max int64
 		for _, ev := range events {
 			if ev.Seq > max {

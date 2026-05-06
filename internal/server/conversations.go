@@ -11,12 +11,12 @@ import (
 
 // listConversations responds with metas (newest first) for an agent.
 func (s *server) listConversations(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	if _, ok := s.store.Agent(slug); !ok {
+	agentID := r.PathValue("id")
+	if _, ok := s.store.Agent(agentID); !ok {
 		http.NotFound(w, r)
 		return
 	}
-	metas, err := s.conv.List(slug)
+	metas, err := s.conv.List(agentID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -33,8 +33,8 @@ func (s *server) listConversations(w http.ResponseWriter, r *http.Request) {
 //
 // Response: the freshly written meta.json.
 func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	a, ok := s.store.Agent(slug)
+	agentID := r.PathValue("id")
+	a, ok := s.store.Agent(agentID)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -53,7 +53,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = a.Config.Model
 	}
-	meta, err := s.conv.Create(slug, body.Title, model)
+	meta, err := s.conv.Create(agentID, body.Title, model)
 	if err != nil {
 		if errors.Is(err, conversation.ErrNotFound) {
 			http.NotFound(w, r)
@@ -62,19 +62,19 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.publish(evts.ConvCreated, slug, meta.ID)
+	s.publish(evts.ConvCreated, agentID, meta.ID)
 	writeJSON(w, http.StatusCreated, meta)
 }
 
 // getConversation returns the meta + the full event journal for a conv.
 func (s *server) getConversation(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	id := r.PathValue("id")
-	if _, ok := s.store.Agent(slug); !ok {
+	agentID := r.PathValue("id")
+	convID := r.PathValue("conv_id")
+	if _, ok := s.store.Agent(agentID); !ok {
 		http.NotFound(w, r)
 		return
 	}
-	meta, events, err := s.conv.Get(slug, id)
+	meta, events, err := s.conv.Get(agentID, convID)
 	if err != nil {
 		if errors.Is(err, conversation.ErrNotFound) {
 			http.NotFound(w, r)
@@ -94,16 +94,16 @@ func (s *server) getConversation(w http.ResponseWriter, r *http.Request) {
 
 // deleteConversation moves a conversation to ~/.sunny/.trash/. Idempotent.
 func (s *server) deleteConversation(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	id := r.PathValue("id")
-	if _, ok := s.store.Agent(slug); !ok {
+	agentID := r.PathValue("id")
+	convID := r.PathValue("conv_id")
+	if _, ok := s.store.Agent(agentID); !ok {
 		http.NotFound(w, r)
 		return
 	}
-	if err := s.conv.Delete(slug, id); err != nil {
+	if err := s.conv.Delete(agentID, convID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.publish(evts.ConvDeleted, slug, id)
+	s.publish(evts.ConvDeleted, agentID, convID)
 	w.WriteHeader(http.StatusNoContent)
 }

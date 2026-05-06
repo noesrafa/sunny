@@ -68,10 +68,10 @@ func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
 
 // publish is a tiny helper so handler bodies stay readable. nil-safe
 // for tests that construct a server without a hub.
-func (s *server) publish(t events.Type, slug, convID string) {
+func (s *server) publish(t events.Type, agentID, convID string) {
 	if s.hub == nil {
 		return
 	}
-	s.hub.Publish(events.Event{Type: t, Slug: slug, ConvID: convID})
+	s.hub.Publish(events.Event{Type: t, AgentID: agentID, ConvID: convID})
 }
 

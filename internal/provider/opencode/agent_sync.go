@@ -23,17 +23,17 @@ const agentDirEnv = "SUNNY_OPENCODE_AGENT_DIR"
 const agentNamePrefix = "sunny-"
 
 // syncAgentFile writes a markdown agent file at
-// ~/.config/opencode/agent/sunny-<slug>.md whose body is the engine's
+// ~/.config/opencode/agent/sunny-<id>.md whose body is the engine's
 // flattened system prompt. opencode then loads it via `--agent
-// sunny-<slug>` on the next `opencode run`.
+// sunny-<id>` on the next `opencode run`.
 //
 // The file is rewritten only when the prompt content changes, so
 // repeated turns against an unchanged agent are cheap (one stat).
 //
 // Returns the agent name to pass on the command line.
-func syncAgentFile(slug string, sys []provider.SystemBlock) (string, error) {
-	if slug == "" {
-		return "", fmt.Errorf("opencode: agent slug required")
+func syncAgentFile(agentID string, sys []provider.SystemBlock) (string, error) {
+	if agentID == "" {
+		return "", fmt.Errorf("opencode: agent id required")
 	}
 	dir, err := agentDir()
 	if err != nil {
@@ -44,8 +44,8 @@ func syncAgentFile(slug string, sys []provider.SystemBlock) (string, error) {
 	}
 
 	body := flattenSystem(sys)
-	content := buildAgentMarkdown(slug, body)
-	name := agentNamePrefix + slug
+	content := buildAgentMarkdown(agentID, body)
+	name := agentNamePrefix + agentID
 	path := filepath.Join(dir, name+".md")
 
 	// Skip the write when the file matches what we'd produce. Avoids
@@ -77,10 +77,10 @@ func agentDir() (string, error) {
 // frontmatter+body format. mode=primary makes it directly invokable
 // from `--agent`; we don't set permissions because sunny passes
 // --dangerously-skip-permissions on every spawn anyway.
-func buildAgentMarkdown(slug, body string) string {
+func buildAgentMarkdown(agentID, body string) string {
 	var b strings.Builder
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "description: sunny agent %s (managed by sunny — do not edit by hand)\n", slug)
+	fmt.Fprintf(&b, "description: sunny agent %s (managed by sunny — do not edit by hand)\n", agentID)
 	b.WriteString("mode: primary\n")
 	b.WriteString("---\n\n")
 	b.WriteString(strings.TrimSpace(body))

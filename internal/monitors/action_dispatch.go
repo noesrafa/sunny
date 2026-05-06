@@ -6,11 +6,11 @@ import (
 )
 
 // DispatchFunc is the seam between the monitors package and the
-// daemon's engine: given an agent slug + a final prompt, run a
+// daemon's engine: given an agent id + a final prompt, run a
 // one-shot turn and return the model's text. Implementation lives
 // in cmd/sunny/serve.go (closes over engine + store) so this
 // package stays free of engine/store imports.
-type DispatchFunc func(ctx context.Context, slug, prompt string) (string, error)
+type DispatchFunc func(ctx context.Context, agentID, prompt string) (string, error)
 
 // DispatchAction sends a templated prompt to a named agent and
 // returns the model's response. Synchronous on purpose — chained
@@ -35,11 +35,11 @@ func (a *DispatchAction) Run(ctx context.Context, cfg map[string]any, item Item,
 	if a.Fn == nil {
 		return nil, fmt.Errorf("dispatch: no engine wired")
 	}
-	slug, _ := cfg["agent"].(string)
+	agentID, _ := cfg["agent"].(string)
 	promptTmpl, _ := cfg["prompt"].(string)
-	if slug == "" || promptTmpl == "" {
+	if agentID == "" || promptTmpl == "" {
 		return nil, fmt.Errorf("dispatch: `agent` and `prompt` required")
 	}
 	prompt := Substitute(promptTmpl, item, vars)
-	return a.Fn(ctx, slug, prompt)
+	return a.Fn(ctx, agentID, prompt)
 }

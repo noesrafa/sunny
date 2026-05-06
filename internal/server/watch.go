@@ -15,7 +15,7 @@ import (
 // happens, plus a backfill of everything since the client's last
 // known seq.
 //
-// Path: GET /agents/{slug}/conversations/{id}/watch?since=<seq>
+// Path: GET /agents/{id}/conversations/{conv_id}/watch?since=<seq>
 //
 // Wire format: one SSE frame per event, no `event:` tag —
 //
@@ -46,9 +46,9 @@ func (s *server) watchConversation(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "watch not configured", http.StatusServiceUnavailable)
 		return
 	}
-	slug := r.PathValue("slug")
-	convID := r.PathValue("id")
-	if _, ok := s.store.Agent(slug); !ok {
+	agentID := r.PathValue("id")
+	convID := r.PathValue("conv_id")
+	if _, ok := s.store.Agent(agentID); !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -56,7 +56,7 @@ func (s *server) watchConversation(w http.ResponseWriter, r *http.Request) {
 	// is missing. We don't actually use the events list yet (we'll
 	// re-fetch after subscribing) because we need the subscribe
 	// race protection.
-	if _, _, err := s.conv.Get(slug, convID); err != nil {
+	if _, _, err := s.conv.Get(agentID, convID); err != nil {
 		if errors.Is(err, conversation.ErrNotFound) {
 			http.NotFound(w, r)
 			return
@@ -90,11 +90,11 @@ func (s *server) watchConversation(w http.ResponseWriter, r *http.Request) {
 	// (1) Subscribe FIRST. Anything appended after this returns goes
 	//     into ch; anything appended before this returns has seq
 	//     <= current.
-	ch, current, cancel := s.sink.Subscribe(slug, convID)
+	ch, current, cancel := s.sink.Subscribe(agentID, convID)
 	defer cancel()
 
 	// (2) Replay the journal up to current.
-	_, journal, err := s.conv.Get(slug, convID)
+	_, journal, err := s.conv.Get(agentID, convID)
 	if err == nil {
 		for _, ev := range journal {
 			if ev.Seq <= since {

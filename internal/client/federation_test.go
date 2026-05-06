@@ -27,12 +27,12 @@ func newFakeDaemon(t *testing.T, agents []AgentSummary, fail bool) *httptest.Ser
 
 func TestFederation_ListAgents_FanOut(t *testing.T) {
 	local := newFakeDaemon(t, []AgentSummary{
-		{Slug: "alpha", Name: "Alpha"},
-		{Slug: "beta", Name: "Beta"},
+		{ID: "agt_a", Name: "Alpha"},
+		{ID: "agt_b", Name: "Beta"},
 	}, false)
 	defer local.Close()
 	vps := newFakeDaemon(t, []AgentSummary{
-		{Slug: "zoro", Name: "Zoro"},
+		{ID: "agt_z", Name: "Zoro"},
 	}, false)
 	defer vps.Close()
 
@@ -49,21 +49,21 @@ func TestFederation_ListAgents_FanOut(t *testing.T) {
 	if len(got.Agents) != 3 {
 		t.Fatalf("got %d agents, want 3 — %+v", len(got.Agents), got.Agents)
 	}
-	// Sorted by (host, slug): local/alpha, local/beta, vps/zoro
-	want := []struct{ host, slug string }{
-		{"local", "alpha"},
-		{"local", "beta"},
-		{"vps", "zoro"},
+	// Sorted by (host, name): local/Alpha, local/Beta, vps/Zoro
+	want := []struct{ host, name string }{
+		{"local", "Alpha"},
+		{"local", "Beta"},
+		{"vps", "Zoro"},
 	}
 	for i, w := range want {
-		if got.Agents[i].Host != w.host || got.Agents[i].Slug != w.slug {
-			t.Errorf("[%d] got %s/%s, want %s/%s", i, got.Agents[i].Host, got.Agents[i].Slug, w.host, w.slug)
+		if got.Agents[i].Host != w.host || got.Agents[i].Name != w.name {
+			t.Errorf("[%d] got %s/%s, want %s/%s", i, got.Agents[i].Host, got.Agents[i].Name, w.host, w.name)
 		}
 	}
 }
 
 func TestFederation_ListAgents_PeerFailureIsolated(t *testing.T) {
-	local := newFakeDaemon(t, []AgentSummary{{Slug: "alpha"}}, false)
+	local := newFakeDaemon(t, []AgentSummary{{ID: "agt_a", Name: "Alpha"}}, false)
 	defer local.Close()
 	vps := newFakeDaemon(t, nil, true) // 500
 	defer vps.Close()

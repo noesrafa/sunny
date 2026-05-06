@@ -2,7 +2,7 @@
 //
 // Layout (per-agent):
 //
-//	~/.sunny/agents/<slug>/conversations/<conv_id>/
+//	~/.sunny/agents/<agent_id>/conversations/<conv_id>/
 //	  meta.json     — title, timestamps, msg_count, model, provider_state
 //	  events.jsonl  — append-only journal: user, text_delta, thinking_delta,
 //	                  tool_use, tool_result, done, error, cancelled
@@ -31,6 +31,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/noesrafa/sunny/internal/agent"
 )
 
 // ErrNotFound is returned when an agent or conversation directory
@@ -40,7 +42,7 @@ var ErrNotFound = errors.New("conversation not found")
 // Meta is the rollup written to meta.json.
 type Meta struct {
 	ID        string    `json:"id"`
-	AgentSlug string    `json:"agent_slug"`
+	AgentID   string    `json:"agent_id"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -69,7 +71,7 @@ type Event struct {
 }
 
 // Store is a filesystem-backed conversation registry, rooted at
-// ~/.sunny/. It locates per-agent conversations by agent slug.
+// ~/.sunny/. It locates per-agent conversations by agent id.
 type Store struct {
 	root string
 }
@@ -78,13 +80,13 @@ func NewStore(root string) *Store { return &Store{root: root} }
 
 // Create allocates a new conversation directory under the given agent
 // and writes the initial meta.json. Title is optional ("" → "untitled").
-func (s *Store) Create(agentSlug, title, model string) (*Meta, error) {
-	if !validSlug(agentSlug) {
-		return nil, fmt.Errorf("invalid agent slug %q", agentSlug)
+func (s *Store) Create(agentID, title, model string) (*Meta, error) {
+	if !agent.ValidID(agentID) {
+		return nil, fmt.Errorf("invalid agent id %q", agentID)
 	}
-	if _, err := os.Stat(s.agentDir(agentSlug)); err != nil {
+	if _, err := os.Stat(s.agentDir(agentID)); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%w: agent %s", ErrNotFound, agentSlug)
+			return nil, fmt.Errorf("%w: agent %s", ErrNotFound, agentID)
 		}
 		return nil, err
 	}
@@ -98,13 +100,13 @@ func (s *Store) Create(agentSlug, title, model string) (*Meta, error) {
 	now := time.Now().UTC()
 	meta := &Meta{
 		ID:        id,
-		AgentSlug: agentSlug,
+		AgentID:   agentID,
 		Title:     title,
 		Model:     model,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	dir := s.convDir(agentSlug, id)
+	dir := s.convDir(agentID, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir conv: %w", err)
 	}
@@ -123,11 +125,11 @@ func (s *Store) Create(agentSlug, title, model string) (*Meta, error) {
 
 // Count returns the number of conversation directories under an
 // agent without parsing any meta.json. Cheaper than List for /stats.
-func (s *Store) Count(agentSlug string) (int, error) {
-	if !validSlug(agentSlug) {
-		return 0, fmt.Errorf("invalid agent slug %q", agentSlug)
+func (s *Store) Count(agentID string) (int, error) {
+	if !agent.ValidID(agentID) {
+		return 0, fmt.Errorf("invalid agent id %q", agentID)
 	}
-	convsDir := filepath.Join(s.agentDir(agentSlug), "conversations")
+	convsDir := filepath.Join(s.agentDir(agentID), "conversations")
 	entries, err := os.ReadDir(convsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -146,11 +148,11 @@ func (s *Store) Count(agentSlug string) (int, error) {
 
 // List returns metas for every conversation under an agent, newest first.
 // Missing agents → empty slice (not an error).
-func (s *Store) List(agentSlug string) ([]*Meta, error) {
-	if !validSlug(agentSlug) {
-		return nil, fmt.Errorf("invalid agent slug %q", agentSlug)
+func (s *Store) List(agentID string) ([]*Meta, error) {
+	if !agent.ValidID(agentID) {
+		return nil, fmt.Errorf("invalid agent id %q", agentID)
 	}
-	convsDir := filepath.Join(s.agentDir(agentSlug), "conversations")
+	convsDir := filepath.Join(s.agentDir(agentID), "conversations")
 	entries, err := os.ReadDir(convsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -176,8 +178,8 @@ func (s *Store) List(agentSlug string) ([]*Meta, error) {
 }
 
 // Get returns the meta + every event for a conversation.
-func (s *Store) Get(agentSlug, convID string) (*Meta, []Event, error) {
-	dir, err := s.requireConv(agentSlug, convID)
+func (s *Store) Get(agentID, convID string) (*Meta, []Event, error) {
+	dir, err := s.requireConv(agentID, convID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -195,8 +197,8 @@ func (s *Store) Get(agentSlug, convID string) (*Meta, []Event, error) {
 // Delete archives a conversation directory under ~/.sunny/.archive/.
 // Idempotent for missing conversations (no-op). Restoration is manual:
 // move the timestamped folder back into the agent's conversations/ dir.
-func (s *Store) Delete(agentSlug, convID string) error {
-	dir, err := s.requireConv(agentSlug, convID)
+func (s *Store) Delete(agentID, convID string) error {
+	dir, err := s.requireConv(agentID, convID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil
@@ -208,13 +210,13 @@ func (s *Store) Delete(agentSlug, convID string) error {
 		return err
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
-	target := filepath.Join(archiveDir, fmt.Sprintf("%s__%s__%s", agentSlug, convID, stamp))
+	target := filepath.Join(archiveDir, fmt.Sprintf("%s__%s__%s", agentID, convID, stamp))
 	return os.Rename(dir, target)
 }
 
 // Append adds one event to the JSONL journal. Stamps Now() if At is zero.
-func (s *Store) Append(agentSlug, convID string, ev Event) error {
-	dir, err := s.requireConv(agentSlug, convID)
+func (s *Store) Append(agentID, convID string, ev Event) error {
+	dir, err := s.requireConv(agentID, convID)
 	if err != nil {
 		return err
 	}
@@ -238,8 +240,8 @@ func (s *Store) Append(agentSlug, convID string, ev Event) error {
 
 // UpdateMeta read-modify-writes meta.json. The caller's fn mutates the
 // loaded value in place; UpdatedAt is refreshed automatically.
-func (s *Store) UpdateMeta(agentSlug, convID string, fn func(*Meta)) error {
-	dir, err := s.requireConv(agentSlug, convID)
+func (s *Store) UpdateMeta(agentID, convID string, fn func(*Meta)) error {
+	dir, err := s.requireConv(agentID, convID)
 	if err != nil {
 		return err
 	}
@@ -252,27 +254,27 @@ func (s *Store) UpdateMeta(agentSlug, convID string, fn func(*Meta)) error {
 	return writeMeta(dir, m)
 }
 
-func (s *Store) agentDir(slug string) string {
-	return filepath.Join(s.root, "agents", slug)
+func (s *Store) agentDir(agentID string) string {
+	return filepath.Join(s.root, "agents", agentID)
 }
 
-func (s *Store) convDir(slug, id string) string {
-	return filepath.Join(s.agentDir(slug), "conversations", id)
+func (s *Store) convDir(agentID, id string) string {
+	return filepath.Join(s.agentDir(agentID), "conversations", id)
 }
 
 // requireConv resolves the conversation directory and verifies it
 // exists. Used at the top of every mutator/reader to fail loud.
-func (s *Store) requireConv(slug, id string) (string, error) {
-	if !validSlug(slug) {
-		return "", fmt.Errorf("invalid agent slug %q", slug)
+func (s *Store) requireConv(agentID, id string) (string, error) {
+	if !agent.ValidID(agentID) {
+		return "", fmt.Errorf("invalid agent id %q", agentID)
 	}
 	if !validConvID(id) {
 		return "", fmt.Errorf("invalid conv id %q", id)
 	}
-	dir := s.convDir(slug, id)
+	dir := s.convDir(agentID, id)
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
-			return "", fmt.Errorf("%w: %s/%s", ErrNotFound, slug, id)
+			return "", fmt.Errorf("%w: %s/%s", ErrNotFound, agentID, id)
 		}
 		return "", err
 	}
@@ -342,11 +344,9 @@ func readEvents(dir string) ([]Event, error) {
 	return out, scanner.Err()
 }
 
-var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 var convIDRe = regexp.MustCompile(`^conv_\d{13}_[a-f0-9]{8}$`)
 
-func validSlug(s string) bool    { return s != "" && slugRe.MatchString(s) }
-func validConvID(s string) bool  { return convIDRe.MatchString(s) }
+func validConvID(s string) bool { return convIDRe.MatchString(s) }
 
 // newID returns a sortable, unique conversation id of the shape
 // conv_<unix_ms>_<8hex>. ms timestamp gives natural sort by

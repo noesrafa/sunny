@@ -108,10 +108,10 @@ func TestStatsBasicShape(t *testing.T) {
 
 func TestStatsCountsTabs(t *testing.T) {
 	impl, slug, convID := newStatsImpl(t)
-	if _, err := impl.tabs.Add(&tabs.Tab{AgentSlug: slug, ConvID: convID, Title: "a"}); err != nil {
+	if _, err := impl.tabs.Add(&tabs.Tab{AgentID: slug, ConvID: convID, Title: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := impl.tabs.Add(&tabs.Tab{AgentSlug: slug, ConvID: convID, Title: "b"}); err != nil {
+	if _, err := impl.tabs.Add(&tabs.Tab{AgentID: slug, ConvID: convID, Title: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	got := fetchStats(t, serveStats(t, impl))
@@ -139,7 +139,7 @@ func TestStatsLiveTurnsAndWatchers(t *testing.T) {
 		t.Fatalf("turns_in_flight = %d, want 1", len(got.Live.TurnsInFlight))
 	}
 	turn := got.Live.TurnsInFlight[0]
-	if turn.Slug != slug || turn.ConvID != convID {
+	if turn.AgentID != slug || turn.ConvID != convID {
 		t.Errorf("turn = %+v, want {%s, %s}", turn, slug, convID)
 	}
 	if got.Live.BusSubscribers != 1 {

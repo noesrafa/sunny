@@ -18,7 +18,7 @@
 //	{
 //	  "version": 1,
 //	  "tabs": [
-//	    {"id": "tab_…", "agent_slug": "sunny", "conv_id": "conv_…", …}
+//	    {"id": "tab_…", "agent_id": "sunny", "conv_id": "conv_…", …}
 //	  ]
 //	}
 //
@@ -44,7 +44,7 @@ var ErrNotFound = errors.New("tab not found")
 // Tab is one open chat tab in the daemon.
 type Tab struct {
 	ID        string    `json:"id"`
-	AgentSlug string    `json:"agent_slug"`
+	AgentID   string    `json:"agent_id"`
 	ConvID    string    `json:"conv_id"`
 	Title     string    `json:"title,omitempty"`
 	Cwd       string    `json:"cwd,omitempty"`
@@ -122,7 +122,7 @@ func (s *Store) Get(id string) (*Tab, error) {
 }
 
 // Add appends a new tab and persists. Caller is responsible for
-// filling AgentSlug, ConvID, Cwd, Title; ID + timestamps are
+// filling AgentID, ConvID, Cwd, Title; ID + timestamps are
 // assigned here. Returns the stored copy (with id + timestamps set).
 func (s *Store) Add(t *Tab) (*Tab, error) {
 	s.mu.Lock()
@@ -134,7 +134,7 @@ func (s *Store) Add(t *Tab) (*Tab, error) {
 	now := time.Now().UTC()
 	stored := &Tab{
 		ID:        id,
-		AgentSlug: t.AgentSlug,
+		AgentID:   t.AgentID,
 		ConvID:    t.ConvID,
 		Title:     t.Title,
 		Cwd:       t.Cwd,

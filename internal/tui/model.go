@@ -55,7 +55,7 @@ type Model struct {
 	client       *client.Client     // local daemon client; CRUD ops still go here
 	fed          *client.Federation // peer roster — chat routing flows through For(host)
 	busEvents    chan client.FederatedEvent
-	defaultAgent string // slug to send turns at (v0.3.x: hardcoded "sunny")
+	defaultAgent string // id to send turns at (v0.3.x+: hardcoded "sunny")
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -115,7 +115,7 @@ type Options struct {
 	// main.go reads it from ~/.sunny/token; empty here disables auth
 	// (only useful against a dev daemon started without auth).
 	DaemonToken string
-	// DefaultAgent is the slug to send turns at. v0.3.x hardcodes "sunny";
+	// DefaultAgent is the id to send turns at. v0.3.x+ hardcodes "sunny";
 	// session-vs-agent picking lands later.
 	DefaultAgent string
 
@@ -251,11 +251,11 @@ func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, pee
 				peerClient = fed.Local()
 			}
 			for _, s := range mgr.Sessions {
-				slug := s.AgentSlug()
-				if slug == "" {
-					slug = defaultAgent
+				agentID := s.AgentID()
+				if agentID == "" {
+					agentID = defaultAgent
 				}
-				s.Bind(ctx, peerClient, slug, peerName)
+				s.Bind(ctx, peerClient, agentID, peerName)
 			}
 		}
 	}

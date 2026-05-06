@@ -12,7 +12,7 @@ func TestAddPersistsAcrossReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := s.Add(&Tab{AgentSlug: "sunny", ConvID: "conv_x", Title: "hi"})
+	stored, err := s.Add(&Tab{AgentID: "sunny", ConvID: "conv_x", Title: "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,8 +34,8 @@ func TestAddPersistsAcrossReload(t *testing.T) {
 
 func TestRemove(t *testing.T) {
 	s, _ := Load(t.TempDir())
-	a, _ := s.Add(&Tab{AgentSlug: "x", ConvID: "c1"})
-	b, _ := s.Add(&Tab{AgentSlug: "x", ConvID: "c2"})
+	a, _ := s.Add(&Tab{AgentID: "x", ConvID: "c1"})
+	b, _ := s.Add(&Tab{AgentID: "x", ConvID: "c2"})
 	if err := s.Remove(a.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestRemove(t *testing.T) {
 
 func TestUpdate(t *testing.T) {
 	s, _ := Load(t.TempDir())
-	a, _ := s.Add(&Tab{AgentSlug: "x", ConvID: "c1", Title: "old"})
+	a, _ := s.Add(&Tab{AgentID: "x", ConvID: "c1", Title: "old"})
 	updated, err := s.Update(a.ID, func(tab *Tab) { tab.Title = "new" })
 	if err != nil {
 		t.Fatal(err)
@@ -62,12 +62,12 @@ func TestUpdate(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	s, _ := Load(t.TempDir())
-	a, _ := s.Add(&Tab{AgentSlug: "x", ConvID: "c1", Title: "hi"})
+	a, _ := s.Add(&Tab{AgentID: "x", ConvID: "c1", Title: "hi"})
 	got, err := s.Get(a.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != a.ID || got.AgentSlug != "x" || got.ConvID != "c1" {
+	if got.ID != a.ID || got.AgentID != "x" || got.ConvID != "c1" {
 		t.Fatalf("Get returned wrong tab: %+v", got)
 	}
 	got.Title = "mutated"
@@ -92,7 +92,7 @@ func TestLoadCorruptFileStartsFresh(t *testing.T) {
 	if len(s.List()) != 0 {
 		t.Fatalf("expected empty list after corrupt load, got %d", len(s.List()))
 	}
-	if _, err := s.Add(&Tab{AgentSlug: "x"}); err != nil {
+	if _, err := s.Add(&Tab{AgentID: "x"}); err != nil {
 		t.Fatal(err)
 	}
 }

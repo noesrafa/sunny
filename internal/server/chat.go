@@ -15,7 +15,7 @@ import (
 	"github.com/noesrafa/sunny/internal/store"
 )
 
-// turnRequest is the body of POST /agents/{slug}/conversations/{id}/turns.
+// turnRequest is the body of POST /agents/{id}/conversations/{conv_id}/turns.
 //
 // The client sends the full transcript on every turn — stateless on the
 // server side. Skills, knowledge, and the system prompt come from the
@@ -36,7 +36,7 @@ type turnRequest struct {
 // "one model worker per chat", which matches user expectations.
 type activeTurnsRegistry struct {
 	mu      sync.Mutex
-	current map[string]*activeTurn // key = slug + "/" + convID
+	current map[string]*activeTurn // key = agentID + "/" + convID
 }
 
 type activeTurn struct {
@@ -47,15 +47,15 @@ func newActiveTurnsRegistry() *activeTurnsRegistry {
 	return &activeTurnsRegistry{current: map[string]*activeTurn{}}
 }
 
-// claim tries to register a new turn for (slug, convID). Returns the
+// claim tries to register a new turn for (agentID, convID). Returns the
 // long-lived turn context, a release func, and ok=true on success.
 // On contention returns ok=false — caller should respond 409.
 //
 // The release func MUST be called in a defer at the end of the turn:
 // it removes the entry from the registry AND cancels the context so
 // any goroutines hung on it unwind cleanly.
-func (r *activeTurnsRegistry) claim(slug, convID string) (context.Context, func(), bool) {
-	key := slug + "/" + convID
+func (r *activeTurnsRegistry) claim(agentID, convID string) (context.Context, func(), bool) {
+	key := agentID + "/" + convID
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, busy := r.current[key]; busy {
@@ -78,10 +78,10 @@ func (r *activeTurnsRegistry) claim(slug, convID string) (context.Context, func(
 	return ctx, release, true
 }
 
-// cancel triggers the registered cancel func for (slug, convID), if
+// cancel triggers the registered cancel func for (agentID, convID), if
 // one is registered. Returns true when a turn was found and cancelled.
-func (r *activeTurnsRegistry) cancel(slug, convID string) bool {
-	key := slug + "/" + convID
+func (r *activeTurnsRegistry) cancel(agentID, convID string) bool {
+	key := agentID + "/" + convID
 	r.mu.Lock()
 	at, ok := r.current[key]
 	r.mu.Unlock()
@@ -94,8 +94,8 @@ func (r *activeTurnsRegistry) cancel(slug, convID string) bool {
 
 // TurnRef identifies one in-flight turn.
 type TurnRef struct {
-	Slug   string `json:"slug"`
-	ConvID string `json:"conv_id"`
+	AgentID string `json:"agent_id"`
+	ConvID  string `json:"conv_id"`
 }
 
 func (r *activeTurnsRegistry) snapshot() []TurnRef {
@@ -105,7 +105,7 @@ func (r *activeTurnsRegistry) snapshot() []TurnRef {
 	for key := range r.current {
 		parts := strings.SplitN(key, "/", 2)
 		if len(parts) == 2 {
-			out = append(out, TurnRef{Slug: parts[0], ConvID: parts[1]})
+			out = append(out, TurnRef{AgentID: parts[0], ConvID: parts[1]})
 		}
 	}
 	return out
@@ -116,7 +116,7 @@ func (r *activeTurnsRegistry) snapshot() []TurnRef {
 // the per-conversation watch endpoint (GET /watch); this handler
 // never writes SSE.
 //
-// Path: POST /agents/{slug}/conversations/{id}/turns
+// Path: POST /agents/{id}/conversations/{conv_id}/turns
 //
 // Body: {"messages": [...], "cwd": "..."}
 //
@@ -140,20 +140,20 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slug := r.PathValue("slug")
-	convID := r.PathValue("id")
+	agentID := r.PathValue("id")
+	convID := r.PathValue("conv_id")
 	// Pick up any skill / knowledge files the agent wrote during a
 	// previous turn. Reload failures are non-fatal — fall back to the
 	// cached state and let the turn proceed.
-	if err := s.store.Reload(slug); err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.log.Warn("reload agent before turn", "slug", slug, "err", err)
+	if err := s.store.Reload(agentID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.log.Warn("reload agent before turn", "agent_id", agentID, "err", err)
 	}
-	a, ok := s.store.Agent(slug)
+	a, ok := s.store.Agent(agentID)
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	meta, _, err := s.conv.Get(slug, convID)
+	meta, _, err := s.conv.Get(agentID, convID)
 	if err != nil {
 		if errors.Is(err, conversation.ErrNotFound) {
 			http.NotFound(w, r)
@@ -181,7 +181,7 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 	// Reserve the per-conv slot. Two clients hitting POST against the
 	// same conv in close succession see the second one fail with 409
 	// — the TUI shouldn't allow this, but the daemon enforces.
-	turnCtx, release, ok := s.activeTurns.claim(slug, convID)
+	turnCtx, release, ok := s.activeTurns.claim(agentID, convID)
 	if !ok {
 		http.Error(w, "another turn is already running on this conversation", http.StatusConflict)
 		return
@@ -189,7 +189,7 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 
 	// Journal the user turn synchronously so a watcher that joins
 	// before the engine spits its first delta still sees the prompt.
-	userEv, err := s.sink.Append(slug, convID, "user", map[string]string{"text": last.Content})
+	userEv, err := s.sink.Append(agentID, convID, "user", map[string]string{"text": last.Content})
 	if err != nil {
 		release()
 		http.Error(w, "journal user turn: "+err.Error(), http.StatusInternalServerError)
@@ -211,15 +211,15 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 // Idempotent: 204 either way (the caller doesn't need to know
 // whether there was something to cancel).
 //
-// Path: DELETE /agents/{slug}/conversations/{id}/turn
+// Path: DELETE /agents/{id}/conversations/{conv_id}/turn
 func (s *server) deleteTurn(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("slug")
-	convID := r.PathValue("id")
-	if _, ok := s.store.Agent(slug); !ok {
+	agentID := r.PathValue("id")
+	convID := r.PathValue("conv_id")
+	if _, ok := s.store.Agent(agentID); !ok {
 		http.NotFound(w, r)
 		return
 	}
-	s.activeTurns.cancel(slug, convID)
+	s.activeTurns.cancel(agentID, convID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -237,34 +237,34 @@ func (s *server) runTurn(
 ) {
 	defer release()
 
-	slug := agent.Slug
+	agentID := agent.ID
 	convID := meta.ID
 
-	s.publish(evts.TurnStarted, slug, convID)
+	s.publish(evts.TurnStarted, agentID, convID)
 
 	events, err := eng.Turn(ctx, agent, req.Messages, engine.TurnOptions{
 		ProviderState: meta.ProviderState,
 		Cwd:           req.Cwd,
 	})
 	if err != nil {
-		s.sink.Append(slug, convID, "error", map[string]string{"message": err.Error()})
+		s.sink.Append(agentID, convID, "error", map[string]string{"message": err.Error()})
 		return
 	}
 
 	for ev := range events {
 		switch v := ev.(type) {
 		case provider.TextDelta:
-			s.sink.Append(slug, convID, "text_delta", map[string]string{"text": v.Text})
+			s.sink.Append(agentID, convID, "text_delta", map[string]string{"text": v.Text})
 		case provider.ThinkingDelta:
-			s.sink.Append(slug, convID, "thinking_delta", map[string]string{"text": v.Text})
+			s.sink.Append(agentID, convID, "thinking_delta", map[string]string{"text": v.Text})
 		case provider.ToolUse:
-			s.sink.Append(slug, convID, "tool_use", map[string]string{
+			s.sink.Append(agentID, convID, "tool_use", map[string]string{
 				"id":    v.ID,
 				"name":  v.Name,
 				"input": v.Input,
 			})
 		case provider.ToolResult:
-			s.sink.Append(slug, convID, "tool_result", map[string]any{
+			s.sink.Append(agentID, convID, "tool_result", map[string]any{
 				"tool_use_id": v.ToolUseID,
 				"content":     v.Content,
 				"is_error":    v.IsError,
@@ -280,20 +280,20 @@ func (s *server) runTurn(
 					"cache_read_tokens":     v.CacheReadTokens,
 				},
 			}
-			s.sink.Append(slug, convID, "done", payload)
-			s.finalizeTurn(slug, convID, v)
-			s.publish(evts.ConvTurnAppended, slug, convID)
-			s.publish(evts.TurnDone, slug, convID)
+			s.sink.Append(agentID, convID, "done", payload)
+			s.finalizeTurn(agentID, convID, v)
+			s.publish(evts.ConvTurnAppended, agentID, convID)
+			s.publish(evts.TurnDone, agentID, convID)
 		case provider.Error:
 			// Distinguish "user cancelled" from "real error". The
 			// provider drivers surface ctx cancellation as
 			// Error{Err: ctx.Err()}; reclassify so the journal
 			// reflects intent and the UI can render differently.
 			if errors.Is(v.Err, context.Canceled) || ctx.Err() != nil {
-				s.sink.Append(slug, convID, "cancelled", map[string]string{"reason": "client cancelled"})
-				s.publish(evts.TurnCancelled, slug, convID)
+				s.sink.Append(agentID, convID, "cancelled", map[string]string{"reason": "client cancelled"})
+				s.publish(evts.TurnCancelled, agentID, convID)
 			} else {
-				s.sink.Append(slug, convID, "error", map[string]string{"message": v.Err.Error()})
+				s.sink.Append(agentID, convID, "error", map[string]string{"message": v.Err.Error()})
 			}
 		}
 	}
@@ -301,8 +301,8 @@ func (s *server) runTurn(
 
 // finalizeTurn updates meta.json after a successful turn. Best-effort —
 // failures are logged. The journal already has the canonical record.
-func (s *server) finalizeTurn(slug, convID string, done provider.Done) {
-	err := s.conv.UpdateMeta(slug, convID, func(m *conversation.Meta) {
+func (s *server) finalizeTurn(agentID, convID string, done provider.Done) {
+	err := s.conv.UpdateMeta(agentID, convID, func(m *conversation.Meta) {
 		m.MsgCount += 2 // user + assistant
 		m.TotalCost += done.CostUSD
 		if done.ProviderState != "" {
@@ -310,6 +310,6 @@ func (s *server) finalizeTurn(slug, convID string, done provider.Done) {
 		}
 	})
 	if err != nil {
-		s.log.Warn("update meta", "err", err, "slug", slug, "conv", convID)
+		s.log.Warn("update meta", "err", err, "agent_id", agentID, "conv", convID)
 	}
 }

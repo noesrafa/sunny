@@ -11,7 +11,7 @@ import (
 
 // AgentSummary is one row of GET /agents.
 type AgentSummary struct {
-	Slug        string `json:"slug"`
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
@@ -21,9 +21,9 @@ type AgentSummary struct {
 	Knowledge   int    `json:"knowledge"`
 }
 
-// AgentDetail is GET /agents/{slug}: full config + skill + knowledge metadata.
+// AgentDetail is GET /agents/{id}: full config + skill + knowledge metadata.
 type AgentDetail struct {
-	Slug        string `json:"slug"`
+	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
@@ -39,9 +39,9 @@ type AgentDetail struct {
 	} `json:"knowledge"`
 }
 
-// AgentCreate is the body of POST /agents.
+// AgentCreate is the body of POST /agents. The id is generated
+// server-side; clients only supply display/config fields.
 type AgentCreate struct {
-	Slug        string `json:"slug"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model"`
@@ -50,7 +50,7 @@ type AgentCreate struct {
 	Prompt      string `json:"prompt,omitempty"`
 }
 
-// AgentPatch is the body of PATCH /agents/{slug}. nil pointers leave
+// AgentPatch is the body of PATCH /agents/{id}. nil pointers leave
 // the corresponding field untouched.
 type AgentPatch struct {
 	Name        *string `json:"name,omitempty"`
@@ -84,8 +84,8 @@ func (c *Client) ListAgents(ctx context.Context) ([]AgentSummary, error) {
 }
 
 // GetAgent fetches the full detail for one agent.
-func (c *Client) GetAgent(ctx context.Context, slug string) (*AgentDetail, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+slug, nil)
+func (c *Client) GetAgent(ctx context.Context, id string) (*AgentDetail, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -96,10 +96,10 @@ func (c *Client) GetAgent(ctx context.Context, slug string) (*AgentDetail, error
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("agent %q not found", slug)
+		return nil, fmt.Errorf("agent %q not found", id)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, errorFromBody("GET /agents/"+slug, resp)
+		return nil, errorFromBody("GET /agents/"+id, resp)
 	}
 	var out AgentDetail
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -126,14 +126,14 @@ func (c *Client) CreateAgent(ctx context.Context, body AgentCreate) (*AgentSumma
 }
 
 // UpdateAgent patches an existing agent. nil fields are left untouched.
-func (c *Client) UpdateAgent(ctx context.Context, slug string, patch AgentPatch) (*AgentSummary, error) {
-	resp, err := c.doJSON(ctx, http.MethodPatch, "/agents/"+slug, patch)
+func (c *Client) UpdateAgent(ctx context.Context, id string, patch AgentPatch) (*AgentSummary, error) {
+	resp, err := c.doJSON(ctx, http.MethodPatch, "/agents/"+id, patch)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errorFromBody("PATCH /agents/"+slug, resp)
+		return nil, errorFromBody("PATCH /agents/"+id, resp)
 	}
 	var out AgentSummary
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -143,8 +143,8 @@ func (c *Client) UpdateAgent(ctx context.Context, slug string, patch AgentPatch)
 }
 
 // DeleteAgent moves the agent's directory to ~/.sunny/.archive/. Idempotent.
-func (c *Client) DeleteAgent(ctx context.Context, slug string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+slug, nil)
+func (c *Client) DeleteAgent(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+id, nil)
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func (c *Client) DeleteAgent(ctx context.Context, slug string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
-		return errorFromBody("DELETE /agents/"+slug, resp)
+		return errorFromBody("DELETE /agents/"+id, resp)
 	}
 	return nil
 }

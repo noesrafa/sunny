@@ -12,7 +12,7 @@ import (
 )
 
 // WatchConversation opens a Server-Sent-Events connection to GET
-// /agents/{slug}/conversations/{id}/watch and returns a channel that
+// /agents/{id}/conversations/{conv_id}/watch and returns a channel that
 // drains every journal event as it arrives. The channel closes when
 // ctx is cancelled, the connection drops, or the daemon shuts down —
 // callers should treat closure as "reconnect" intent (re-call with
@@ -24,8 +24,8 @@ import (
 //
 // Heartbeat lines (`: …`) are silently skipped. Malformed payloads
 // are dropped.
-func (c *Client) WatchConversation(ctx context.Context, slug, convID string, since int64) (<-chan JournalEvent, error) {
-	url := c.base + "/agents/" + slug + "/conversations/" + convID + "/watch"
+func (c *Client) WatchConversation(ctx context.Context, agentID, convID string, since int64) (<-chan JournalEvent, error) {
+	url := c.base + "/agents/" + agentID + "/conversations/" + convID + "/watch"
 	if since > 0 {
 		url += "?since=" + strconv.FormatInt(since, 10)
 	}
@@ -93,8 +93,8 @@ type SendTurnResult struct {
 // caller can recover by creating a new conversation), ErrTurnBusy
 // when another turn is already running on this conv (the TUI should
 // normally check state before sending), and other errors verbatim.
-func (c *Client) SendTurn(ctx context.Context, slug, convID string, body TurnRequest) (*SendTurnResult, error) {
-	resp, err := c.doJSON(ctx, http.MethodPost, "/agents/"+slug+"/conversations/"+convID+"/turns", body)
+func (c *Client) SendTurn(ctx context.Context, agentID, convID string, body TurnRequest) (*SendTurnResult, error) {
+	resp, err := c.doJSON(ctx, http.MethodPost, "/agents/"+agentID+"/conversations/"+convID+"/turns", body)
 	if err != nil {
 		return nil, err
 	}
@@ -118,9 +118,9 @@ func (c *Client) SendTurn(ctx context.Context, slug, convID string, body TurnReq
 // CancelTurn signals the daemon to interrupt the in-flight turn on
 // this conversation. Idempotent — succeeds whether or not a turn was
 // actually running.
-func (c *Client) CancelTurn(ctx context.Context, slug, convID string) error {
+func (c *Client) CancelTurn(ctx context.Context, agentID, convID string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete,
-		c.base+"/agents/"+slug+"/conversations/"+convID+"/turn", nil)
+		c.base+"/agents/"+agentID+"/conversations/"+convID+"/turn", nil)
 	if err != nil {
 		return err
 	}

@@ -12,7 +12,7 @@ import (
 // the daemon package.
 type Tab struct {
 	ID        string    `json:"id"`
-	AgentSlug string    `json:"agent_slug"`
+	AgentID   string    `json:"agent_id"`
 	ConvID    string    `json:"conv_id"`
 	Title     string    `json:"title,omitempty"`
 	Cwd       string    `json:"cwd,omitempty"`
@@ -24,10 +24,10 @@ type Tab struct {
 // when empty the daemon spawns a fresh conversation under the
 // agent and returns the tab pointing at it.
 type OpenTabRequest struct {
-	AgentSlug string `json:"agent_slug"`
-	ConvID    string `json:"conv_id,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Cwd       string `json:"cwd,omitempty"`
+	AgentID string `json:"agent_id"`
+	ConvID  string `json:"conv_id,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Cwd     string `json:"cwd,omitempty"`
 }
 
 // PatchTabRequest is the body of PATCH /tabs/{id}. nil pointers
@@ -107,7 +107,7 @@ func (c *Client) RebindTabConv(ctx context.Context, tabID string) (*Tab, error) 
 // CloseTab removes a tab from the daemon. Idempotent — closing a
 // missing tab returns nil. Does NOT delete the underlying
 // conversation; the journal stays under
-// ~/.sunny/agents/<slug>/conversations/<id>/.
+// ~/.sunny/agents/<id>/conversations/<conv_id>/.
 func (c *Client) CloseTab(ctx context.Context, id string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/tabs/"+id, nil)
 	if err != nil {

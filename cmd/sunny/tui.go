@@ -200,12 +200,12 @@ func hydrateTabsParallel(ctx context.Context, fed *client.Federation, peerManage
 			}
 			for _, t := range tabs {
 				s, err := session.New(ctx, fallbackCwd(t.Cwd), session.Options{
-					Logger:    lg,
-					Title:     t.Title,
-					AgentSlug: t.AgentSlug,
-					Host:      j.name,
-					TabID:     t.ID,
-					ConvID:    t.ConvID,
+					Logger:  lg,
+					Title:   t.Title,
+					AgentID: t.AgentID,
+					Host:    j.name,
+					TabID:   t.ID,
+					ConvID:  t.ConvID,
 				})
 				if err != nil {
 					lg.Warn("session from tab", "peer", j.name, "tab", t.ID, "err", err)
@@ -226,19 +226,19 @@ func bootstrapDefaultTab(ctx context.Context, c *client.Client, mgr *session.Man
 		return fmt.Errorf("local client unavailable")
 	}
 	tab, err := c.OpenTab(ctx, client.OpenTabRequest{
-		AgentSlug: "sunny",
-		Cwd:       cwd,
+		AgentID: "sunny",
+		Cwd:     cwd,
 	})
 	if err != nil {
 		return err
 	}
 	s, err := session.New(ctx, cwd, session.Options{
-		Logger:    lg,
-		Title:     tab.Title,
-		AgentSlug: tab.AgentSlug,
-		Host:      peers.LocalName,
-		TabID:     tab.ID,
-		ConvID:    tab.ConvID,
+		Logger:  lg,
+		Title:   tab.Title,
+		AgentID: tab.AgentID,
+		Host:    peers.LocalName,
+		TabID:   tab.ID,
+		ConvID:  tab.ConvID,
 	})
 	if err != nil {
 		return err

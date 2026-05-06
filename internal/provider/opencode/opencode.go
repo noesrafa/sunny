@@ -127,13 +127,13 @@ func (d *Driver) buildArgs(ctx context.Context, req provider.Request, last provi
 	if req.ProviderState != "" {
 		args = append(args, "--session", req.ProviderState)
 	} else {
-		slug := slugFromContext(ctx)
-		if slug == "" {
-			// No slug supplied — synthesize one from the prompt so
+		agentID := agentIDFromContext(ctx)
+		if agentID == "" {
+			// No id supplied — synthesize one from the prompt so
 			// successive runs land on the same agent file.
-			slug = "anon-" + fingerprint([]byte(flattenSystem(req.System)))[:8]
+			agentID = "anon-" + fingerprint([]byte(flattenSystem(req.System)))[:8]
 		}
-		name, err := syncAgentFile(slug, req.System)
+		name, err := syncAgentFile(agentID, req.System)
 		if err != nil {
 			return nil, err
 		}
@@ -267,20 +267,20 @@ func (d *Driver) pump(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, out 
 	out <- done
 }
 
-// agentSlugKey is the context key sunny uses to thread the active
-// agent's slug through to the driver. Kept unexported; callers
-// interact through WithAgentSlug.
-type agentSlugKey struct{}
+// agentIDKey is the context key sunny uses to thread the active
+// agent's id through to the driver. Kept unexported; callers
+// interact through WithAgentID.
+type agentIDKey struct{}
 
-// WithAgentSlug returns ctx with the agent slug attached. The engine
+// WithAgentID returns ctx with the agent id attached. The engine
 // wraps every Turn() with this so the agent file lands at
-// sunny-<slug>.md instead of an anon hash.
-func WithAgentSlug(ctx context.Context, slug string) context.Context {
-	return context.WithValue(ctx, agentSlugKey{}, slug)
+// sunny-<id>.md instead of an anon hash.
+func WithAgentID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, agentIDKey{}, id)
 }
 
-func slugFromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(agentSlugKey{}).(string); ok {
+func agentIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(agentIDKey{}).(string); ok {
 		return v
 	}
 	return ""

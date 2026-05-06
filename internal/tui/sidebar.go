@@ -266,9 +266,6 @@ func renderSidebarRow(sess *session.Session, active bool, s Styles) []string {
 		if sess.Turns > 0 {
 			base = fmt.Sprintf("%d turns", sess.Turns)
 		}
-		if slug := sess.AgentSlug(); slug != "" {
-			base = base + " · " + slug
-		}
 		line2 = "    " + s.Hint.Render(base)
 	}
 	return []string{line1, line2}

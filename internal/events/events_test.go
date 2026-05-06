@@ -28,7 +28,7 @@ func TestSubscribePublish(t *testing.T) {
 	ch, cancel := h.Subscribe()
 	defer cancel()
 
-	want := Event{Type: AgentCreated, Slug: "alpha"}
+	want := Event{Type: AgentCreated, AgentID: "alpha"}
 	h.Publish(want)
 	got := drain(ch, 1, 100*time.Millisecond)
 	if len(got) != 1 || got[0] != want {
@@ -43,8 +43,8 @@ func TestMultipleSubscribers(t *testing.T) {
 	defer c1()
 	defer c2()
 
-	h.Publish(Event{Type: AgentCreated, Slug: "alpha"})
-	h.Publish(Event{Type: AgentDeleted, Slug: "beta"})
+	h.Publish(Event{Type: AgentCreated, AgentID: "alpha"})
+	h.Publish(Event{Type: AgentDeleted, AgentID: "beta"})
 
 	for i, ch := range []<-chan Event{ch1, ch2} {
 		got := drain(ch, 2, 100*time.Millisecond)
@@ -78,7 +78,7 @@ func TestPublish_NonBlockingOnSlowSubscriber(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 200; i++ {
-			h.Publish(Event{Type: AgentUpdated, Slug: "x"})
+			h.Publish(Event{Type: AgentUpdated, AgentID: "x"})
 		}
 		close(done)
 	}()
@@ -123,7 +123,7 @@ func TestConcurrentPublish(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < each; i++ {
-				h.Publish(Event{Type: AgentUpdated, Slug: "x"})
+				h.Publish(Event{Type: AgentUpdated, AgentID: "x"})
 			}
 		}()
 	}

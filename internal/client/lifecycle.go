@@ -25,6 +25,43 @@ type LifecycleAck struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
+// VersionCheck mirrors GET /sunny/version/check. UpdateAvailable is
+// what UIs gate on; Error carries a non-fatal explanation when the
+// GitHub fetch failed (offline, rate-limited, etc.) so the caller can
+// stay quiet rather than show a misleading "you're up to date".
+type VersionCheck struct {
+	Current         string    `json:"current"`
+	Latest          string    `json:"latest,omitempty"`
+	UpdateAvailable bool      `json:"update_available"`
+	ReleaseURL      string    `json:"release_url,omitempty"`
+	PublishedAt     string    `json:"published_at,omitempty"`
+	CheckedAt       time.Time `json:"checked_at"`
+	Error           string    `json:"error,omitempty"`
+}
+
+// CheckUpdate fetches GET /sunny/version/check. The daemon caches the
+// GitHub response for ~5 min so polling this is cheap.
+func (c *Client) CheckUpdate(ctx context.Context) (*VersionCheck, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/sunny/version/check", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.auth(req)
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, errorFromBody("GET /sunny/version/check", resp)
+	}
+	var out VersionCheck
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // DaemonVersion fetches GET /sunny/version.
 func (c *Client) DaemonVersion(ctx context.Context) (*DaemonVersion, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/sunny/version", nil)

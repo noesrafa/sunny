@@ -212,12 +212,12 @@ func blockTexts(blocks []provider.SystemBlock) []string {
 
 func reloadTestAgent(t *testing.T, a *store.Agent) *store.Agent {
 	t.Helper()
-	root := filepath.Dir(filepath.Dir(a.Dir)) // a.Dir = <root>/agents/<slug>
+	root := filepath.Dir(filepath.Dir(a.Dir)) // a.Dir = <root>/agents/<id>
 	st, err := store.Load(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, ok := st.Agent(a.Slug)
+	out, ok := st.Agent(a.ID)
 	if !ok {
 		t.Fatal("agent not loaded after reload")
 	}

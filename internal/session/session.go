@@ -3,7 +3,7 @@
 // attachments. It also owns the network plumbing for one chat:
 //
 //   - one always-on watch subscription against
-//     GET /agents/{slug}/conversations/{id}/watch (auto-reconnects)
+//     GET /agents/{id}/conversations/{conv_id}/watch (auto-reconnects)
 //   - POST /turns to send + DELETE /turn to cancel
 //
 // All transcript mutations flow through ApplyJournalEvent, which
@@ -163,7 +163,7 @@ type Session struct {
 	// old one might still update a shared atomic, leading the new
 	// watch to start with an old-conv seq and miss events).
 	c            *client.Client
-	agentSlug    string
+	agentID      string
 	host         string
 	watchCh      chan client.JournalEvent
 	watchCancel  context.CancelFunc
@@ -185,9 +185,9 @@ type Session struct {
 //
 // ctx scopes the watch loop's lifetime — typically the TUI's root
 // context, so the watch dies cleanly on Ctrl+C / quit.
-func (s *Session) Bind(ctx context.Context, c *client.Client, slug, host string) {
+func (s *Session) Bind(ctx context.Context, c *client.Client, agentID, host string) {
 	s.c = c
-	s.agentSlug = slug
+	s.agentID = agentID
 	if host == "" {
 		host = "local"
 	}
@@ -264,7 +264,7 @@ func (s *Session) loadHistory(ctx context.Context) error {
 	if s.c == nil || s.ConvID == "" {
 		return nil
 	}
-	_, events, err := s.c.GetConversation(ctx, s.agentSlug, s.ConvID)
+	_, events, err := s.c.GetConversation(ctx, s.agentID, s.ConvID)
 	if err != nil {
 		return err
 	}
@@ -277,8 +277,8 @@ func (s *Session) loadHistory(ctx context.Context) error {
 	return nil
 }
 
-// AgentSlug returns the slug of the agent this session is bound to.
-func (s *Session) AgentSlug() string { return s.agentSlug }
+// AgentID returns the id of the agent this session is bound to.
+func (s *Session) AgentID() string { return s.agentID }
 
 // TurnStart returns the journal timestamp of the most recent user
 // message — the moment the in-flight turn (if any) began. Zero when
@@ -325,8 +325,8 @@ type Options struct {
 	Model                    string
 	Effort                   string
 	DangerousSkipPermissions bool
-	// AgentSlug binds the session to a specific agent.
-	AgentSlug string
+	// AgentID binds the session to a specific agent.
+	AgentID string
 	// Host is the federation peer name this session lives on.
 	// Empty defaults to "local".
 	Host string
@@ -361,20 +361,20 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 		title = filepath.Base(cwd)
 	}
 	return &Session{
-		ID:        id,
-		TabID:     opts.TabID,
-		Cwd:       cwd,
-		Title:     title,
-		Model:     opts.Model,
-		Effort:    opts.Effort,
-		Branch:    gitBranch(cwd),
-		Changes:   gitChangeStats(cwd),
-		ConvID:    opts.ConvID,
-		Draft:     opts.Draft,
-		State:     StateIdle,
-		agentSlug: opts.AgentSlug,
-		host:      defaultHost(opts.Host),
-		logger:    logger,
+		ID:      id,
+		TabID:   opts.TabID,
+		Cwd:     cwd,
+		Title:   title,
+		Model:   opts.Model,
+		Effort:  opts.Effort,
+		Branch:  gitBranch(cwd),
+		Changes: gitChangeStats(cwd),
+		ConvID:  opts.ConvID,
+		Draft:   opts.Draft,
+		State:   StateIdle,
+		agentID: opts.AgentID,
+		host:    defaultHost(opts.Host),
+		logger:  logger,
 	}, nil
 }
 
@@ -453,7 +453,7 @@ func (s *Session) send(ctx context.Context, text string, _ bool) (*client.SendTu
 		return nil, fmt.Errorf("session: no conv_id (tab not initialised)")
 	}
 	wire := buildWireMessages(s.Items, text)
-	res, err := s.c.SendTurn(ctx, s.agentSlug, s.ConvID, client.TurnRequest{
+	res, err := s.c.SendTurn(ctx, s.agentID, s.ConvID, client.TurnRequest{
 		Messages: wire,
 		Cwd:      s.Cwd,
 	})
@@ -470,7 +470,7 @@ func (s *Session) Cancel(ctx context.Context) error {
 	if s.c == nil || s.ConvID == "" {
 		return nil
 	}
-	return s.c.CancelTurn(ctx, s.agentSlug, s.ConvID)
+	return s.c.CancelTurn(ctx, s.agentID, s.ConvID)
 }
 
 // Close cancels the watch goroutine and closes the events channel.
@@ -506,7 +506,7 @@ func (s *Session) runWatch(ctx context.Context, watchCh chan client.JournalEvent
 			return // session never got a conv (caller error); nothing to watch
 		}
 		s.watchOpened.Store(true)
-		ch, err := s.c.WatchConversation(ctx, s.agentSlug, s.ConvID, lastSeq.Load())
+		ch, err := s.c.WatchConversation(ctx, s.agentID, s.ConvID, lastSeq.Load())
 		if err != nil {
 			s.watchOpened.Store(false)
 			if !sleepCtx(ctx, reconnectDelay) {

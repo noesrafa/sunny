@@ -1,3 +1,4 @@
-name: sunny
+id: sunny
+name: Franky
 description: Default agent shipped with Sunny. Edit me, fork me, or replace me.
 model: claude-opus-4-7

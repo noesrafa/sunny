@@ -64,13 +64,13 @@ const (
 	MonitorError   Type = "monitor.error"
 )
 
-// Event is one bus message. Slug + ConvID + TabID + RunID +
+// Event is one bus message. AgentID + ConvID + TabID + RunID +
 // MonitorName + Provider are union-typed per Type — empty when not
 // applicable. We deliberately avoid an `any` payload field so the
 // wire shape stays predictable.
 type Event struct {
 	Type        Type   `json:"type"`
-	Slug        string `json:"slug,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
 	ConvID      string `json:"conv_id,omitempty"`
 	TabID       string `json:"tab_id,omitempty"`
 	RunID       string `json:"run_id,omitempty"`
@@ -148,7 +148,7 @@ func (h *Hub) Publish(ev Event) {
 		default:
 			if h.log != nil {
 				h.log.Warn("events: subscriber buffer full, dropping event",
-					"type", ev.Type, "slug", ev.Slug)
+					"type", ev.Type, "agent_id", ev.AgentID)
 			}
 		}
 	}

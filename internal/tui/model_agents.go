@@ -26,12 +26,12 @@ import (
 // on the remote daemon — using m.initialCwd there would leak the
 // local path into a remote that doesn't have it.
 func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
-	slug := req.Slug
+	agentID := req.ID
 	host := req.Host
 	if host == "" {
 		host = "local"
 	}
-	if cur := m.manager.Current(); cur != nil && cur.AgentSlug() == slug && cur.Host() == host {
+	if cur := m.manager.Current(); cur != nil && cur.AgentID() == agentID && cur.Host() == host {
 		return m, nil, true // already on this agent on this peer — picker just closes
 	}
 	if host != "local" {
@@ -41,7 +41,7 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 			m.logger.Error("switch agent: no client for peer", "peer", host)
 			return m, nil, true
 		}
-		dialog := NewNewSessionDialog(peerClient, host, "", slug, m.styles)
+		dialog := NewNewSessionDialog(peerClient, host, "", agentID, m.styles)
 		return m, m.overlay.Open(dialog), true
 	}
 	if cur := m.manager.Current(); cur != nil {
@@ -54,12 +54,12 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	tab, err := peerClient.OpenTab(m.ctx, client.OpenTabRequest{
-		AgentSlug: slug,
-		Cwd:       m.initialCwd,
+		AgentID: agentID,
+		Cwd:     m.initialCwd,
 	})
 	if err != nil {
 		m.lastErr = err
-		m.logger.Error("switch agent: open tab failed", "err", err, "peer", host, "agent", slug)
+		m.logger.Error("switch agent: open tab failed", "err", err, "peer", host, "agent", agentID)
 		return m, nil, true
 	}
 	s, err := session.New(m.ctx, m.initialCwd, session.Options{
@@ -67,7 +67,7 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 		Model:                    m.defaultModel,
 		Effort:                   m.defaultEffort,
 		DangerousSkipPermissions: m.skipPerms,
-		AgentSlug:                slug,
+		AgentID:                  agentID,
 		Host:                     host,
 		TabID:                    tab.ID,
 		ConvID:                   tab.ConvID,
@@ -75,10 +75,10 @@ func (m Model) switchAgent(req SwitchAgentMsg) (Model, tea.Cmd, bool) {
 	})
 	if err != nil {
 		m.lastErr = err
-		m.logger.Error("switch agent failed", "err", err, "slug", slug, "host", host)
+		m.logger.Error("switch agent failed", "err", err, "agent", agentID, "host", host)
 		return m, nil, true
 	}
-	s.Bind(m.ctx, peerClient, slug, host)
+	s.Bind(m.ctx, peerClient, agentID, host)
 	m.manager.Add(s)
 	m.textarea.Reset()
 	m.layout()
@@ -95,15 +95,14 @@ func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
 	c := m.client
 	if c == nil {
 		return func() tea.Msg {
-			return AgentSavedMsg{EditSlug: req.EditSlug, Err: errNoClient}
+			return AgentSavedMsg{EditID: req.EditID, Err: errNoClient}
 		}
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if req.EditSlug == "" {
+		if req.EditID == "" {
 			a, err := c.CreateAgent(ctx, client.AgentCreate{
-				Slug:        req.Slug,
 				Name:        req.Name,
 				Description: req.Description,
 				Model:       req.Model,
@@ -114,9 +113,9 @@ func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
 			if err != nil {
 				return AgentSavedMsg{Err: err}
 			}
-			return AgentSavedMsg{Slug: a.Slug}
+			return AgentSavedMsg{ID: a.ID}
 		}
-		_, err := c.UpdateAgent(ctx, req.EditSlug, client.AgentPatch{
+		_, err := c.UpdateAgent(ctx, req.EditID, client.AgentPatch{
 			Name:        &req.Name,
 			Description: &req.Description,
 			Model:       &req.Model,
@@ -125,15 +124,15 @@ func (m Model) submitAgentForm(req SubmitAgentFormMsg) tea.Cmd {
 			Prompt:      &req.Prompt,
 		})
 		if err != nil {
-			return AgentSavedMsg{EditSlug: req.EditSlug, Err: err}
+			return AgentSavedMsg{EditID: req.EditID, Err: err}
 		}
-		return AgentSavedMsg{EditSlug: req.EditSlug, Slug: req.EditSlug}
+		return AgentSavedMsg{EditID: req.EditID, ID: req.EditID}
 	}
 }
 
-// deleteAgentCmd archives an agent (the daemon moves it to .archive/).
-// Emits an AgentChangedMsg the picker uses to refresh its list.
-func (m Model) deleteAgentCmd(slug string) tea.Cmd {
+// renameAgentCmd patches just the agent's name and emits
+// AgentChangedMsg so the picker (and any other open viewers) refresh.
+func (m Model) renameAgentCmd(req SubmitAgentRenameMsg) tea.Cmd {
 	c := m.client
 	if c == nil {
 		return nil
@@ -141,10 +140,27 @@ func (m Model) deleteAgentCmd(slug string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if err := c.DeleteAgent(ctx, slug); err != nil {
+		if _, err := c.UpdateAgent(ctx, req.ID, client.AgentPatch{Name: &req.Name}); err != nil {
+			return AgentChangedMsg{Status: "rename failed: " + err.Error()}
+		}
+		return AgentChangedMsg{Status: "renamed to " + req.Name}
+	}
+}
+
+// deleteAgentCmd archives an agent (the daemon moves it to .archive/).
+// Emits an AgentChangedMsg the picker uses to refresh its list.
+func (m Model) deleteAgentCmd(id string) tea.Cmd {
+	c := m.client
+	if c == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if err := c.DeleteAgent(ctx, id); err != nil {
 			return AgentChangedMsg{Status: "archive failed: " + err.Error()}
 		}
-		return AgentChangedMsg{Status: "archived " + slug}
+		return AgentChangedMsg{Status: "archived"}
 	}
 }
 

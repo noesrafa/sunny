@@ -41,8 +41,8 @@ type StatsLive struct {
 }
 
 type StatsTurn struct {
-	Slug   string `json:"slug"`
-	ConvID string `json:"conv_id"`
+	AgentID string `json:"agent_id"`
+	ConvID  string `json:"conv_id"`
 }
 
 type StatsSystem struct {

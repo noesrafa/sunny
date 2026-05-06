@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"regexp"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -17,7 +16,6 @@ type agentFormFocus int
 
 const (
 	agFocusName agentFormFocus = iota
-	agFocusSlug
 	agFocusDescription
 	agFocusModel
 	agFocusEffort
@@ -35,15 +33,14 @@ var agentFormProviderChoices = []string{"(default)", "claude-code", "anthropic",
 // AgentFormDialog is the create/edit form for an agent.
 //
 // Modes:
-//   - editSlug == "" → create mode. Slug input is editable AND
-//     auto-derived from Name until the user touches it.
-//   - editSlug != "" → edit mode. Slug is read-only; prompt is fetched
+//   - editID == "" → create mode. The daemon mints an opaque id on
+//     POST; the user never picks one.
+//   - editID != "" → edit mode. The id is immutable; prompt is fetched
 //     async via GetAgent (AgentSummary doesn't carry it).
 type AgentFormDialog struct {
 	client      *client.Client
-	editSlug    string // empty = create
+	editID      string // empty = create
 	name        textinput.Model
-	slug        textinput.Model
 	desc        textinput.Model
 	model       textinput.Model
 	effortIdx   int
@@ -53,16 +50,12 @@ type AgentFormDialog struct {
 	err         string
 	saving      bool
 	loading     bool // true while we fetch the existing agent's prompt for edit mode
-	// slugDirty flips true the first time the user edits the slug field
-	// directly. Until then, slug auto-syncs to a slugified Name. After
-	// that, the field is sticky.
-	slugDirty bool
-	styles    Styles
+	styles      Styles
 }
 
 // AgentDetailLoadedMsg carries the prompt body for edit-mode prefill.
 type AgentDetailLoadedMsg struct {
-	Slug   string
+	ID     string
 	Prompt string
 	Err    error
 }
@@ -71,8 +64,7 @@ type AgentDetailLoadedMsg struct {
 // model performs the actual API call (CreateAgent or UpdateAgent) and
 // emits AgentSavedMsg.
 type SubmitAgentFormMsg struct {
-	EditSlug    string // empty → create
-	Slug        string
+	EditID      string // empty → create
 	Name        string
 	Description string
 	Model       string
@@ -85,9 +77,9 @@ type SubmitAgentFormMsg struct {
 // root (to refresh) and the form itself (to show errors / close on
 // success).
 type AgentSavedMsg struct {
-	EditSlug string
-	Slug     string
-	Err      error
+	EditID string
+	ID     string
+	Err    error
 }
 
 // NewAgentFormDialog builds a fresh form. Pass an OpenAgentFormMsg-shaped
@@ -128,20 +120,16 @@ func NewAgentFormDialog(c *client.Client, m OpenAgentFormMsg, s Styles) *AgentFo
 
 	d := &AgentFormDialog{
 		client:      c,
-		editSlug:    m.EditSlug,
+		editID:      m.EditID,
 		name:        mk("name", m.Name, 64, true),
-		slug:        mk("slug (a-z 0-9 -)", m.EditSlug, 32, false),
 		desc:        mk("description (optional)", m.Description, 240, false),
 		model:       mk("model", defaultModel, 64, false),
 		effortIdx:   effortIdx,
 		providerIdx: providerIdx,
 		prompt:      ta,
 		styles:      s,
-		// In edit mode the slug is immutable, so it's always "dirty"
-		// from the form's perspective — no auto-sync.
-		slugDirty: m.EditSlug != "",
 	}
-	if m.EditSlug != "" {
+	if m.EditID != "" {
 		d.loading = true // fetch full prompt async
 	}
 	return d
@@ -167,7 +155,7 @@ func (d *AgentFormDialog) SetStyles(s Styles) { d.styles = s }
 
 func (d *AgentFormDialog) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink}
-	if d.editSlug != "" {
+	if d.editID != "" {
 		// Fetch the full agent so we can prefill the prompt textarea —
 		// the picker only had AgentSummary which omits the prompt body.
 		cmds = append(cmds, d.fetchPromptCmd())
@@ -177,15 +165,15 @@ func (d *AgentFormDialog) Init() tea.Cmd {
 
 func (d *AgentFormDialog) fetchPromptCmd() tea.Cmd {
 	c := d.client
-	slug := d.editSlug
+	id := d.editID
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		detail, err := c.GetAgent(ctx, slug)
+		detail, err := c.GetAgent(ctx, id)
 		if err != nil {
-			return AgentDetailLoadedMsg{Slug: slug, Err: err}
+			return AgentDetailLoadedMsg{ID: id, Err: err}
 		}
-		return AgentDetailLoadedMsg{Slug: slug, Prompt: detail.Prompt}
+		return AgentDetailLoadedMsg{ID: id, Prompt: detail.Prompt}
 	}
 }
 
@@ -266,23 +254,7 @@ func (d *AgentFormDialog) Update(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	switch d.focus {
 	case agFocusName:
-		prevName := d.name.Value()
 		d.name, cmd = d.name.Update(msg)
-		// Auto-sync slug from name until the user takes ownership of
-		// the slug field. Sticky after that.
-		if !d.slugDirty && d.name.Value() != prevName {
-			d.slug.SetValue(slugify(d.name.Value()))
-		}
-	case agFocusSlug:
-		if d.editSlug != "" {
-			// read-only in edit mode
-		} else {
-			before := d.slug.Value()
-			d.slug, cmd = d.slug.Update(msg)
-			if d.slug.Value() != before {
-				d.slugDirty = true
-			}
-		}
 	case agFocusDescription:
 		d.desc, cmd = d.desc.Update(msg)
 	case agFocusModel:
@@ -293,49 +265,19 @@ func (d *AgentFormDialog) Update(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// slugify turns "My Cool Agent" into "my-cool-agent". Strips characters
-// outside [a-z0-9-], collapses runs of dashes, trims leading/trailing
-// dashes. Empty input → empty output.
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	var b strings.Builder
-	prevDash := false
-	for _, r := range s {
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
-			b.WriteRune(r)
-			prevDash = false
-		case r == ' ' || r == '-' || r == '_' || r == '.':
-			if !prevDash && b.Len() > 0 {
-				b.WriteRune('-')
-				prevDash = true
-			}
-		}
-	}
-	out := strings.TrimRight(b.String(), "-")
-	return out
-}
-
 func (d *AgentFormDialog) focusNext(delta int) {
 	d.focus = agentFormFocus((int(d.focus) + delta + int(numAgentFocus)) % int(numAgentFocus))
-	// Skip slug in edit mode.
-	if d.editSlug != "" && d.focus == agFocusSlug {
-		d.focus = agentFormFocus((int(d.focus) + delta + int(numAgentFocus)) % int(numAgentFocus))
-	}
 	d.applyFocus()
 }
 
 func (d *AgentFormDialog) applyFocus() {
 	d.name.Blur()
-	d.slug.Blur()
 	d.desc.Blur()
 	d.model.Blur()
 	d.prompt.Blur()
 	switch d.focus {
 	case agFocusName:
 		d.name.Focus()
-	case agFocusSlug:
-		d.slug.Focus()
 	case agFocusDescription:
 		d.desc.Focus()
 	case agFocusModel:
@@ -345,22 +287,11 @@ func (d *AgentFormDialog) applyFocus() {
 	}
 }
 
-var formSlugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
 func (d *AgentFormDialog) submit() tea.Cmd {
 	name := strings.TrimSpace(d.name.Value())
 	if name == "" {
 		d.err = "name is required"
 		return nil
-	}
-	slug := strings.TrimSpace(d.slug.Value())
-	if d.editSlug != "" {
-		slug = d.editSlug
-	} else {
-		if !formSlugRe.MatchString(slug) {
-			d.err = "slug must match [a-z0-9-]+ (lowercase, no spaces)"
-			return nil
-		}
 	}
 	model := strings.TrimSpace(d.model.Value())
 	if model == "" {
@@ -377,8 +308,7 @@ func (d *AgentFormDialog) submit() tea.Cmd {
 		provider = ""
 	}
 	payload := SubmitAgentFormMsg{
-		EditSlug:    d.editSlug,
-		Slug:        slug,
+		EditID:      d.editID,
 		Name:        name,
 		Description: strings.TrimSpace(d.desc.Value()),
 		Model:       model,
@@ -399,21 +329,15 @@ func (d *AgentFormDialog) View(width, height int) string {
 	}
 	innerW := boxW - 6
 	d.name.SetWidth(innerW)
-	d.slug.SetWidth(innerW)
 	d.desc.SetWidth(innerW)
 	d.model.SetWidth(innerW)
 	d.prompt.SetWidth(innerW)
 
 	titleText := "New agent"
-	if d.editSlug != "" {
-		titleText = "Edit agent · " + d.editSlug
+	if d.editID != "" {
+		titleText = "Edit agent"
 	}
 	title := HatchedTitle(titleText, innerW, colPrimary, colAccent, d.styles.DialogTitle)
-
-	slugView := d.slug.View()
-	if d.editSlug != "" {
-		slugView = "  " + d.styles.Hint.Render(d.editSlug+" (immutable)")
-	}
 
 	saveLabel := "save"
 	if d.saving {
@@ -428,8 +352,6 @@ func (d *AgentFormDialog) View(width, height int) string {
 		"",
 		d.fieldLabel("name", d.focus == agFocusName),
 		d.name.View(),
-		d.fieldLabel("slug", d.focus == agFocusSlug),
-		slugView,
 		d.fieldLabel("description", d.focus == agFocusDescription),
 		d.desc.View(),
 		d.fieldLabel("model", d.focus == agFocusModel),

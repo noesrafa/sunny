@@ -85,11 +85,11 @@ func (s *server) stats(w http.ResponseWriter, _ *http.Request) {
 	out.Counts.ConvsPerAgent = make(map[string]int, len(agents))
 	totalConvs := 0
 	for _, a := range agents {
-		n, err := s.conv.Count(a.Slug)
+		n, err := s.conv.Count(a.ID)
 		if err != nil {
 			continue
 		}
-		out.Counts.ConvsPerAgent[a.Slug] = n
+		out.Counts.ConvsPerAgent[a.ID] = n
 		totalConvs += n
 	}
 	out.Counts.Conversations = totalConvs

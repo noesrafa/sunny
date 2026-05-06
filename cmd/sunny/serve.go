@@ -114,14 +114,14 @@ func serve(args []string) error {
 	// monitors package itself stays free of engine/store imports.
 	monReg := monitors.NewRegistry()
 	monReg.RegisterSource(monitors.ShellSource{})
-	monReg.RegisterAction(monitors.NewDispatchAction(func(ctx context.Context, slug, prompt string) (string, error) {
+	monReg.RegisterAction(monitors.NewDispatchAction(func(ctx context.Context, agentID, prompt string) (string, error) {
 		eng := enginePtr.Load()
 		if eng == nil {
 			return "", fmt.Errorf("dispatch: no engine configured")
 		}
-		ag, ok := st.Agent(slug)
+		ag, ok := st.Agent(agentID)
 		if !ok {
-			return "", fmt.Errorf("dispatch: agent %q not found", slug)
+			return "", fmt.Errorf("dispatch: agent %q not found", agentID)
 		}
 		msgs := []provider.Message{{Role: "user", Content: prompt}}
 		evCh, err := eng.Turn(ctx, ag, msgs, engine.TurnOptions{})

@@ -29,7 +29,7 @@ func (s *server) listConversations(w http.ResponseWriter, r *http.Request) {
 
 // createConversation allocates a new conversation under an agent.
 //
-// Body (all optional): {"title": "...", "model": "..."}
+// Body (all optional): {"title": "...", "model": "...", "cwd": "..."}
 //
 // Response: the freshly written meta.json.
 func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +42,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Title string `json:"title"`
 		Model string `json:"model"`
+		Cwd   string `json:"cwd"`
 	}
 	if r.ContentLength > 0 {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -53,7 +54,7 @@ func (s *server) createConversation(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = a.Config.Model
 	}
-	meta, err := s.conv.Create(agentID, body.Title, model)
+	meta, err := s.conv.Create(agentID, body.Title, model, body.Cwd)
 	if err != nil {
 		if errors.Is(err, conversation.ErrNotFound) {
 			http.NotFound(w, r)

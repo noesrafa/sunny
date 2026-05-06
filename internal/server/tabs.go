@@ -68,8 +68,10 @@ func (s *server) openTab(w http.ResponseWriter, r *http.Request) {
 	title := req.Title
 	if convID == "" {
 		// Spawn a fresh conv so the tab has somewhere to write
-		// from the very first turn.
-		meta, err := s.conv.Create(req.AgentID, title, a.Config.Model)
+		// from the very first turn. Pin the tab's cwd onto the conv
+		// so every turn auto-resolves tools against it (file, bash,
+		// glob, ...) without the client having to repeat it.
+		meta, err := s.conv.Create(req.AgentID, title, a.Config.Model, req.Cwd)
 		if err != nil {
 			if errors.Is(err, conversation.ErrNotFound) {
 				http.NotFound(w, r)
@@ -146,7 +148,10 @@ func (s *server) rebindTabConv(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	meta, err := s.conv.Create(existing.AgentID, existing.Title, a.Config.Model)
+	// Carry over the tab's cwd onto the new conv — rebinding is
+	// "fresh chat, same context", so the working directory the user
+	// originally picked stays in effect for the new journal.
+	meta, err := s.conv.Create(existing.AgentID, existing.Title, a.Config.Model, existing.Cwd)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

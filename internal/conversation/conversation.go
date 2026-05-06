@@ -49,6 +49,14 @@ type Meta struct {
 	MsgCount  int       `json:"msg_count"`
 	Model     string    `json:"model,omitempty"`
 	TotalCost float64   `json:"total_cost_usd,omitempty"`
+	// Cwd is the working directory file/bash tools should resolve
+	// against for every turn on this conv. Set at creation (from the
+	// originating tab or an explicit request body) and immutable
+	// afterwards — if the user wants a different cwd they spawn a new
+	// conv. Empty means "no preference"; the engine falls back to
+	// $HOME at runtime. Stored in meta so the conv stays self-
+	// describing even if the originating tab gets closed or rebound.
+	Cwd string `json:"cwd,omitempty"`
 	// ProviderState is opaque to the persistence layer. For claude-code
 	// it's the session id used by --resume; the engine reads this on the
 	// next turn so context survives daemon restarts.
@@ -80,7 +88,10 @@ func NewStore(root string) *Store { return &Store{root: root} }
 
 // Create allocates a new conversation directory under the given agent
 // and writes the initial meta.json. Title is optional ("" → "untitled").
-func (s *Store) Create(agentID, title, model string) (*Meta, error) {
+// Cwd is the working directory the engine will use for tool execution
+// on every turn against this conv; pass "" when the caller doesn't
+// pin one and the engine should fall back to $HOME.
+func (s *Store) Create(agentID, title, model, cwd string) (*Meta, error) {
 	if !agent.ValidID(agentID) {
 		return nil, fmt.Errorf("invalid agent id %q", agentID)
 	}
@@ -103,6 +114,7 @@ func (s *Store) Create(agentID, title, model string) (*Meta, error) {
 		AgentID:   agentID,
 		Title:     title,
 		Model:     model,
+		Cwd:       cwd,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}

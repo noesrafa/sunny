@@ -188,6 +188,15 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If the client didn't pin a cwd on this turn, fall back to the
+	// one stored on the conversation itself. Convs persist their cwd
+	// at creation time (from the originating tab or an explicit body
+	// param), so every turn lands in the right directory without the
+	// client having to repeat it on each sendTurn.
+	if req.Cwd == "" && meta.Cwd != "" {
+		req.Cwd = meta.Cwd
+	}
+
 	// Journal the user turn synchronously so a watcher that joins
 	// before the engine spits its first delta still sees the prompt.
 	userEv, err := s.sink.Append(agentID, convID, "user", map[string]string{"text": last.Content})
@@ -386,6 +395,13 @@ func (s *server) regenerateLastTurn(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		http.Error(w, "another turn is already running on this conversation", http.StatusConflict)
 		return
+	}
+
+	// Same cwd fallback as postTurns — see comment there. Reads from
+	// the conv's persisted cwd so regenerate keeps running in the
+	// directory the conversation was originally pinned to.
+	if req.Cwd == "" && meta.Cwd != "" {
+		req.Cwd = meta.Cwd
 	}
 
 	if err := s.conv.Truncate(agentID, convID, lastUserSeq); err != nil {

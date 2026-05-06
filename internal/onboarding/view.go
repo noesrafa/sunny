@@ -299,16 +299,17 @@ func (m *Model) footer() string {
 
 	switch m.step {
 	case stepWelcome:
-		return join([2]string{"enter", "start"}, [2]string{"→", "next"}, [2]string{"esc", "quit"})
+		return join([2]string{"enter", "start"}, [2]string{"esc", "quit"})
 	case stepDone:
-		return join([2]string{"enter", "exit"}, [2]string{"esc", "back"})
+		return join([2]string{"enter", "open sunny"}, [2]string{"esc", "back"})
 	case stepAgent:
 		// Arrow keys belong to the inputs here, not to step nav.
 		// Skipping the step is implicit: enter saves the existing
 		// pre-filled values without changes.
 		return join(
 			[2]string{"tab", "next field"},
-			[2]string{"enter / ctrl+s", "save"},
+			[2]string{"enter", "save"},
+			[2]string{"shift+enter", "newline"},
 			[2]string{"esc", "back"},
 		)
 	case stepOllama:
@@ -319,8 +320,8 @@ func (m *Model) footer() string {
 	default:
 		return join(
 			[2]string{"enter", "do it"},
-			[2]string{"→", "skip"},
-			[2]string{"←", "back"},
+			[2]string{"s", "skip"},
+			[2]string{"esc", "back"},
 		)
 	}
 }

@@ -331,11 +331,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey routes keyboard input. Navigation keys (esc, ctrl+c,
-// b/←, →/l/f, s) are universal; per-step bindings are dispatched
-// below. Anything we don't consume falls through to the focused
-// input on steps that have one (so typed characters reach the
-// textinput / textarea).
+// handleKey routes keyboard input. The contract is intentionally
+// minimal:
+//
+//   - enter advances (or saves on input-heavy steps).
+//   - esc goes back. esc on Welcome quits.
+//   - ctrl+c always quits.
+//   - s skips the current step (only on non-input steps; on input
+//     steps the user might want to type the letter "s").
+//   - arrows do NOTHING for step navigation. On input-heavy steps
+//     (Ollama, Agent) they reach the focused input so the cursor
+//     moves. On other steps they're inert — the user can't
+//     accidentally skip a step by aiming for the cursor.
 func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.running {
 		// Refuse most input while an install is in flight. Esc/Ctrl+C
@@ -349,11 +356,9 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	s := k.String()
 
-	// Universal navigation. ctrl+c always quits. esc on welcome
-	// quits; on the input-heavy steps (Ollama, Agent) the per-step
-	// handler claims it for "back" so the user can edit freely;
-	// elsewhere esc is "back". Done's esc is "back to agent" and is
-	// handled per-step below.
+	// Universal: ctrl+c always quits. esc on Welcome quits;
+	// elsewhere it's "back". Per-step handlers below can shadow esc
+	// when they need it (Ollama, Agent, Done all handle esc inline).
 	switch s {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -361,51 +366,30 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.step == stepWelcome {
 			return m, tea.Quit
 		}
-		// Defer to per-step handlers for stepOllama/stepAgent/stepDone
-		// so the input-heavy steps can intercept esc cleanly.
 		if m.step == stepOllama || m.step == stepAgent || m.step == stepDone {
-			break
+			break // per-step handler owns esc on these
 		}
 		m.step--
 		return m, nil
 	}
 
-	// Per-step bindings come before generic nav so a focused input
-	// can claim keys like `s` or arrow keys (e.g. typing "ssh" in
-	// the prompt area shouldn't skip the step).
 	switch m.step {
 	case stepWelcome:
-		if s == "enter" || s == "right" || s == "l" || s == "f" {
+		if s == "enter" {
 			m.advance()
 		}
 		return m, nil
 	case stepTailscale:
-		if s == "enter" || s == "right" || s == "l" || s == "f" || s == "s" {
+		switch s {
+		case "enter", "s":
 			m.advance()
-			return m, nil
-		}
-		if s == "b" || s == "left" {
-			return m.goBack()
 		}
 		return m, nil
 	case stepBrew:
-		if s == "b" || s == "left" {
-			return m.goBack()
-		}
-		if s == "s" {
+		switch s {
+		case "s":
 			return m.skipCurrent()
-		}
-		if s == "right" || s == "l" || s == "f" {
-			// Forward arrow advances unconditionally. Treat as skip
-			// when the step's action wasn't taken; treat as
-			// "continue" when it's already ✓.
-			if m.results[m.step] != statusOK {
-				m.results[m.step] = statusSkipped
-			}
-			m.advance()
-			return m, nil
-		}
-		if s == "enter" {
+		case "enter":
 			if !m.probes.brew {
 				m.flash = "install Homebrew first: see https://brew.sh"
 				return m, m.flashAfter(4 * time.Second)
@@ -418,20 +402,10 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case stepClaudeCode:
-		if s == "b" || s == "left" {
-			return m.goBack()
-		}
-		if s == "s" {
+		switch s {
+		case "s":
 			return m.skipCurrent()
-		}
-		if s == "right" || s == "l" || s == "f" {
-			if m.results[m.step] != statusOK {
-				m.results[m.step] = statusSkipped
-			}
-			m.advance()
-			return m, nil
-		}
-		if s == "enter" {
+		case "enter":
 			if m.probes.claudeCode {
 				m.advance()
 				return m, nil
@@ -445,20 +419,10 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case stepOpencode:
-		if s == "b" || s == "left" {
-			return m.goBack()
-		}
-		if s == "s" {
+		switch s {
+		case "s":
 			return m.skipCurrent()
-		}
-		if s == "right" || s == "l" || s == "f" {
-			if m.results[m.step] != statusOK {
-				m.results[m.step] = statusSkipped
-			}
-			m.advance()
-			return m, nil
-		}
-		if s == "enter" {
+		case "enter":
 			if m.probes.opencode {
 				m.advance()
 				return m, nil
@@ -512,12 +476,10 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case stepAgent:
 		// Input-heavy step. Only consume tab (focus toggle), enter
-		// (save), ctrl+s (alias), esc (back). Everything else —
-		// including ALL arrow keys, backspace, character input —
-		// forwards to the focused input. There is intentionally no
-		// `s`/arrow skip here: the agent inputs are pre-filled with
-		// Franky + Sunny prompt, so "skip" is "press enter to save the
-		// current values unchanged".
+		// (save — always, even from the textarea), shift+enter
+		// (newline, only meaningful in the textarea), ctrl+s (alias
+		// for enter), esc (back). Everything else — arrow keys,
+		// backspace, characters — forwards to the focused input.
 		switch s {
 		case "tab":
 			if m.agentNameInput.Focused() {
@@ -528,26 +490,24 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.agentNameInput.Focus()
 			}
 			return m, nil
-		case "enter":
-			// Enter saves from name input. From the textarea, enter
-			// inserts a newline (so multi-line prompts compose
-			// naturally); ctrl+s saves from the textarea.
+		case "enter", "ctrl+s":
+			// Enter ALWAYS saves on this step, regardless of which
+			// input is focused. Multi-line prompts use shift+enter
+			// for a newline (handled below).
+			m.running = true
+			m.runStep = stepAgent
+			m.runLabel = "saving agent"
+			m.runStarted = time.Now()
+			return m, tea.Batch(m.spinner.Tick, m.saveAgentCmd())
+		case "shift+enter":
+			// Newline in the textarea. No-op on the name input
+			// (single-line — bubbles textinput ignores newlines).
 			if m.agentPromptArea.Focused() {
 				var cmd tea.Cmd
 				m.agentPromptArea, cmd = m.agentPromptArea.Update(k)
 				return m, cmd
 			}
-			m.running = true
-			m.runStep = stepAgent
-			m.runLabel = "saving agent"
-			m.runStarted = time.Now()
-			return m, tea.Batch(m.spinner.Tick, m.saveAgentCmd())
-		case "ctrl+s":
-			m.running = true
-			m.runStep = stepAgent
-			m.runLabel = "saving agent"
-			m.runStarted = time.Now()
-			return m, tea.Batch(m.spinner.Tick, m.saveAgentCmd())
+			return m, nil
 		case "esc":
 			return m.goBack()
 		}
@@ -563,10 +523,10 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	case stepDone:
-		// Final step: enter triggers the "opening sunny tui…" splash
-		// then exits cleanly so the cmd handler can chain into
-		// `sunny tui`. esc / ← / b go back to the agent step. ctrl+c
-		// (handled at the top) hard-quits without the splash.
+		// Final step: enter launches sunny tui, esc goes back to the
+		// agent step in case the user wants to tweak something they
+		// noticed in the summary. ctrl+c (handled at the top of this
+		// function) hard-quits without launching the TUI.
 		switch s {
 		case "enter":
 			m.quitting = true
@@ -575,7 +535,7 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// instead of a black flicker before the TUI takes over.
 			// quitTickMsg is handled in Update → tea.Quit.
 			return m, tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg { return quitTickMsg{} })
-		case "esc", "left", "b":
+		case "esc":
 			m.step--
 			return m, nil
 		}

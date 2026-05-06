@@ -22,10 +22,10 @@ func (m *Model) View() tea.View {
 }
 
 // renderBody builds the logo + card stack and centers it on the
-// terminal. The logo width matches the card width so the brand mark
-// sits flush above the box border.
+// terminal. The logo width matches the card's outer width (content +
+// padding + border) so the brand mark sits flush above the box.
 func (m *Model) renderBody() string {
-	w := m.boxWidth()
+	contentW := m.boxWidth()
 	innerW := m.boxInnerWidth()
 
 	title := tui.HatchedTitle(m.headerLabel(), innerW, tui.ColorPrimary(), tui.ColorAccent(), styleHeader())
@@ -39,7 +39,7 @@ func (m *Model) renderBody() string {
 	}
 
 	box := lipgloss.NewStyle().
-		Width(w).
+		Width(contentW).
 		Padding(1, 2).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(tui.ColorBorder())
@@ -47,11 +47,17 @@ func (m *Model) renderBody() string {
 	content := title + "\n\n" + body + flash + "\n\n" + footer
 	card := box.Render(content)
 
-	// Brand mark at the same width as the card. Static gradient
-	// (frame=0) — the sweep animation lives in the chat TUI; here
-	// it'd be more distracting than helpful for a 60-second flow.
-	logo := tui.RenderLogo(w, 0)
-	stacked := logo + "\n\n" + card
+	// Match logo width to the card's *outer* width (content + 4 cells
+	// of padding + 2 cells of border) so the brand mark spans the
+	// same column range as the box. Without matching widths, lipgloss
+	// alignment compute looks wonky and clipping can hide rows.
+	cardOuterW := contentW + 6
+	logo := tui.RenderLogo(cardOuterW, 0)
+
+	// JoinVertical centers each row inside the widest. With matched
+	// widths everything aligns naturally and we avoid the place-vs-
+	// concat ambiguity that was eating the logo on first paint.
+	stacked := lipgloss.JoinVertical(lipgloss.Center, logo, "", card)
 
 	if m.height <= 0 || m.width <= 0 {
 		return stacked
@@ -229,12 +235,38 @@ func (m *Model) viewAgent(w int) string {
 }
 
 func (m *Model) viewDone(w int) string {
+	// Quitting splash — replaces the summary so the transition into
+	// `sunny tui` reads as a deliberate handoff instead of a black
+	// flicker. The renderBody decides centering; this just paints
+	// the message.
+	if m.quitting {
+		return lipgloss.NewStyle().Foreground(tui.ColorPrimary()).Bold(true).Render(
+			fmt.Sprintf("%s opening sunny tui…", m.spinner.View()),
+		)
+	}
+
 	body := wrap(
 		"Listo. Resumen abajo. Si algo quedó pendiente puedes correr `sunny onboarding` "+
 			"otra vez para arreglarlo — es 100% idempotente.",
 		w,
 	)
-	rep := freshDoctorReport(m.root)
+	hint := lipgloss.NewStyle().Foreground(tui.ColorMuted()).Render(
+		"Al pulsar enter te abro `sunny tui` directo. `sunny doctor` te da este "+
+			"resumen sin entrar al onboarding.",
+	)
+
+	// While the doctor probes are still running (first ~1 s after
+	// reaching this step) show a placeholder so the user doesn't
+	// stare at an empty card. We trigger the probe in advanceCmd /
+	// installFinishedMsg so it's already running by the time we paint.
+	if m.doctorCache == nil {
+		placeholder := lipgloss.NewStyle().Foreground(tui.ColorMuted()).Render(
+			fmt.Sprintf("%s probing your environment…", m.spinner.View()),
+		)
+		return body + "\n\n  " + placeholder + "\n\n" + hint
+	}
+
+	rep := *m.doctorCache
 	var lines []string
 	for _, p := range rep.Providers {
 		lines = append(lines, renderDoctorRow(p))
@@ -244,10 +276,6 @@ func (m *Model) viewDone(w int) string {
 	}
 	lines = append(lines, renderDoctorRow(rep.Daemon))
 	lines = append(lines, renderDoctorRow(rep.Runtime))
-	hint := lipgloss.NewStyle().Foreground(tui.ColorMuted()).Render(
-		"Para arrancar: `sunny` te abre el TUI. `sunny doctor` te da este resumen "+
-			"sin entrar al onboarding.",
-	)
 	return body + "\n\n" + strings.Join(lines, "\n") + "\n\n" + hint
 }
 

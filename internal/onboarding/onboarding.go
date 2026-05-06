@@ -82,6 +82,26 @@ type Model struct {
 	runErr     error
 	spinner    spinner.Model
 
+	// doctorCache holds the final-summary probe results, computed
+	// ONCE when the user first reaches stepDone. Without this, the
+	// View function (which is called on every render tick) would re-
+	// shell out to claude/opencode/tailscale every frame, making the
+	// Done screen feel laggy and ctrl+c slow to respond.
+	doctorCache    *doctor.Report
+	doctorCachedAt time.Time
+
+	// quitting flag drives the brief "opening sunny tui…" splash that
+	// renders between the user pressing enter on Done and the program
+	// exiting. Avoids a black flicker when the parent shell launches
+	// the TUI.
+	quitting bool
+
+	// launchTUI is set when the user presses enter on Done — after
+	// the bubbletea program returns, the cmd handler reads this to
+	// decide whether to chain `sunny tui`. ctrl+c / esc paths leave
+	// it false so accidental quits don't auto-launch the TUI.
+	launchTUI bool
+
 	// UI
 	width, height int
 	flash         string // ephemeral status line
@@ -156,6 +176,11 @@ type flashMsg string
 
 // flashClearMsg clears the flash.
 type flashClearMsg struct{}
+
+// quitTickMsg fires after a brief splash on the Done screen so the
+// transition into `sunny tui` is visually graceful instead of a
+// black flicker.
+type quitTickMsg struct{}
 
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
@@ -264,13 +289,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.results[v.step] = statusFailed
 			m.flash = m.runLabel + " failed: " + firstLine(v.output)
 		}
-		return m, tea.Batch(m.runProbesCmd(), m.flashAfter(4*time.Second))
+		cmds := []tea.Cmd{m.runProbesCmd(), m.flashAfter(4 * time.Second)}
+		// If we just landed on stepDone, kick off the doctor probe in
+		// the background so the summary is ready by the time the user
+		// looks at it.
+		if m.step == stepDone && m.doctorCache == nil {
+			cmds = append(cmds, m.runDoctorReportCmd())
+		}
+		return m, tea.Batch(cmds...)
+	case doctorReportMsg:
+		m.doctorCache = &v.report
+		m.doctorCachedAt = time.Now()
+		return m, nil
 	case flashMsg:
 		m.flash = string(v)
 		return m, m.flashAfter(3 * time.Second)
 	case flashClearMsg:
 		m.flash = ""
 		return m, nil
+	case quitTickMsg:
+		return m, tea.Quit
 	case tea.KeyMsg:
 		return m.handleKey(v)
 	}
@@ -525,12 +563,18 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	case stepDone:
-		// Final step: enter exits, esc / ← / b go back to the agent
-		// step in case the user wants to tweak something. ctrl+c is
-		// always quit (handled at the top of handleKey).
+		// Final step: enter triggers the "opening sunny tui…" splash
+		// then exits cleanly so the cmd handler can chain into
+		// `sunny tui`. esc / ← / b go back to the agent step. ctrl+c
+		// (handled at the top) hard-quits without the splash.
 		switch s {
 		case "enter":
-			return m, tea.Quit
+			m.quitting = true
+			m.launchTUI = true
+			// 250 ms splash so the user sees the transition message
+			// instead of a black flicker before the TUI takes over.
+			// quitTickMsg is handled in Update → tea.Quit.
+			return m, tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg { return quitTickMsg{} })
 		case "esc", "left", "b":
 			m.step--
 			return m, nil
@@ -539,6 +583,11 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+// ShouldLaunchTUI reports whether the user finished onboarding with
+// enter on the Done screen. The cmd handler reads this after Run()
+// returns to decide whether to exec `sunny tui`.
+func (m *Model) ShouldLaunchTUI() bool { return m.launchTUI }
 
 // goBack moves to the previous step. Common helper because several
 // step branches need it.
@@ -560,8 +609,7 @@ func (m *Model) skipCurrent() (tea.Model, tea.Cmd) {
 	if m.results[m.step] != statusOK {
 		m.results[m.step] = statusSkipped
 	}
-	m.advance()
-	return m, nil
+	return m, m.advanceCmd()
 }
 
 // advance moves to the next step or quits when stepDone is reached.
@@ -578,6 +626,20 @@ func (m *Model) advance() {
 	case stepAgent:
 		m.agentNameInput.Focus()
 	}
+}
+
+// advanceCmd is the value-returning sibling of advance — it bumps
+// the step pointer AND kicks off the background doctor probe if we
+// just landed on stepDone. Used by the skip-via-key paths that don't
+// route through installFinishedMsg (where the install handler
+// already triggers the probe).
+func (m *Model) advanceCmd() tea.Cmd {
+	prev := m.step
+	m.advance()
+	if prev != stepDone && m.step == stepDone && m.doctorCache == nil {
+		return m.runDoctorReportCmd()
+	}
+	return nil
 }
 
 func (m *Model) flashAfter(d time.Duration) tea.Cmd {
@@ -672,11 +734,40 @@ func stepStatusIcon(st stepStatus) string {
 	return " "
 }
 
-// freshDoctorReport runs the read-only doctor probes against root.
-// Used only for the final "done" summary, so the user sees the same
-// status they'd get from `sunny doctor`.
-func freshDoctorReport(root string) doctor.Report {
-	return doctor.Run(root)
+// doctorReport returns the cached probe report, computing it on
+// first call. Caching is essential: the View function fires on every
+// render and `doctor.Run` shells out to claude/opencode/tailscale —
+// re-running it dozens of times per second made the Done screen
+// laggy and slowed ctrl+c response. We cache for the lifetime of the
+// onboarding session; users who want a fresh report can re-run
+// `sunny onboarding`.
+func (m *Model) doctorReport() doctor.Report {
+	if m.doctorCache != nil {
+		return *m.doctorCache
+	}
+	rep := doctor.Run(m.root)
+	m.doctorCache = &rep
+	m.doctorCachedAt = time.Now()
+	return rep
+}
+
+// doctorReportMsg lands the result of an async doctor probe. We run
+// it off the render loop so the user sees the Done screen instantly
+// while the probes complete in the background; once the message
+// arrives we swap the cache and re-render.
+type doctorReportMsg struct {
+	report doctor.Report
+}
+
+// runDoctorReportCmd is fired when the user first reaches stepDone.
+// It runs every probe in a goroutine so the Done view paints
+// immediately (with a "running…" placeholder) and the real summary
+// fills in when probes complete — typically <1 s.
+func (m *Model) runDoctorReportCmd() tea.Cmd {
+	root := m.root
+	return func() tea.Msg {
+		return doctorReportMsg{report: doctor.Run(root)}
+	}
 }
 
 // stripANSI just for safe rendering of subprocess output captured

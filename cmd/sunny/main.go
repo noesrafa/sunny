@@ -55,6 +55,10 @@ func main() {
 		err = doctorCmd(args)
 	case "setup":
 		err = setupCmd(args)
+	case "onboarding", "onboard":
+		err = onboardingCmd(args)
+	case "uninstall":
+		err = uninstallCmd(args)
 	case "app":
 		err = appCmd(args)
 	case "version", "-v", "--version":
@@ -91,6 +95,8 @@ commands:
   mesh      Manage shared tailnet mesh key. 'sunny mesh export' on one host, 'sunny mesh import <key>' on another → zero-config discovery between them.
   doctor    Print a checklist: providers (✓/⚠/✗), daemon, runtime. Run this first when something feels off.
   setup     Get a provider ready. 'sunny setup' walks you through it; 'sunny setup <p>' targets one.
+  onboarding Interactive first-run flow: tailscale, brew, providers, first agent. Re-runnable as a manual doctor.
+  uninstall Stop the daemon and clean sunny off the system. Asks before deleting ~/.sunny/.
   app       Print a QR for the iOS/Android app — one scan and the phone is paired.
   version   Print version.
 

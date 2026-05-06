@@ -156,6 +156,7 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("DELETE /agents/{id}/conversations/{conv_id}/turn", srv.deleteTurn)
 	mux.HandleFunc("GET /agents/{id}/conversations/{conv_id}/watch", srv.watchConversation)
 	mux.HandleFunc("GET /secrets", srv.listSecrets)
+	mux.HandleFunc("GET /secrets/catalog", srv.listSecretsCatalog)
 	mux.HandleFunc("PUT /secrets/{provider}", srv.putSecrets)
 	mux.HandleFunc("DELETE /secrets/{provider}", srv.deleteSecrets)
 	mux.HandleFunc("POST /pairing/offer", srv.offerPairing)

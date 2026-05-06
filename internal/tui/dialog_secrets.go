@@ -8,32 +8,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/noesrafa/sunny/internal/client"
+	"github.com/noesrafa/sunny/internal/secrets"
 )
 
-// knownProviders is the catalogue the secrets dialog renders. Each
-// entry declares which fields the user is expected to fill in. The
-// list is intentionally hard-coded — every provider sunny knows about
-// has its own driver and integration code anyway, so this list is
-// never longer than what code already supports.
-var knownProviders = []providerSpec{
-	{Slug: "anthropic", Label: "Anthropic API", Fields: []fieldSpec{{Key: "api_key", Hint: "sk-ant-…"}}},
-	{Slug: "openai", Label: "OpenAI API", Fields: []fieldSpec{{Key: "api_key", Hint: "sk-…"}}},
-	{Slug: "ollama", Label: "Ollama Cloud", Fields: []fieldSpec{
-		{Key: "api_key", Hint: "ollama.com key"},
-		{Key: "base_url", Hint: "https://ollama.com (default)"},
-	}},
-}
-
-type providerSpec struct {
-	Slug   string
-	Label  string
-	Fields []fieldSpec
-}
-
-type fieldSpec struct {
-	Key  string
-	Hint string
-}
+// knownProviders is the catalogue the secrets dialog renders, sourced
+// from internal/secrets so the TUI, the daemon's /secrets/catalog
+// endpoint, the onboarding flow and the doctor command all read from
+// the same list.
+func knownProviders() []secrets.CatalogEntry { return secrets.Catalog() }
 
 // SecretsDialog is the top-level secrets manager: a list of known
 // providers with status badges, plus a paste sub-form for whichever
@@ -61,9 +43,9 @@ type SecretsSavedMsg struct {
 }
 
 // OpenSecretsFormMsg asks the dialog stack to open the paste form for
-// a specific provider. Carries the spec for label + fields.
+// a specific provider. Carries the catalog entry for label + fields.
 type OpenSecretsFormMsg struct {
-	Spec providerSpec
+	Spec secrets.CatalogEntry
 }
 
 func NewSecretsDialog(c *client.Client, s Styles) *SecretsDialog {
@@ -121,18 +103,27 @@ func (d *SecretsDialog) Update(msg tea.Msg) tea.Cmd {
 			}
 			return nil
 		case "down", "ctrl+n", "j":
-			if d.selected < len(knownProviders)-1 {
+			cat := knownProviders()
+			if d.selected < len(cat)-1 {
 				d.selected++
 			}
 			return nil
 		case "enter":
-			spec := knownProviders[d.selected]
+			cat := knownProviders()
+			if d.selected < 0 || d.selected >= len(cat) {
+				return nil
+			}
+			spec := cat[d.selected]
 			return func() tea.Msg {
 				return OpenSubDialogMsg{Dialog: NewSecretsFormDialog(d.client, spec, d.styles)}
 			}
 		case "d", "delete":
-			spec := knownProviders[d.selected]
-			return func() tea.Msg { return DeleteSecretsMsg{Provider: spec.Slug} }
+			cat := knownProviders()
+			if d.selected < 0 || d.selected >= len(cat) {
+				return nil
+			}
+			spec := cat[d.selected]
+			return func() tea.Msg { return DeleteSecretsMsg{Provider: spec.Provider} }
 		}
 	}
 	return nil
@@ -155,7 +146,7 @@ func (d *SecretsDialog) View(width, height int) string {
 	} else if d.loadErr != "" {
 		lines = append(lines, "  "+d.styles.ResultError.Render("✗ "+d.loadErr))
 	} else {
-		for i, p := range knownProviders {
+		for i, p := range knownProviders() {
 			lines = append(lines, d.renderRow(p, i == d.selected))
 		}
 	}
@@ -169,7 +160,7 @@ func (d *SecretsDialog) View(width, height int) string {
 	return d.styles.DialogBox.Width(boxW).Render(strings.Join(lines, "\n"))
 }
 
-func (d *SecretsDialog) renderRow(p providerSpec, selected bool) string {
+func (d *SecretsDialog) renderRow(p secrets.CatalogEntry, selected bool) string {
 	marker := "  "
 	titleStyle := d.styles.AssistantText
 	if selected {
@@ -177,10 +168,10 @@ func (d *SecretsDialog) renderRow(p providerSpec, selected bool) string {
 		titleStyle = d.styles.HeaderTitle
 	}
 	badge := d.styles.Hint.Render("○ empty")
-	if fs, ok := d.configured[p.Slug]; ok && len(fs) > 0 {
+	if fs, ok := d.configured[p.Provider]; ok && len(fs) > 0 {
 		badge = d.styles.StatusIdle.Render("✓ " + strings.Join(fs, ", "))
 	}
-	return marker + titleStyle.Render(p.Label) + " " + d.styles.Hint.Render("·"+p.Slug) + "\n    " + badge
+	return marker + titleStyle.Render(p.Label) + " " + d.styles.Hint.Render("·"+p.Provider) + "\n    " + badge
 }
 
 // DeleteSecretsMsg requests deletion of a provider's secrets section.
@@ -202,7 +193,7 @@ type SubmitSecretsMsg struct {
 // paste verification). Trade-off discussed in CLAUDE.md.
 type SecretsFormDialog struct {
 	client *client.Client
-	spec   providerSpec
+	spec   secrets.CatalogEntry
 	inputs []textinput.Model
 	focus  int
 	saving bool
@@ -210,7 +201,7 @@ type SecretsFormDialog struct {
 	styles Styles
 }
 
-func NewSecretsFormDialog(c *client.Client, spec providerSpec, s Styles) *SecretsFormDialog {
+func NewSecretsFormDialog(c *client.Client, spec secrets.CatalogEntry, s Styles) *SecretsFormDialog {
 	inputs := make([]textinput.Model, len(spec.Fields))
 	for i, f := range spec.Fields {
 		ti := textinput.New()
@@ -285,7 +276,7 @@ func (d *SecretsFormDialog) submit() tea.Cmd {
 	}
 	d.saving = true
 	d.err = ""
-	provider := d.spec.Slug
+	provider := d.spec.Provider
 	return func() tea.Msg { return SubmitSecretsMsg{Provider: provider, Fields: fields} }
 }
 

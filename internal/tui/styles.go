@@ -40,6 +40,19 @@ func init() {
 	SetPalette(Themes[0].P)
 }
 
+// ColorPrimary / ColorAccent expose the active palette accents so
+// sibling packages (e.g. onboarding) can render with the same look
+// without importing the full Styles stack. Read-only — flip the
+// palette via SetPalette + DefaultStyles.
+func ColorPrimary() color.Color { return colPrimary }
+func ColorAccent() color.Color  { return colAccent }
+func ColorMuted() color.Color   { return colMuted }
+func ColorSuccess() color.Color { return colSuccess }
+func ColorWarning() color.Color { return colWarning }
+func ColorDanger() color.Color  { return colDanger }
+func ColorText() color.Color    { return colText }
+func ColorBorder() color.Color  { return colBorder }
+
 // SetPalette swaps the active palette. Call DefaultStyles() afterwards to
 // pick up the new colors in pre-built styles, and clear any markdown
 // caches that bake colors into rendered output.

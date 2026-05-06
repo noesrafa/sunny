@@ -5,11 +5,38 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
-**Latest release: `v0.28.0`** (opaque agent IDs + version-check
-endpoint, on top of the v0.18→v0.27 line of TUI/runs/monitors/avatar
-work). Two new shifts in v0.28:
+**Latest release: `v0.29.0`** (interactive onboarding, sunny
+uninstall, secrets catalog, secrets template seed, secrets knowledge
+for the default agent). Five additions on top of v0.28:
 
-1. **Agent identity is opaque.** Every agent has an `id` (shape
+1. **`sunny onboarding`** is the interactive first-run flow and the
+   manual doctor: 8 steps (welcome / tailscale / brew + tap /
+   claude-code / opencode / ollama / first agent / done) — all
+   skippable, idempotent, re-runnable any time. Probes via
+   `internal/doctor`, installs via brew subprocess, key writes
+   through the daemon's `PUT /secrets`, agent edit through `PATCH
+   /agents/sunny`. Lives in `internal/onboarding/`.
+2. **`sunny uninstall`** is the cleanup sibling: stops the daemon,
+   asks before removing `~/.sunny/`, detects brew vs standalone
+   binary install, untaps if applicable. `--yes` for scripts,
+   `--keep-data` to never prompt.
+3. **`GET /secrets/catalog`** returns the canonical provider
+   catalog (anthropic / openai / ollama, with fields + env vars +
+   help URLs). Source of truth moved from `dialog_secrets.go` →
+   `internal/secrets/catalog.go`. TUI consumes via `secrets.Catalog()`,
+   external clients via the endpoint. `Client.SecretsCatalog(ctx)`.
+4. **Bootstrap seeds `~/.sunny/secrets.yaml`** (mode 0600) with a
+   commented stub the first time the daemon boots. Idempotent — only
+   writes when the file is absent. AI agents `view`-ing the file
+   immediately see the shape; users `cat`-ing it see a self-doc.
+5. **Default agent knowledge file** at
+   `defaults/agents/sunny/knowledge/general/secrets.md` documents
+   the file location, shape, and direct-edit flow so AI agents can
+   set up providers without round-tripping through the API.
+
+**v0.28 (opaque agent IDs + version-check endpoint).** Two shifts:
+
+a. **Agent identity is opaque.** Every agent has an `id` (shape
    `agt_<unix_ms>_<8hex>`, generated server-side) plus a mutable
    `name`. The id is the only handle on disk + on the wire; the
    name is display-only. Renaming = `PATCH /agents/{id}

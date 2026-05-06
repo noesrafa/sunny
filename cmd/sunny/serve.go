@@ -69,6 +69,14 @@ func serve(args []string) error {
 		return fmt.Errorf("migrate layout: %w", err)
 	}
 
+	if wrote, err := bootstrap.EnsureSecretsTemplate(*root); err != nil {
+		// Non-fatal: a missing template is a UX miss, not a daemon
+		// failure. Log and keep going.
+		log.Warn("seed secrets template", "err", err)
+	} else if wrote {
+		log.Info("seeded secrets.yaml template", "root", *root)
+	}
+
 	st, err := store.Load(*root)
 	if err != nil {
 		return fmt.Errorf("load store: %w", err)

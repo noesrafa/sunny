@@ -19,6 +19,13 @@ func (s *server) listSecrets(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.secrets.List())
 }
 
+// listSecretsCatalog returns the canonical list of providers sunny
+// knows how to wire. Doesn't reveal any values; this is the spec, not
+// the state. Pair with GET /secrets to know which entries are filled.
+func (s *server) listSecretsCatalog(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, secrets.Catalog())
+}
+
 // putSecrets replaces all fields for a provider with the request body.
 //
 // Body: {"api_key":"…","base_url":"…"}

@@ -11,8 +11,9 @@ import (
 	"github.com/noesrafa/sunny/internal/tui"
 )
 
-// View renders the current step inside a centered card. Compact —
-// each step is title + 1-paragraph "why" + state line + action hint.
+// View renders the current step inside a centered card with the
+// sunny brand mark stacked on top. Compact — each step is title +
+// 1-paragraph "why" + state line + action hint.
 func (m *Model) View() tea.View {
 	v := tea.NewView("")
 	v.AltScreen = true
@@ -20,7 +21,9 @@ func (m *Model) View() tea.View {
 	return v
 }
 
-// renderBody builds the full content of the centered card.
+// renderBody builds the logo + card stack and centers it on the
+// terminal. The logo width matches the card width so the brand mark
+// sits flush above the box border.
 func (m *Model) renderBody() string {
 	w := m.boxWidth()
 	innerW := m.boxInnerWidth()
@@ -42,14 +45,18 @@ func (m *Model) renderBody() string {
 		BorderForeground(tui.ColorBorder())
 
 	content := title + "\n\n" + body + flash + "\n\n" + footer
-	rendered := box.Render(content)
+	card := box.Render(content)
 
-	// Center the card vertically + horizontally so the onboarding
-	// feels like a focused experience, not crammed into the corner.
+	// Brand mark at the same width as the card. Static gradient
+	// (frame=0) — the sweep animation lives in the chat TUI; here
+	// it'd be more distracting than helpful for a 60-second flow.
+	logo := tui.RenderLogo(w, 0)
+	stacked := logo + "\n\n" + card
+
 	if m.height <= 0 || m.width <= 0 {
-		return rendered
+		return stacked
 	}
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, rendered)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, stacked)
 }
 
 // headerLabel returns the step title with progress count.
@@ -266,20 +273,20 @@ func (m *Model) footer() string {
 	case stepWelcome:
 		return join([2]string{"enter", "start"}, [2]string{"→", "next"}, [2]string{"esc", "quit"})
 	case stepDone:
-		return join([2]string{"enter", "exit"})
+		return join([2]string{"enter", "exit"}, [2]string{"esc", "back"})
 	case stepAgent:
+		// Arrow keys belong to the inputs here, not to step nav.
+		// Skipping the step is implicit: enter saves the existing
+		// pre-filled values without changes.
 		return join(
-			[2]string{"enter", "save"},
-			[2]string{"shift+enter", "newline"},
 			[2]string{"tab", "next field"},
-			[2]string{"→", "skip"},
-			[2]string{"←", "back"},
+			[2]string{"enter / ctrl+s", "save"},
+			[2]string{"esc", "back"},
 		)
 	case stepOllama:
 		return join(
 			[2]string{"enter", "save"},
-			[2]string{"→", "skip"},
-			[2]string{"←", "back"},
+			[2]string{"esc", "back"},
 		)
 	default:
 		return join(

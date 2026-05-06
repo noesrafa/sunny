@@ -79,6 +79,22 @@ func brandColorRamp(width int) []color.Color {
 	return cachedBrandRamp
 }
 
+// RenderLogo is the public entry point sibling packages use to paint
+// the sunny brand mark with the active palette. Internally it just
+// wraps renderLogo with DefaultStyles so callers don't need to plumb
+// Styles through. width is the rendered column count (clamped to the
+// logo's natural minimum); frame is the animation phase (pass 0 for a
+// static gradient — perfect for short-lived screens like onboarding
+// where the sweep would be more distracting than useful).
+func RenderLogo(width, frame int) string {
+	return renderLogo(width, DefaultStyles(), frame)
+}
+
+// LogoMinWidth is the minimum column count renderLogo needs to paint
+// the brand mark without truncating. Onboarding uses it to reserve
+// horizontal space for the card.
+const LogoMinWidth = logoBlockW
+
 // renderLogo paints the brand mark with an animated gradient sweep across
 // the SUNNY letters. `frame` is a monotonically-increasing counter
 // (driven by logoTick in model.go); each step shifts the gradient phase

@@ -72,7 +72,6 @@ type Model struct {
 	ollamaInput     textinput.Model
 	agentNameInput  textinput.Model
 	agentPromptArea textarea.Model
-	agentDirty      bool // true once user touched name/prompt — gates "skip" auto-advance
 
 	// Subprocess tracking — at most one install runs at a time.
 	running    bool
@@ -312,15 +311,22 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	s := k.String()
 
-	// Universal navigation. esc on welcome/done quits; elsewhere it
-	// goes back. ctrl+c always quits. Forward navigation (→ / l / f)
-	// is treated as "skip this step" — same as `s`.
+	// Universal navigation. ctrl+c always quits. esc on welcome
+	// quits; on the input-heavy steps (Ollama, Agent) the per-step
+	// handler claims it for "back" so the user can edit freely;
+	// elsewhere esc is "back". Done's esc is "back to agent" and is
+	// handled per-step below.
 	switch s {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		if m.step == stepWelcome || m.step == stepDone {
+		if m.step == stepWelcome {
 			return m, tea.Quit
+		}
+		// Defer to per-step handlers for stepOllama/stepAgent/stepDone
+		// so the input-heavy steps can intercept esc cleanly.
+		if m.step == stepOllama || m.step == stepAgent || m.step == stepDone {
+			break
 		}
 		m.step--
 		return m, nil
@@ -428,9 +434,11 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case stepOllama:
-		// Reserved keys for the step itself. Everything else falls
-		// through to the textinput so typed chars / paste / backspace
-		// land where the user expects.
+		// Input-heavy step. Only intercept the keys we explicitly own
+		// (enter/esc/tab) — every other keystroke (arrow keys, char
+		// input, paste, backspace, ctrl+a/e for word-jump, …) goes to
+		// the textinput. Skip with `s` only when the input is empty,
+		// otherwise the user can't actually type the letter "s".
 		switch s {
 		case "enter":
 			val := strings.TrimSpace(m.ollamaInput.Value())
@@ -439,7 +447,7 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.advance()
 					return m, nil
 				}
-				m.flash = "paste a key first, or press s/→ to skip"
+				m.flash = "paste a key first, or press esc to skip"
 				return m, m.flashAfter(3 * time.Second)
 			}
 			m.running = true
@@ -448,27 +456,16 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.runStarted = time.Now()
 			return m, tea.Batch(m.spinner.Tick, m.saveOllamaKeyCmd(val))
 		case "tab":
-			// Single field — tab is a no-op rather than misleading.
 			return m, nil
 		case "esc":
 			return m.goBack()
 		}
-		// Universal nav for empty-input cases.
-		if m.ollamaInput.Value() == "" {
-			switch s {
-			case "s":
-				return m.skipCurrent()
-			case "right", "f":
-				if m.results[m.step] != statusOK {
-					m.results[m.step] = statusSkipped
-				}
-				m.advance()
-				return m, nil
-			case "b", "left":
-				return m.goBack()
-			}
+		// Skip-with-`s` only when the input is empty (otherwise typing
+		// "s" on a key would yank the user out mid-edit).
+		if m.ollamaInput.Value() == "" && s == "s" {
+			return m.skipCurrent()
 		}
-		// Forward to the textinput so typed chars / paste arrive.
+		// Forward everything else to the textinput.
 		if !m.ollamaInput.Focused() {
 			m.ollamaInput.Focus()
 		}
@@ -476,6 +473,13 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ollamaInput, cmd = m.ollamaInput.Update(k)
 		return m, cmd
 	case stepAgent:
+		// Input-heavy step. Only consume tab (focus toggle), enter
+		// (save), ctrl+s (alias), esc (back). Everything else —
+		// including ALL arrow keys, backspace, character input —
+		// forwards to the focused input. There is intentionally no
+		// `s`/arrow skip here: the agent inputs are pre-filled with
+		// Franky + Sunny prompt, so "skip" is "press enter to save the
+		// current values unchanged".
 		switch s {
 		case "tab":
 			if m.agentNameInput.Focused() {
@@ -487,9 +491,14 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
-			// Enter saves from anywhere on this step. Multi-line prompt
-			// users press shift+enter for a newline (matches the chat
-			// textarea convention).
+			// Enter saves from name input. From the textarea, enter
+			// inserts a newline (so multi-line prompts compose
+			// naturally); ctrl+s saves from the textarea.
+			if m.agentPromptArea.Focused() {
+				var cmd tea.Cmd
+				m.agentPromptArea, cmd = m.agentPromptArea.Update(k)
+				return m, cmd
+			}
 			m.running = true
 			m.runStep = stepAgent
 			m.runLabel = "saving agent"
@@ -504,32 +513,10 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			return m.goBack()
 		}
-		// Universal nav only fires when no input would lose focus
-		// from a single key — same trick as stepOllama. We use an
-		// "agentDirty" flag we now flip on any keystroke that lands
-		// on the inputs, so accidental `s`/arrow keys after typing
-		// don't yank you out of the form.
-		if !m.agentDirty {
-			switch s {
-			case "s":
-				return m.skipCurrent()
-			case "right", "f":
-				if m.results[m.step] != statusOK {
-					m.results[m.step] = statusSkipped
-				}
-				m.advance()
-				return m, nil
-			case "b", "left":
-				return m.goBack()
-			}
-		}
-		// Make sure something is focused for incoming keystrokes.
+		// Forward everything else to whichever input is focused.
 		if !m.agentNameInput.Focused() && !m.agentPromptArea.Focused() {
 			m.agentNameInput.Focus()
 		}
-		// Forward typed chars to the focused input. Mark dirty so
-		// later `s`/arrow keys don't surprise-skip.
-		m.agentDirty = true
 		var cmd tea.Cmd
 		if m.agentNameInput.Focused() {
 			m.agentNameInput, cmd = m.agentNameInput.Update(k)
@@ -538,10 +525,15 @@ func (m *Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	case stepDone:
-		// Final step: only enter ends. esc/ctrl+c also work as a
-		// universal escape hatch but aren't advertised in the hint.
-		if s == "enter" {
+		// Final step: enter exits, esc / ← / b go back to the agent
+		// step in case the user wants to tweak something. ctrl+c is
+		// always quit (handled at the top of handleKey).
+		switch s {
+		case "enter":
 			return m, tea.Quit
+		case "esc", "left", "b":
+			m.step--
+			return m, nil
 		}
 		return m, nil
 	}
@@ -556,7 +548,6 @@ func (m *Model) goBack() (tea.Model, tea.Cmd) {
 	}
 	// Reset agent-dirty when leaving the agent step so a return
 	// visit re-enables nav without typing.
-	m.agentDirty = false
 	return m, nil
 }
 

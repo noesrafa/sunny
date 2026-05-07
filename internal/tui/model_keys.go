@@ -11,6 +11,7 @@ import (
 	"github.com/atotto/clipboard"
 
 	imgclip "github.com/noesrafa/sunny/internal/clipboard"
+	"github.com/noesrafa/sunny/internal/git"
 	"github.com/noesrafa/sunny/internal/session"
 )
 
@@ -75,14 +76,16 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		m.handleClearOrCancel()
 		return m, nil, true
 	case key.Matches(msg, m.keymap.Diff):
-		cwd, branch := "", ""
-		var changes session.ChangeStats
+		cwd, branch, host := "", "", m.activePeer
+		var changes git.ChangeStats
 		if cur := m.manager.Current(); cur != nil {
 			cwd, branch, changes = cur.Cwd, cur.Branch, cur.Changes
+			host = cur.Host()
 		} else {
 			cwd = m.initialCwd
 		}
-		return m, m.overlay.Open(NewDiffDialog(cwd, branch, changes, m.styles)), true
+		dialog := NewDiffDialog(m.clientFor(host), host, cwd, branch, changes, m.styles)
+		return m, m.overlay.Open(dialog), true
 	case key.Matches(msg, m.keymap.Rename):
 		if cur := m.manager.Current(); cur != nil {
 			d := NewRenameDialog(cur.Title, m.styles)
@@ -124,32 +127,23 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.Help):
 		return m, m.overlay.Open(NewHelpDialog(m.styles)), true
 	case key.Matches(msg, m.keymap.Peer1):
-		m.switchToPeerByIdx(0)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(0), true
 	case key.Matches(msg, m.keymap.Peer2):
-		m.switchToPeerByIdx(1)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(1), true
 	case key.Matches(msg, m.keymap.Peer3):
-		m.switchToPeerByIdx(2)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(2), true
 	case key.Matches(msg, m.keymap.Peer4):
-		m.switchToPeerByIdx(3)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(3), true
 	case key.Matches(msg, m.keymap.Peer5):
-		m.switchToPeerByIdx(4)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(4), true
 	case key.Matches(msg, m.keymap.Peer6):
-		m.switchToPeerByIdx(5)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(5), true
 	case key.Matches(msg, m.keymap.Peer7):
-		m.switchToPeerByIdx(6)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(6), true
 	case key.Matches(msg, m.keymap.Peer8):
-		m.switchToPeerByIdx(7)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(7), true
 	case key.Matches(msg, m.keymap.Peer9):
-		m.switchToPeerByIdx(8)
-		return m, nil, true
+		return m, m.switchToPeerByIdx(8), true
 	}
 	return m, nil, false
 }

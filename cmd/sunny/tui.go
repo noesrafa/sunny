@@ -21,7 +21,6 @@ import (
 	"github.com/noesrafa/sunny/internal/peers"
 	"github.com/noesrafa/sunny/internal/session"
 	uistate "github.com/noesrafa/sunny/internal/state"
-	"github.com/noesrafa/sunny/internal/tsnet"
 	"github.com/noesrafa/sunny/internal/tui"
 )
 
@@ -97,25 +96,13 @@ func openTUI(args []string) error {
 	defer closer.Close()
 	lg.Info("tui starting", "cwd", cwd, "log", logger.LogPath())
 
-	// Tailnet auto-discovery: zero-config when tailscale is up.
-	// Two paths, in priority order:
-	//
-	//   1. Identity: any sunny daemon on the tailnet whose
-	//      tailscale UserID matches ours (= our own machine, no
-	//      shared keys needed).
-	//   2. Mesh-key: sunny daemons NOT in our tailscale account
-	//      that hold a shared mesh.key (sub-mesh override).
-	//
-	// peers.yaml entries take precedence over both — operator
-	// config wins.
-	//
-	// Runs ASYNC in a goroutine so a slow / hung discovery never
-	// blocks TUI startup. Discovered peers join the federation as
-	// they're found; the agent picker re-queries on open so they
-	// surface naturally.
-	if tsnet.Available() {
-		go discoverTailnetPeers(ctx, fed, *root, lg)
-	}
+	// Federation discovery is owned by the daemon now (GET
+	// /federation/peers). We kick off one async pass at boot to
+	// populate the federation quickly; the periodic refresh runs
+	// from inside the bubbletea loop (federationDiscoverTickCmd).
+	// Failures are silent — peers.yaml entries already work either
+	// way, and the next tick retries.
+	go discoverViaDaemon(ctx, fed, lg)
 
 	prefs := loadPrefs(lg)
 
@@ -155,6 +142,7 @@ func openTUI(args []string) error {
 	applyPrefs(prefs, peerManagers, peerOrder)
 
 	first := peerManagers[peers.LocalName].Sessions[0]
+	mk, _ := mesh.Load(*root) // empty when no mesh.key — mesh peers just won't auto-add
 	model := tui.NewModel(ctx, peerManagers, peerOrder, cwd, tui.Options{
 		Logger:                   lg,
 		DefaultModel:             first.Model,
@@ -165,6 +153,7 @@ func openTUI(args []string) error {
 		DefaultAgent:             "sunny",
 		InitialTheme:             prefs.Theme,
 		Federation:               fed,
+		MeshKey:                  string(mk),
 	})
 	return model.Run(ctx)
 }
@@ -287,114 +276,45 @@ func fallbackCwd(cwd string) string {
 	return "/"
 }
 
-// discoverTailnetPeers is the zero-config discovery flow. Walks
-// the tailnet, GETs /sunny/identity on each candidate, and adds
-// peers in priority:
+// discoverViaDaemon asks the LOCAL daemon for its federation list
+// (GET /federation/peers — server-side cached tailnet sweep) and
+// applies each entry to fed. The daemon owns the tailscale CLI
+// shell-out + per-peer identity probe; this side just consumes the
+// classified result.
 //
-//	1. Same tailscale UserID as us → AddTailnetPeer (no creds).
-//	2. Our local mesh.key matches their fingerprint → AddMeshPeer.
-//	3. Otherwise skip — daemon belongs to someone else's mesh.
-//
-// Hard 5-second budget for the whole pass. Per-peer probes run in
-// parallel; a tailnet of dozens completes well within budget.
-// When the budget expires we add whatever responded and walk away
-// — better to show the federation we have than to block forever
-// on one stuck peer.
-func discoverTailnetPeers(ctx context.Context, fed *client.Federation, root string, lg *charmlog.Logger) {
-	// Total wall-clock budget. Belt-and-suspenders: per-peer
-	// FetchIdentity already has its own 3s timeout, but if every
-	// peer in a 50-node tailnet stalled at the SYN, summing those
-	// timeouts could still take longer than anybody's patience.
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	st, err := tsnet.FetchStatus()
-	if err != nil {
-		lg.Debug("tailnet discovery: status", "err", err.Error())
+// Mesh trust adds need our local mesh.key — we read it here rather
+// than have the daemon expose it (the key is a secret, never
+// returned over HTTP). Empty mesh key just skips mesh entries.
+func discoverViaDaemon(ctx context.Context, fed *client.Federation, lg *charmlog.Logger) {
+	local := fed.Local()
+	if local == nil {
 		return
 	}
-	mk, _ := mesh.Load(root) // optional — empty when no mesh.key
-	wantFP := ""
-	if mk != "" {
-		wantFP = mk.Fingerprint()
+	peers, err := local.FetchFederationPeers(ctx)
+	if err != nil {
+		lg.Debug("federation discovery", "err", err.Error())
+		return
 	}
-	port := "7777"
-
-	type result struct {
-		name string
-		base string
-		path string // "identity" | "mesh" | ""
-	}
-	resCh := make(chan result, len(st.Peers))
-
-	// Count what we ACTUALLY launch, not what's in st.Peers — a
-	// tailnet with offline / IP-less peers (iPhone in a pocket,
-	// retired node, etc.) makes len(st.Peers) > the number of
-	// goroutines that send on resCh. Waiting for len(st.Peers)
-	// recvs deadlocks the loop and, when discovery is synchronous,
-	// freezes TUI boot. The launched counter is the bug fix.
-	launched := 0
-	for _, p := range st.Peers {
-		if !p.Online || p.IP == "" {
-			continue
+	mk, _ := mesh.Load(rootForFed())
+	for _, p := range peers {
+		switch p.Trust {
+		case "tailnet":
+			fed.AddTailnetPeer(p.Name, p.URL)
+			lg.Info("peer discovered (same tailscale account)", "name", p.Name, "url", p.URL)
+		case "mesh":
+			if mk == "" {
+				continue
+			}
+			fed.AddMeshPeer(p.Name, p.URL, string(mk))
+			lg.Info("peer discovered (shared mesh key)", "name", p.Name, "url", p.URL)
 		}
-		launched++
-		go func(p tsnet.Peer) {
-			base := "http://" + p.IP + ":" + port
-			id, err := client.FetchIdentity(ctx, base)
-			if err != nil {
-				resCh <- result{name: p.HostName, base: base}
-				return
-			}
-			r := result{name: peerNameFromTailscaleHost(p.HostName), base: base}
-			switch {
-			case p.UserID != 0 && p.UserID == st.Self.UserID:
-				r.path = "identity"
-			case wantFP != "" && id.Mesh == wantFP:
-				r.path = "mesh"
-			}
-			resCh <- r
-		}(p)
-	}
-
-	added := 0
-	for i := 0; i < launched; i++ {
-		select {
-		case r := <-resCh:
-			switch r.path {
-			case "identity":
-				fed.AddTailnetPeer(r.name, r.base)
-				added++
-				lg.Info("tailnet peer discovered (same tailscale account)", "name", r.name, "url", r.base)
-			case "mesh":
-				fed.AddMeshPeer(r.name, r.base, string(mk))
-				added++
-				lg.Info("tailnet peer discovered (shared mesh key)", "name", r.name, "url", r.base)
-			}
-		case <-ctx.Done():
-			lg.Debug("tailnet discovery: budget exceeded", "completed", i, "expected", launched)
-			return
-		}
-	}
-	if added > 0 {
-		lg.Info("tailnet discovery complete", "added", added)
 	}
 }
 
-// peerNameFromTailscaleHost makes a slug out of a tailnet hostname.
-// tailscale's HostName is already short and dash-friendly (e.g.
-// "mac-rafael", "vps-1") but may have uppercase or trailing dots
-// from the magicDNS suffix.
-func peerNameFromTailscaleHost(h string) string {
-	h = strings.ToLower(h)
-	if i := strings.Index(h, "."); i >= 0 {
-		h = h[:i]
-	}
-	if h == "" {
-		return "remote"
-	}
-	return h
-}
+// rootForFed is the sunny runtime dir we read mesh.key from when
+// discoverViaDaemon classifies "mesh" entries. The TUI binary always
+// lives next to the user's runtime dir, so defaultRoot is correct.
+func rootForFed() string { return defaultRoot() }
 
 // loadPrefs reads ~/.sunny/state.json (v8 — UI-local prefs only,
 // no session/tab content; that lives on the daemon). Failures

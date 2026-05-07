@@ -1,10 +1,8 @@
 package tui
 
 import (
+	"context"
 	"image/color"
-	"os"
-	"os/exec"
-	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -13,16 +11,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/noesrafa/sunny/internal/session"
+	"github.com/noesrafa/sunny/internal/client"
+	"github.com/noesrafa/sunny/internal/git"
 )
-
-// diffFile is one entry in the working-tree change list. Status is the raw
-// `git status --porcelain` two-char prefix (`??`, ` M`, `MM`, `A `, etc.).
-type diffFile struct {
-	Path   string
-	Status string // raw two-char porcelain code
-	Bucket string // "added" | "modified" | "deleted" | "untracked"
-}
 
 // DiffDialog is the two-pane git diff viewer:
 //
@@ -34,16 +25,24 @@ type diffFile struct {
 //	│ search: ____         ▎                           │
 //	└──────────────────────────────────────────────────┘
 //
+// File list and diff body both come from the daemon at the session's
+// host peer (GET /git/files, GET /git/diff). The dialog never runs
+// `git` locally — that's what lets it work for sessions bound to
+// remote peers, where the cwd lives on a different machine.
+//
 // Up/Down navigate the file list, "/" focuses the search field, esc
-// unfocuses search (if focused) or closes the dialog. Mouse wheel scrolls
-// the diff pane.
+// unfocuses search (if focused) or closes the dialog. Mouse wheel
+// scrolls the diff pane.
 type DiffDialog struct {
-	cwd     string
-	branch  string
-	changes session.ChangeStats
+	client *client.Client
+	host   string
+	cwd    string
+	branch string
+
+	changes git.ChangeStats
 	styles  Styles
 
-	files    []diffFile
+	files    []git.File
 	filtered []int // indexes into files matching the search filter
 	cursor   int   // index within `filtered`
 
@@ -52,12 +51,18 @@ type DiffDialog struct {
 
 	vp viewport.Model
 
-	// loadedPath is the path whose diff is currently in the viewport. We
-	// only re-run `git diff` when the cursor moves to a different file.
-	loadedPath string
+	// loadedPath is the path whose diff is currently in the viewport;
+	// loadingPath is the path whose diff is in flight. We re-fetch
+	// when the cursor moves to a new file and drop stale responses
+	// whose Path no longer matches loadingPath (user moved on).
+	loadedPath  string
+	loadingPath string
+
+	filesLoading bool
+	diffLoading  bool
 }
 
-func NewDiffDialog(cwd, branch string, changes session.ChangeStats, s Styles) *DiffDialog {
+func NewDiffDialog(c *client.Client, host, cwd, branch string, changes git.ChangeStats, s Styles) *DiffDialog {
 	vp := viewport.New()
 	vp.SetWidth(60)
 	vp.SetHeight(20)
@@ -75,22 +80,27 @@ func NewDiffDialog(cwd, branch string, changes session.ChangeStats, s Styles) *D
 	ti.Prompt = "› "
 	ti.CharLimit = 80
 
-	d := &DiffDialog{
-		cwd:     cwd,
-		branch:  branch,
-		changes: changes,
-		styles:  s,
-		search:  ti,
-		vp:      vp,
+	return &DiffDialog{
+		client:       c,
+		host:         host,
+		cwd:          cwd,
+		branch:       branch,
+		changes:      changes,
+		styles:       s,
+		search:       ti,
+		vp:           vp,
+		filesLoading: true,
 	}
-	d.files = listChangedFiles(cwd)
-	d.applyFilter()
-	return d
 }
 
 func (d *DiffDialog) SetStyles(s Styles) { d.styles = s }
 
-func (d *DiffDialog) Init() tea.Cmd { return nil }
+// Init fires the first GET /git/files. The result lands in Update as
+// gitFilesLoadedMsg, which triggers the first diff fetch.
+func (d *DiffDialog) Init() tea.Cmd {
+	d.vp.SetContent(d.styles.Hint.Render("(cargando…)"))
+	return d.fetchFilesCmd()
+}
 
 func (d *DiffDialog) Update(msg tea.Msg) tea.Cmd {
 	switch m := msg.(type) {
@@ -103,6 +113,34 @@ func (d *DiffDialog) Update(msg tea.Msg) tea.Cmd {
 		return cmd
 	case tea.KeyMsg:
 		return d.handleKey(m)
+	case gitFilesLoadedMsg:
+		d.filesLoading = false
+		if m.Err != nil {
+			d.vp.SetContent(d.styles.ResultError.Render("git files: " + m.Err.Error()))
+			return nil
+		}
+		d.files = m.Files
+		d.applyFilter()
+		return d.loadSelectedDiff()
+	case gitDiffLoadedMsg:
+		// Drop stale responses — the user may have moved to a new file
+		// while this diff was in flight.
+		if m.Path != d.loadingPath {
+			return nil
+		}
+		d.diffLoading = false
+		d.loadedPath = m.Path
+		if m.Err != nil {
+			d.vp.SetContent(d.styles.ResultError.Render("git diff: " + m.Err.Error()))
+			return nil
+		}
+		if strings.TrimSpace(m.Body) == "" {
+			d.vp.SetContent(d.styles.Hint.Render("(sin diff para " + m.Path + ")"))
+			return nil
+		}
+		d.vp.SetContent(colorizeDiff(m.Body, d.styles))
+		d.vp.GotoTop()
+		return nil
 	}
 	var cmd tea.Cmd
 	d.vp, cmd = d.vp.Update(msg)
@@ -123,14 +161,14 @@ func (d *DiffDialog) handleKey(k tea.KeyMsg) tea.Cmd {
 		case "up":
 			d.searchFocused = false
 			d.search.Blur()
-			d.move(-1)
-			return nil
+			return d.move(-1)
 		}
 		prev := d.search.Value()
 		var cmd tea.Cmd
 		d.search, cmd = d.search.Update(k)
 		if d.search.Value() != prev {
 			d.applyFilter()
+			return tea.Batch(cmd, d.loadSelectedDiff())
 		}
 		return cmd
 	}
@@ -143,29 +181,27 @@ func (d *DiffDialog) handleKey(k tea.KeyMsg) tea.Cmd {
 		d.search.Focus()
 		return textinput.Blink
 	case "up", "k":
-		d.move(-1)
-		return nil
+		return d.move(-1)
 	case "down", "j":
-		d.move(1)
-		return nil
+		return d.move(1)
 	case "home", "g":
 		if len(d.filtered) > 0 {
 			d.cursor = 0
-			d.loadSelectedDiff()
+			return d.loadSelectedDiff()
 		}
 		return nil
 	case "end", "G":
 		if len(d.filtered) > 0 {
 			d.cursor = len(d.filtered) - 1
-			d.loadSelectedDiff()
+			return d.loadSelectedDiff()
 		}
 		return nil
 	case "r":
-		d.files = listChangedFiles(d.cwd)
-		d.applyFilter()
-		d.loadedPath = "" // force re-render
-		d.loadSelectedDiff()
-		return nil
+		d.filesLoading = true
+		d.loadedPath = ""
+		d.loadingPath = ""
+		d.vp.SetContent(d.styles.Hint.Render("(recargando…)"))
+		return d.fetchFilesCmd()
 	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
 		var cmd tea.Cmd
 		d.vp, cmd = d.vp.Update(k)
@@ -174,9 +210,9 @@ func (d *DiffDialog) handleKey(k tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-func (d *DiffDialog) move(delta int) {
+func (d *DiffDialog) move(delta int) tea.Cmd {
 	if len(d.filtered) == 0 {
-		return
+		return nil
 	}
 	d.cursor += delta
 	if d.cursor < 0 {
@@ -185,7 +221,7 @@ func (d *DiffDialog) move(delta int) {
 	if d.cursor >= len(d.filtered) {
 		d.cursor = len(d.filtered) - 1
 	}
-	d.loadSelectedDiff()
+	return d.loadSelectedDiff()
 }
 
 // applyFilter rebuilds the filtered index from the current search text.
@@ -201,122 +237,51 @@ func (d *DiffDialog) applyFilter() {
 	if d.cursor >= len(d.filtered) {
 		d.cursor = 0
 	}
-	d.loadSelectedDiff()
 }
 
-func (d *DiffDialog) loadSelectedDiff() {
+// loadSelectedDiff returns a tea.Cmd that fetches the diff for the
+// currently-selected file via GET /git/diff. nil when there's nothing
+// selected, when the same file is already loaded, or when no client
+// is configured (dialog opened without a session).
+func (d *DiffDialog) loadSelectedDiff() tea.Cmd {
 	if len(d.filtered) == 0 {
 		d.vp.SetContent(d.styles.Hint.Render("(sin archivos)"))
 		d.loadedPath = ""
+		d.loadingPath = ""
 		d.vp.GotoTop()
-		return
+		return nil
 	}
 	f := d.files[d.filtered[d.cursor]]
-	if f.Path == d.loadedPath {
-		return
+	if f.Path == d.loadedPath || f.Path == d.loadingPath {
+		return nil
 	}
-	d.loadedPath = f.Path
-	d.vp.SetContent(renderFileDiff(d.cwd, f, d.styles))
+	d.loadingPath = f.Path
+	d.diffLoading = true
+	d.vp.SetContent(d.styles.Hint.Render("(cargando " + f.Path + "…)"))
 	d.vp.GotoTop()
+	return d.fetchDiffCmd(f.Path)
 }
 
-// listChangedFiles parses `git status --porcelain` into a sorted file list.
-// Sorting buckets staged/modified before untracked so the user lands on
-// "intentional" changes first.
-func listChangedFiles(cwd string) []diffFile {
-	if cwd == "" {
+func (d *DiffDialog) fetchFilesCmd() tea.Cmd {
+	if d.client == nil || d.cwd == "" {
+		return func() tea.Msg { return gitFilesLoadedMsg{Files: []git.File{}} }
+	}
+	c, cwd := d.client, d.cwd
+	return func() tea.Msg {
+		files, err := c.GitFiles(context.Background(), cwd)
+		return gitFilesLoadedMsg{Files: files, Err: err}
+	}
+}
+
+func (d *DiffDialog) fetchDiffCmd(path string) tea.Cmd {
+	if d.client == nil || d.cwd == "" {
 		return nil
 	}
-	out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
-	if err != nil {
-		return nil
+	c, cwd := d.client, d.cwd
+	return func() tea.Msg {
+		body, err := c.GitDiff(context.Background(), cwd, path)
+		return gitDiffLoadedMsg{Path: path, Body: body, Err: err}
 	}
-	var files []diffFile
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		if len(line) < 4 {
-			continue
-		}
-		st := line[:2]
-		path := line[3:]
-		// Rename entries look like "old -> new"; we want the destination.
-		if i := strings.Index(path, " -> "); i >= 0 {
-			path = path[i+4:]
-		}
-		bucket := classifyStatus(st)
-		files = append(files, diffFile{Path: path, Status: st, Bucket: bucket})
-	}
-	sort.SliceStable(files, func(i, j int) bool {
-		oi, oj := bucketOrder(files[i].Bucket), bucketOrder(files[j].Bucket)
-		if oi != oj {
-			return oi < oj
-		}
-		return files[i].Path < files[j].Path
-	})
-	return files
-}
-
-func classifyStatus(st string) string {
-	if st == "??" {
-		return "untracked"
-	}
-	x, y := rune(st[0]), rune(st[1])
-	switch {
-	case x == 'D' || y == 'D':
-		return "deleted"
-	case x == 'M' || y == 'M' || x == 'R' || y == 'R' || x == 'C' || y == 'C':
-		return "modified"
-	case x == 'A' || y == 'A':
-		return "added"
-	}
-	return "modified"
-}
-
-func bucketOrder(b string) int {
-	switch b {
-	case "modified":
-		return 0
-	case "added":
-		return 1
-	case "deleted":
-		return 2
-	case "untracked":
-		return 3
-	}
-	return 4
-}
-
-// renderFileDiff returns the colorized diff for `f` in `cwd`. For tracked
-// files we run `git diff HEAD -- <path>`; for untracked files we just dump
-// the file contents prefixed with "+" (mirrors how a hypothetical staging
-// would render).
-func renderFileDiff(cwd string, f diffFile, st Styles) string {
-	if f.Bucket == "untracked" {
-		body, err := os.ReadFile(cwd + string(os.PathSeparator) + f.Path)
-		if err != nil {
-			return st.Hint.Render("(no se pudo leer " + f.Path + ": " + err.Error() + ")")
-		}
-		add := lipgloss.NewStyle().Foreground(colSuccess)
-		var b strings.Builder
-		b.WriteString(st.HeaderDim.Render("untracked file: " + f.Path))
-		b.WriteString("\n")
-		for _, line := range strings.Split(strings.TrimRight(string(body), "\n"), "\n") {
-			b.WriteString(add.Render("+ " + line))
-			b.WriteString("\n")
-		}
-		return strings.TrimRight(b.String(), "\n")
-	}
-	// `git diff HEAD` covers both staged and unstaged edits relative to the
-	// last commit — exactly what the user wants to see before committing.
-	out, err := exec.Command("git", "-C", cwd, "-c", "color.ui=never", "diff", "HEAD", "--", f.Path).Output()
-	if err != nil || len(out) == 0 {
-		// Fresh repo or weird state: try without HEAD.
-		out, _ = exec.Command("git", "-C", cwd, "-c", "color.ui=never", "diff", "--", f.Path).Output()
-	}
-	body := strings.TrimRight(string(out), "\n")
-	if body == "" {
-		return st.Hint.Render("(sin diff para " + f.Path + ")")
-	}
-	return colorizeDiff(body, st)
 }
 
 // colorizeDiff applies styles to unified-diff output: green for additions,
@@ -342,7 +307,8 @@ func colorizeDiff(s string, st Styles) string {
 			strings.HasPrefix(line, "rename from"),
 			strings.HasPrefix(line, "rename to"),
 			strings.HasPrefix(line, "+++ "),
-			strings.HasPrefix(line, "--- "):
+			strings.HasPrefix(line, "--- "),
+			strings.HasPrefix(line, "untracked file: "):
 			b.WriteString(meta.Render(line))
 		case strings.HasPrefix(line, "@@"):
 			b.WriteString(hunk.Render(line))
@@ -426,6 +392,9 @@ func (d *DiffDialog) View(width, height int) string {
 func stripStyle(s string) string { return s }
 
 func (d *DiffDialog) renderFileList(width, height int) string {
+	if d.filesLoading {
+		return d.styles.Hint.Render("cargando…")
+	}
 	if len(d.files) == 0 {
 		return d.styles.Hint.Render("árbol limpio")
 	}
@@ -454,7 +423,7 @@ func (d *DiffDialog) renderFileList(width, height int) string {
 	return strings.Join(rows, "\n")
 }
 
-func formatFileRow(f diffFile, width int, selected bool, st Styles) string {
+func formatFileRow(f git.File, width int, selected bool, st Styles) string {
 	sym, col := bucketGlyph(f.Bucket)
 	indicator := " "
 	pathStyle := st.AssistantText

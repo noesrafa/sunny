@@ -75,24 +75,74 @@ func saveTickCmd() tea.Cmd {
 	return tea.Tick(saveFlushInterval, func(time.Time) tea.Msg { return saveTickMsg{} })
 }
 
-func sysStatsSampleCmd() tea.Cmd {
+// fetchSysStatsCmd hits GET /stats on the active peer and returns
+// the system block as a sysStatsResultMsg. Replaces the old
+// sysstats.Sample()-on-the-TUI-host path so the sidebar bars reflect
+// whichever daemon the user is viewing — local or remote.
+//
+// Always going through HTTP (even for local) keeps the path uniform
+// and lets the daemon own the ~1s `top -l 2` cost. A failed fetch
+// (peer offline, transient network) returns an empty Stats which
+// renders as no bars; the next tick recovers naturally.
+func (m *Model) fetchSysStatsCmd() tea.Cmd {
+	c := m.clientFor(m.activePeer)
+	if c == nil {
+		return nil
+	}
+	ctx := m.ctx
 	return func() tea.Msg {
-		st, _ := sysstats.Sample()
-		return sysStatsResultMsg{Stats: st}
+		s, err := c.FetchStats(ctx)
+		if err != nil {
+			return sysStatsResultMsg{}
+		}
+		return sysStatsResultMsg{Stats: sysstats.Stats{
+			CPUPct:        s.System.CPUPercent,
+			MemPct:        s.System.MemoryPercent,
+			MemTotalBytes: s.System.MemoryTotalB,
+			MemUsedBytes:  s.System.MemoryUsedB,
+			NumCPU:        s.System.NumCPU,
+		}}
 	}
 }
 
+// handleBranchTick fans out one async GET /git/status per session
+// (across every peer, not just the active one — the sidebar shows
+// dirty pills for every visible session). Each fetch lands as a
+// gitStatusLoadedMsg that the main update loop applies.
+//
+// The 15s cadence × N sessions × N peers can balloon, so each
+// request rides the per-peer client (cheap localhost RT for local,
+// tailnet RT otherwise). The daemon's git package is fork+exec on
+// every call — fine at this rate; if it ever isn't, cache there.
 func (m *Model) handleBranchTick() tea.Cmd {
-	changed := false
-	for _, s := range m.manager.Sessions {
-		if s.RefreshBranch() {
-			changed = true
+	cmds := []tea.Cmd{branchTickCmd()}
+	for _, s := range m.allSessions() {
+		if cmd := m.fetchGitStatusCmd(s); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	}
-	if changed {
-		m.refreshViewport()
+	return tea.Batch(cmds...)
+}
+
+// fetchGitStatusCmd returns a tea.Cmd that calls GET /git/status on
+// the session's host peer and posts a gitStatusLoadedMsg. nil when
+// the session has no host client (peer offline / not configured) or
+// no cwd to ask about.
+func (m *Model) fetchGitStatusCmd(s *session.Session) tea.Cmd {
+	if s == nil || s.Cwd == "" {
+		return nil
 	}
-	return branchTickCmd()
+	c := m.clientFor(s.Host())
+	if c == nil {
+		return nil
+	}
+	ctx := m.ctx
+	cwd := s.Cwd
+	id := s.ID
+	return func() tea.Msg {
+		branch, changes, err := c.GitStatus(ctx, cwd)
+		return gitStatusLoadedMsg{SessionID: id, Branch: branch, Changes: changes, Err: err}
+	}
 }
 
 // peerSyncTickCmd reconciles the federation roster every 2s.
@@ -102,6 +152,33 @@ func (m *Model) handleBranchTick() tea.Cmd {
 // the TUI.
 func peerSyncTickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return peerSyncTickMsg{} })
+}
+
+// federationDiscoverTickCmd schedules the next /federation/peers
+// fetch. 30s matches the daemon's federationCacheTTL, so each tick
+// almost always hits the cache for free; only when the cache window
+// rolls over does the daemon pay the tailnet sweep cost.
+func federationDiscoverTickCmd() tea.Cmd {
+	return tea.Tick(30*time.Second, func(time.Time) tea.Msg { return federationDiscoverTickMsg{} })
+}
+
+// fetchFederationPeersCmd asks the local daemon for its current
+// federation list. nil when there's no federation client to call.
+// Errors land as federationDiscoveredMsg.Err and are logged by the
+// handler — the next tick retries.
+func (m *Model) fetchFederationPeersCmd() tea.Cmd {
+	if m.fed == nil {
+		return nil
+	}
+	c := m.fed.Local()
+	if c == nil {
+		return nil
+	}
+	ctx := m.ctx
+	return func() tea.Msg {
+		peers, err := c.FetchFederationPeers(ctx)
+		return federationDiscoveredMsg{Peers: peers, Err: err}
+	}
 }
 
 // handlePeerSync compares m.peerOrder against fed.Names() and adds

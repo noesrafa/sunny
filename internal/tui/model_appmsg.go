@@ -430,15 +430,22 @@ func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
 
 	// Auto-switch to the target peer so the user sees the new
 	// session they just opened. Without this, opening a tab on a
-	// non-active peer feels like nothing happened.
+	// non-active peer feels like nothing happened. Switch returns a
+	// cmd that refetches the new peer's stats — chain it so the
+	// sidebar bars update immediately.
+	var switchCmd tea.Cmd
 	if host != m.activePeer {
-		m.switchToPeer(host)
+		switchCmd = m.switchToPeer(host)
 	}
 	m.textarea.Reset()
 	m.layout()
 	m.refreshViewport()
 	m.saveState()
-	return m, waitForJournalEvent(s.ID, s.WatchEvents()), true
+	return m, tea.Batch(
+		waitForJournalEvent(s.ID, s.WatchEvents()),
+		switchCmd,
+		m.fetchGitStatusCmd(s),
+	), true
 }
 
 func (m *Model) switchToTab(kind string, index int) {
@@ -621,6 +628,9 @@ func (m *Model) applyTabsRefresh(msg tabsRefreshedMsg) tea.Cmd {
 		s.Bind(m.ctx, c, t.AgentID, msg.Host)
 		mgr.Add(s)
 		cmds = append(cmds, waitForJournalEvent(s.ID, s.WatchEvents()))
+		if gc := m.fetchGitStatusCmd(s); gc != nil {
+			cmds = append(cmds, gc)
+		}
 	}
 
 	// If the active peer's tabs changed, refresh the visible UI.

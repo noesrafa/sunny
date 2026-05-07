@@ -2,6 +2,7 @@ package tui
 
 import (
 	"github.com/noesrafa/sunny/internal/client"
+	"github.com/noesrafa/sunny/internal/git"
 	"github.com/noesrafa/sunny/internal/sysstats"
 )
 
@@ -80,6 +81,22 @@ type busEventClosedMsg struct{}
 // without forcing a TUI restart.
 type peerSyncTickMsg struct{}
 
+// federationDiscoverTickMsg fires periodically to re-fetch the
+// daemon's GET /federation/peers and add any newly-online peers to
+// the federation. Without this, peers that come online after TUI
+// boot would never surface — the previous client-side sweep ran
+// once at startup.
+type federationDiscoverTickMsg struct{}
+
+// federationDiscoveredMsg carries the daemon's GET /federation/peers
+// answer. The handler walks the list and applies AddTailnetPeer /
+// AddMeshPeer so peerSyncTick reconciles the new entries into
+// peerOrder + peerManagers.
+type federationDiscoveredMsg struct {
+	Peers []client.FederationPeer
+	Err   error
+}
+
 // tabsRefreshedMsg carries a fresh GET /tabs response for one
 // peer. Triggered by tab.* bus events and by peerSyncTick when a
 // new peer joins the federation. The handler reconciles the
@@ -135,6 +152,36 @@ type monitorActionFailedMsg struct {
 	Name    string
 	Action  string
 	Err     error
+}
+
+// gitStatusLoadedMsg carries the daemon's GET /git/status answer for
+// one session's cwd. Fired by the per-session fetch the branch tick
+// kicks off; consumed by the model to update Session.Branch +
+// Session.Changes via session.ApplyGitStatus.
+type gitStatusLoadedMsg struct {
+	SessionID string
+	Branch    string
+	Changes   git.ChangeStats
+	Err       error
+}
+
+// gitFilesLoadedMsg carries the daemon's GET /git/files answer for
+// the diff dialog's left pane. The dialog forwards this through the
+// overlay so it can replace its file list and refresh the right
+// pane.
+type gitFilesLoadedMsg struct {
+	Files []git.File
+	Err   error
+}
+
+// gitDiffLoadedMsg carries the daemon's GET /git/diff answer for one
+// file (Path is the same key the dialog used to request the diff;
+// it's how we drop stale responses when the user has already moved
+// on to a different file).
+type gitDiffLoadedMsg struct {
+	Path string
+	Body string
+	Err  error
 }
 
 // monitorHistoryLoadedMsg carries the result of GET /monitors/{name}/history.

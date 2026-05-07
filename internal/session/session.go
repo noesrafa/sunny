@@ -18,15 +18,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"charm.land/log/v2"
 
 	"github.com/noesrafa/sunny/internal/client"
+	"github.com/noesrafa/sunny/internal/git"
 )
 
 // ErrNoEngine is returned by Send when the session has no client
@@ -37,64 +36,6 @@ var ErrNoEngine = errors.New("session: no engine connected")
 // flight. Callers should normally check State first instead of
 // relying on it.
 var ErrSessionBusy = errors.New("session busy")
-
-// gitBranch returns the current branch of the given directory, or "" if it's
-// not a git repo or git is unavailable.
-func gitBranch(cwd string) string {
-	out, err := exec.Command("git", "-C", cwd, "branch", "--show-current").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// ChangeStats summarizes the working tree against HEAD. Counts are
-// file-level — one file with mixed staged + unstaged edits is one Modified.
-// A file is bucketed by its most "destructive" status code.
-type ChangeStats struct {
-	Added     int
-	Modified  int
-	Deleted   int
-	Untracked int
-}
-
-// Total is the file count across every bucket.
-func (c ChangeStats) Total() int {
-	return c.Added + c.Modified + c.Deleted + c.Untracked
-}
-
-// Dirty reports whether anything is pending.
-func (c ChangeStats) Dirty() bool { return c.Total() > 0 }
-
-func gitChangeStats(cwd string) ChangeStats {
-	out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
-	if err != nil {
-		return ChangeStats{}
-	}
-	var c ChangeStats
-	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
-		if len(line) < 3 {
-			continue
-		}
-		st := line[:2]
-		if st == "??" {
-			c.Untracked++
-			continue
-		}
-		x, y := rune(st[0]), rune(st[1])
-		switch {
-		case x == 'D' || y == 'D':
-			c.Deleted++
-		case x == 'M' || y == 'M' || x == 'R' || y == 'R' || x == 'C' || y == 'C':
-			c.Modified++
-		case x == 'A' || y == 'A':
-			c.Added++
-		default:
-			c.Modified++
-		}
-	}
-	return c
-}
 
 type State int
 
@@ -125,7 +66,7 @@ type Session struct {
 	Model     string
 	Effort    string
 	Branch    string
-	Changes   ChangeStats
+	Changes   git.ChangeStats
 	State     State
 	Items     []Item
 	TotalCost float64
@@ -360,6 +301,11 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 	if title == "" {
 		title = filepath.Base(cwd)
 	}
+	// Branch + Changes start empty; the TUI's git tick fetches them
+	// asynchronously via the session's host daemon (GET /git/status)
+	// so that a session bound to a remote peer reads the right repo
+	// — not whatever happens to live at the same path on the TUI's
+	// machine.
 	return &Session{
 		ID:      id,
 		TabID:   opts.TabID,
@@ -367,8 +313,6 @@ func New(_ context.Context, cwd string, opts Options) (*Session, error) {
 		Title:   title,
 		Model:   opts.Model,
 		Effort:  opts.Effort,
-		Branch:  gitBranch(cwd),
-		Changes: gitChangeStats(cwd),
 		ConvID:  opts.ConvID,
 		Draft:   opts.Draft,
 		State:   StateIdle,
@@ -385,17 +329,17 @@ func defaultHost(h string) string {
 	return h
 }
 
-// RefreshBranch re-reads the cwd's git branch and dirty state.
-// Returns true if anything changed so the caller can decide to
-// re-render.
-func (s *Session) RefreshBranch() bool {
+// ApplyGitStatus updates Branch + Changes from a fetched daemon
+// response. Returns true when either field actually changed so the
+// TUI can decide whether a viewport refresh is worth it.
+func (s *Session) ApplyGitStatus(branch string, changes git.ChangeStats) bool {
 	changed := false
-	if b := gitBranch(s.Cwd); b != s.Branch {
-		s.Branch = b
+	if branch != s.Branch {
+		s.Branch = branch
 		changed = true
 	}
-	if c := gitChangeStats(s.Cwd); c != s.Changes {
-		s.Changes = c
+	if changes != s.Changes {
+		s.Changes = changes
 		changed = true
 	}
 	return changed

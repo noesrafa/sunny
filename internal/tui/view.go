@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/noesrafa/sunny/internal/git"
 	"github.com/noesrafa/sunny/internal/session"
 )
 
@@ -215,7 +216,7 @@ func (m Model) renderStatus() string {
 // Visual goal: at a glance the user can tell whether they have unstaged
 // edits, brand-new files, or deletions still pending — without having to
 // drop into the diff dialog.
-func renderChangesBadge(c session.ChangeStats) string {
+func renderChangesBadge(c git.ChangeStats) string {
 	if !c.Dirty() {
 		return ""
 	}

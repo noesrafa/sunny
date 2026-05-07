@@ -132,6 +132,7 @@ func New(opts Options) http.Handler {
 		root:          opts.Root,
 		startedAt:     opts.StartedAt,
 		activeTurns:   newActiveTurnsRegistry(),
+		federation:    newFederationCache(),
 	}
 	if srv.startedAt.IsZero() {
 		srv.startedAt = time.Now()
@@ -190,6 +191,10 @@ func New(opts Options) http.Handler {
 	mux.HandleFunc("GET /monitors/{name}/history", srv.getMonitorHistory)
 	mux.HandleFunc("GET /stats", srv.stats)
 	mux.HandleFunc("GET /providers", srv.listProviders)
+	mux.HandleFunc("GET /git/status", srv.gitStatus)
+	mux.HandleFunc("GET /git/files", srv.gitFiles)
+	mux.HandleFunc("GET /git/diff", srv.gitDiff)
+	mux.HandleFunc("GET /federation/peers", srv.federationPeers)
 
 	// Compose middleware:
 	//   logging → tailnetIdentity → meshAuth → requireBearer → mux
@@ -265,6 +270,11 @@ type server struct {
 	// POST /turns can return 409 on contention and DELETE /turn can
 	// look up the cancel func by conv key.
 	activeTurns *activeTurnsRegistry
+	// federation answers GET /federation/peers with a 30s-cached
+	// view of the daemon's tailnet sweep. Nil when the daemon
+	// can't see a tailscale CLI; the handler degrades to an empty
+	// list in that case.
+	federation *federationCache
 }
 
 func logging(log *slog.Logger, h http.Handler) http.Handler {

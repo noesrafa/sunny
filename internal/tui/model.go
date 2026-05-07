@@ -54,6 +54,7 @@ type Model struct {
 
 	client       *client.Client     // local daemon client; CRUD ops still go here
 	fed          *client.Federation // peer roster — chat routing flows through For(host)
+	meshKey      string             // ~/.sunny/mesh.key, used to attach trust=mesh peers from /federation/peers
 	busEvents    chan client.FederatedEvent
 	defaultAgent string // id to send turns at (v0.3.x+: hardcoded "sunny")
 	overlay       *Overlay
@@ -125,6 +126,12 @@ type Options struct {
 	// configured in ~/.sunny/peers.yaml). Nil falls back to a
 	// single-peer "local" federation built from DaemonAddr/Token.
 	Federation *client.Federation
+	// MeshKey is the daemon's shared sub-mesh key (~/.sunny/mesh.key).
+	// Used to attach mesh-trust auth headers when the periodic
+	// federation discovery returns a peer with trust="mesh". Empty
+	// just skips mesh peers — only same-tailscale-account peers
+	// auto-discover in that mode.
+	MeshKey string
 }
 
 const (
@@ -306,6 +313,7 @@ func NewModel(ctx context.Context, peerManagers map[string]*session.Manager, pee
 		peerMonitors:  map[string]*peerMonitorsState{},
 		client:        cli,
 		fed:           fed,
+		meshKey:       opts.MeshKey,
 		busEvents:     busCh,
 		defaultAgent:  defaultAgent,
 		overlay:       &Overlay{},
@@ -420,15 +428,17 @@ func (m *Model) allMonitorsForActivePeer() []client.Monitor {
 
 // switchToPeer makes peerName the active peer. Saves the current
 // peer's draft, swaps the manager pointer, restores the new peer's
-// draft, refreshes the viewport. No-op when peerName isn't known or
-// is already active.
-func (m *Model) switchToPeer(peerName string) {
+// draft, refreshes the viewport. Returns a tea.Cmd that refetches
+// the new peer's CPU/RAM (and any other per-peer state we add later)
+// so the sidebar updates immediately rather than waiting for the
+// next 10s tick. nil when peerName isn't known or is already active.
+func (m *Model) switchToPeer(peerName string) tea.Cmd {
 	if peerName == m.activePeer {
-		return
+		return nil
 	}
 	mgr, ok := m.peerManagers[peerName]
 	if !ok {
-		return
+		return nil
 	}
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
@@ -436,6 +446,10 @@ func (m *Model) switchToPeer(peerName string) {
 	m.activePeer = peerName
 	m.manager = mgr
 	delete(m.peerActivity, peerName) // clear activity dot on view
+	// Clear stale CPU/RAM from the previous peer so the bars don't
+	// briefly mislead before the fresh fetch lands. buildSysStatsRows
+	// renders nothing when both metrics are zero.
+	m.sysStats = sysstats.Stats{}
 	if cur := m.manager.Current(); cur != nil {
 		m.textarea.SetValue(cur.Draft)
 		m.textarea.CursorEnd()
@@ -445,15 +459,16 @@ func (m *Model) switchToPeer(peerName string) {
 	m.layout()
 	m.refreshViewport()
 	m.chat.ScrollToBottom()
+	return m.fetchSysStatsCmd()
 }
 
 // switchToPeerByIdx is the Ctrl+1..9 entry point: idx is 0-based
-// against peerOrder. No-op if idx is out of range.
-func (m *Model) switchToPeerByIdx(idx int) {
+// against peerOrder. nil if idx is out of range.
+func (m *Model) switchToPeerByIdx(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.peerOrder) {
-		return
+		return nil
 	}
-	m.switchToPeer(m.peerOrder[idx])
+	return m.switchToPeer(m.peerOrder[idx])
 }
 
 // allSessions iterates every session across every peer. Used at
@@ -534,7 +549,7 @@ func (m Model) Init() tea.Cmd {
 	// to the textarea. bgPollCmd re-asks every 30s so macOS appearance
 	// changes (Ghostty updates bg in lockstep) flip Auto themes within
 	// half a minute without sub-second polling overhead.
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd(), peerSyncTickCmd()}
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), m.fetchSysStatsCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd(), peerSyncTickCmd(), federationDiscoverTickCmd()}
 	if m.busEvents != nil {
 		cmds = append(cmds, m.waitForBusEvent())
 	}
@@ -547,6 +562,14 @@ func (m Model) Init() tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 		if cmd := m.fetchMonitorsCmd(host); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	// Prime branch + change pill for every session so the sidebar
+	// doesn't read empty for ~15s after boot. Subsequent refreshes
+	// ride the branchTick.
+	for _, s := range m.allSessions() {
+		if cmd := m.fetchGitStatusCmd(s); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -669,14 +692,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.handleAnimStep(msg))
 	case branchTickMsg:
 		cmds = append(cmds, m.handleBranchTick())
+	case gitStatusLoadedMsg:
+		// Drop transient errors quietly — branch/changes stay at
+		// whatever the previous successful fetch returned, which is
+		// less jarring than blanking the pill mid-edit.
+		if msg.Err != nil {
+			break
+		}
+		s := m.findSession(msg.SessionID)
+		if s == nil {
+			break
+		}
+		if s.ApplyGitStatus(msg.Branch, msg.Changes) && s.Host() == m.activePeer {
+			m.refreshViewport()
+		}
 	case logoTickMsg:
 		m.logoFrame++
 		cmds = append(cmds, logoTickCmd())
 	case sysStatsTickMsg:
-		// Tick fires the actual sample (off-thread); sample posts back via
+		// Tick fires the actual fetch (off-thread); result lands as
 		// sysStatsResultMsg. We re-arm the tick from the result handler so
-		// a hung `top` doesn't queue overlapping samples.
-		cmds = append(cmds, sysStatsSampleCmd())
+		// a slow daemon `/stats` (~1s `top -l 2` server-side) doesn't
+		// queue overlapping fetches.
+		cmds = append(cmds, m.fetchSysStatsCmd())
 	case sysStatsResultMsg:
 		m.sysStats = msg.Stats
 		cmds = append(cmds, sysStatsTickCmd())
@@ -687,6 +725,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, saveTickCmd())
 	case peerSyncTickMsg:
 		cmds = append(cmds, m.handlePeerSync())
+	case federationDiscoverTickMsg:
+		cmds = append(cmds, m.fetchFederationPeersCmd(), federationDiscoverTickCmd())
+	case federationDiscoveredMsg:
+		if msg.Err != nil {
+			m.logger.Debug("federation discover", "err", msg.Err)
+			break
+		}
+		for _, p := range msg.Peers {
+			switch p.Trust {
+			case "tailnet":
+				m.fed.AddTailnetPeer(p.Name, p.URL)
+			case "mesh":
+				if m.meshKey == "" {
+					continue
+				}
+				m.fed.AddMeshPeer(p.Name, p.URL, m.meshKey)
+			}
+		}
 	case tea.BackgroundColorMsg:
 		// Terminal told us its current background. Every paired theme
 		// auto-flips dark↔light when the polarity changes (ResolveTheme

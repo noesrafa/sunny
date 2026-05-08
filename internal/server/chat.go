@@ -206,6 +206,16 @@ func (s *server) postTurns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bump last_message_preview to the user's prompt right away so
+	// listings reflect the latest activity even before the assistant
+	// starts streaming. finalizeTurn overwrites with the assistant's
+	// final text once the turn closes.
+	if preview := userPreview(last.Content); preview != "" {
+		_ = s.conv.UpdateMeta(agentID, convID, func(m *conversation.Meta) {
+			m.LastMessagePreview = preview
+		})
+	}
+
 	// Auto-rename the conversation off the first user message when
 	// the title is still a placeholder (agent name on tab-spawned
 	// convs, "untitled" on bare creates). Mutates meta in place so
@@ -475,9 +485,16 @@ func (s *server) runTurn(
 		return
 	}
 
+	// Accumulate the assistant's text-only output for last_message_preview.
+	// Tool calls/results aren't part of the visible reply so we leave them
+	// out — the user-facing preview should match what they'd read on the
+	// row, which is the assistant's prose.
+	var assistantText strings.Builder
+
 	for ev := range events {
 		switch v := ev.(type) {
 		case provider.TextDelta:
+			assistantText.WriteString(v.Text)
 			s.sink.Append(agentID, convID, "text_delta", map[string]string{"text": v.Text})
 		case provider.ThinkingDelta:
 			s.sink.Append(agentID, convID, "thinking_delta", map[string]string{"text": v.Text})
@@ -519,7 +536,7 @@ func (s *server) runTurn(
 				},
 			}
 			s.sink.Append(agentID, convID, "done", payload)
-			s.finalizeTurn(agentID, convID, v)
+			s.finalizeTurn(agentID, convID, v, assistantText.String())
 			s.publish(evts.ConvTurnAppended, agentID, convID)
 			s.publish(evts.TurnDone, agentID, convID)
 		case provider.Error:
@@ -539,15 +556,41 @@ func (s *server) runTurn(
 
 // finalizeTurn updates meta.json after a successful turn. Best-effort —
 // failures are logged. The journal already has the canonical record.
-func (s *server) finalizeTurn(agentID, convID string, done provider.Done) {
+//
+// assistantText is the concatenated text-delta output from this turn,
+// used to refresh last_message_preview so listings can render the
+// assistant's reply without scanning the journal.
+func (s *server) finalizeTurn(agentID, convID string, done provider.Done, assistantText string) {
+	preview := userPreview(assistantText)
 	err := s.conv.UpdateMeta(agentID, convID, func(m *conversation.Meta) {
 		m.MsgCount += 2 // user + assistant
 		m.TotalCost += done.CostUSD
 		if done.ProviderState != "" {
 			m.ProviderState = done.ProviderState
 		}
+		if preview != "" {
+			m.LastMessagePreview = preview
+		}
 	})
 	if err != nil {
 		s.log.Warn("update meta", "err", err, "agent_id", agentID, "conv", convID)
 	}
+}
+
+// userPreview shapes a piece of plain text for last_message_preview.
+// Mirrors conversation.truncatePreview so live writes from the chat
+// flow match the lazy backfill format.
+func userPreview(s string) string {
+	const maxRunes = 140
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	fields := strings.Fields(s)
+	joined := strings.Join(fields, " ")
+	runes := []rune(joined)
+	if len(runes) <= maxRunes {
+		return joined
+	}
+	return string(runes[:maxRunes]) + "…"
 }

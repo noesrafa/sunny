@@ -61,6 +61,14 @@ type Meta struct {
 	// it's the session id used by --resume; the engine reads this on the
 	// next turn so context survives daemon restarts.
 	ProviderState string `json:"provider_state,omitempty"`
+	// LastMessagePreview is the rolled-up "last bit said" text used to
+	// render conversation cards without scanning the journal. Updated
+	// at user-send time (with the user's prompt) and at assistant-done
+	// time (with the assistant's final text). Capped at ~140 chars.
+	// Empty for pre-v0.39 convs that never had a turn since the
+	// upgrade — List() lazy-backfills those by scanning events.jsonl
+	// once and writing the result back.
+	LastMessagePreview string `json:"last_message_preview,omitempty"`
 }
 
 // Event is one entry in events.jsonl. Payload is the raw JSON body for
@@ -177,16 +185,91 @@ func (s *Store) List(agentID string) ([]*Meta, error) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		m, err := readMeta(filepath.Join(convsDir, e.Name()))
+		dir := filepath.Join(convsDir, e.Name())
+		m, err := readMeta(dir)
 		if err != nil {
 			// Skip malformed entries instead of failing the whole list —
 			// a half-written meta shouldn't take out the sidebar.
 			continue
 		}
+		// Backfill last_message_preview for convs that pre-date v0.39
+		// (or were created mid-upgrade). One-time scan of events.jsonl
+		// per conv, persisted, so subsequent listings are cheap. We
+		// guard on MsgCount > 0 because empty convs have nothing to
+		// preview anyway and we don't want to thrash disk on them.
+		if m.LastMessagePreview == "" && m.MsgCount > 0 {
+			if events, err := readEvents(dir); err == nil {
+				if preview := ExtractPreview(events); preview != "" {
+					m.LastMessagePreview = preview
+					_ = writeMeta(dir, m)
+				}
+			}
+		}
 		out = append(out, m)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out, nil
+}
+
+// ExtractPreview walks the journal newest-first and returns a short
+// excerpt suitable for the conversation list. Mirrors the app's
+// previous client-side logic: the most recent user message wins; if
+// the newest events are assistant text deltas, concatenate them.
+// Capped at ~140 runes — long enough to read on a phone row, short
+// enough to keep meta.json compact.
+func ExtractPreview(events []Event) string {
+	const maxRunes = 140
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		switch ev.Kind {
+		case "user":
+			var p struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(ev.Payload, &p); err != nil {
+				continue
+			}
+			return truncatePreview(p.Text, maxRunes)
+		case "text_delta":
+			// Glue consecutive text_deltas backwards so a partial
+			// stream still surfaces the full assistant message so far.
+			var tail strings.Builder
+			for j := i; j >= 0; j-- {
+				if events[j].Kind != "text_delta" {
+					break
+				}
+				var p struct {
+					Text string `json:"text"`
+				}
+				if err := json.Unmarshal(events[j].Payload, &p); err != nil {
+					continue
+				}
+				// Prepend by building a temporary slice — we walk
+				// newest-first but want the natural order in output.
+				prepend := p.Text + tail.String()
+				tail.Reset()
+				tail.WriteString(prepend)
+			}
+			return truncatePreview(tail.String(), maxRunes)
+		}
+	}
+	return ""
+}
+
+func truncatePreview(s string, maxRunes int) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Collapse internal whitespace so newlines don't waste preview
+	// space — same idea as summarizeUserText for titles.
+	fields := strings.Fields(s)
+	joined := strings.Join(fields, " ")
+	runes := []rune(joined)
+	if len(runes) <= maxRunes {
+		return joined
+	}
+	return string(runes[:maxRunes]) + "…"
 }
 
 // Get returns the meta + every event for a conversation.

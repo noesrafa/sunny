@@ -9,15 +9,16 @@ import (
 
 // ConversationMeta mirrors internal/conversation.Meta over the wire.
 type ConversationMeta struct {
-	ID            string  `json:"id"`
-	AgentID       string  `json:"agent_id"`
-	Title         string  `json:"title"`
-	CreatedAt     string  `json:"created_at"`
-	UpdatedAt     string  `json:"updated_at"`
-	MsgCount      int     `json:"msg_count"`
-	Model         string  `json:"model,omitempty"`
-	TotalCost     float64 `json:"total_cost_usd,omitempty"`
-	ProviderState string  `json:"provider_state,omitempty"`
+	ID                 string  `json:"id"`
+	AgentID            string  `json:"agent_id"`
+	Title              string  `json:"title"`
+	CreatedAt          string  `json:"created_at"`
+	UpdatedAt          string  `json:"updated_at"`
+	MsgCount           int     `json:"msg_count"`
+	Model              string  `json:"model,omitempty"`
+	TotalCost          float64 `json:"total_cost_usd,omitempty"`
+	ProviderState      string  `json:"provider_state,omitempty"`
+	LastMessagePreview string  `json:"last_message_preview,omitempty"`
 }
 
 // JournalEvent is one persisted entry from events.jsonl. Kind matches

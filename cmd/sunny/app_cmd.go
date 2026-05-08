@@ -100,7 +100,16 @@ func appCmd(args []string) error {
 		name = sanitizeHost(host)
 	}
 
-	pairURL := buildPairURL(chosen.URL, offered.Code, name)
+	// Build the pair URL with the chosen URL as the primary AND every
+	// candidate as alternates. The app tries each in order until one
+	// connects, so a user without tailscale on their phone can still
+	// pair via the LAN address from a single QR scan. Older apps that
+	// only read `url=` are unaffected.
+	altURLs := make([]string, 0, len(cands))
+	for _, c := range cands {
+		altURLs = append(altURLs, c.URL)
+	}
+	pairURL := buildPairURL(chosen.URL, altURLs, offered.Code, name)
 
 	// Render. qrterminal.M is medium error correction, plenty for a
 	// payload this small (under 200 bytes), and it keeps the matrix
@@ -221,12 +230,20 @@ func portOf(addr string) string {
 	return port
 }
 
-func buildPairURL(daemonURL, code, name string) string {
+func buildPairURL(daemonURL string, altURLs []string, code, name string) string {
 	v := url.Values{}
 	v.Set("url", daemonURL)
 	v.Set("code", code)
 	if name != "" {
 		v.Set("name", name)
+	}
+	// Comma-separated alternate URLs the app can try when the primary
+	// is unreachable from the phone (e.g. tailnet primary but the
+	// phone has no tailscale → fall back to LAN). Always includes the
+	// primary too so the app can treat `urls` as authoritative; we
+	// keep `url` as a back-compat shim for older app builds.
+	if len(altURLs) > 0 {
+		v.Set("urls", strings.Join(altURLs, ","))
 	}
 	return "sunny://pair?" + v.Encode()
 }

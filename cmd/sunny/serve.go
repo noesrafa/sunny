@@ -25,6 +25,7 @@ import (
 	"github.com/noesrafa/sunny/internal/mesh"
 	"github.com/noesrafa/sunny/internal/pairing"
 	"github.com/noesrafa/sunny/internal/monitors"
+	"github.com/noesrafa/sunny/internal/prompt"
 	"github.com/noesrafa/sunny/internal/provider"
 	"github.com/noesrafa/sunny/internal/provider/anthropic"
 	"github.com/noesrafa/sunny/internal/provider/claudecode"
@@ -96,7 +97,7 @@ func serve(args []string) error {
 	log.Info("secrets ready", "path", secrets.Path(*root))
 
 	var enginePtr atomic.Pointer[engine.Engine]
-	enginePtr.Store(buildEngine(log, secretsStore))
+	enginePtr.Store(buildEngine(log, secretsStore, *addr))
 	convs := conversation.NewStore(*root)
 	sink := conv.NewSink(convs, log)
 	tabsStore, err := tabs.Load(*root)
@@ -110,7 +111,7 @@ func serve(args []string) error {
 
 	rebuild := func() {
 		log.Info("rebuilding engine after secrets change")
-		enginePtr.Store(buildEngine(log, secretsStore))
+		enginePtr.Store(buildEngine(log, secretsStore, *addr))
 	}
 
 	pairs := pairing.NewService(tok)
@@ -122,7 +123,7 @@ func serve(args []string) error {
 	// monitors package itself stays free of engine/store imports.
 	monReg := monitors.NewRegistry()
 	monReg.RegisterSource(monitors.ShellSource{})
-	monReg.RegisterAction(monitors.NewDispatchAction(func(ctx context.Context, agentID, prompt string) (string, error) {
+	monReg.RegisterAction(monitors.NewDispatchAction(func(ctx context.Context, agentID, promptText string) (string, error) {
 		eng := enginePtr.Load()
 		if eng == nil {
 			return "", fmt.Errorf("dispatch: no engine configured")
@@ -131,7 +132,7 @@ func serve(args []string) error {
 		if !ok {
 			return "", fmt.Errorf("dispatch: agent %q not found", agentID)
 		}
-		msgs := []provider.Message{{Role: "user", Content: prompt}}
+		msgs := []provider.Message{{Role: "user", Content: promptText}}
 		evCh, err := eng.Turn(ctx, ag, msgs, engine.TurnOptions{})
 		if err != nil {
 			return "", err
@@ -294,12 +295,14 @@ func tailnetBind(primary string, log *slog.Logger) string {
 //
 // Returning a zero-engine (no providers) is OK — chat returns 503
 // until at least one driver is configured.
-func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
+func buildEngine(log *slog.Logger, s *secrets.Store, addr string) *engine.Engine {
+	envFn := func() *prompt.Env { return prompt.SampleEnv(addr) }
+
 	toolReg := tools.Default()
 	choice := strings.ToLower(strings.TrimSpace(os.Getenv("SUNNY_PROVIDER")))
 	if choice == "off" {
 		log.Info("engine disabled", "reason", "SUNNY_PROVIDER=off")
-		return engine.New(nil, "", toolReg)
+		return engine.New(nil, "", toolReg).WithEnvFn(envFn)
 	}
 
 	registry := map[string]provider.Provider{}
@@ -325,7 +328,7 @@ func buildEngine(log *slog.Logger, s *secrets.Store) *engine.Engine {
 	if defaultName == "" {
 		log.Warn("no providers available — configure one via `sunny secrets <provider> set api_key` or install claude code")
 	}
-	return engine.New(registry, defaultName, toolReg)
+	return engine.New(registry, defaultName, toolReg).WithEnvFn(envFn)
 }
 
 // pickDefaultProvider honors SUNNY_PROVIDER if it points at a

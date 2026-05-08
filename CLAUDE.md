@@ -5,6 +5,47 @@ proposing changes; update it when conventions change.
 
 ## Resume here (where we are right now)
 
+**Pending for next release (`v0.37`): prompt builder rework.** Three
+changes that don't break any existing agent:
+
+1. **Prompt building moved to `internal/prompt/`.** `engine.go` no
+   longer carries the runtime-context strings or the catalog
+   builder; `engine.Turn` calls `prompt.Build(agent, env)` directly.
+   No external behavior change vs. v0.36 — same blocks, same order,
+   same cache breakpoint.
+2. **Multi-file persona.** Agents can now keep their voice in
+   `prompt/<NN>-name.md` files alongside (or instead of) the
+   single `prompt.md`. Files merge by leading numeric prefix
+   (`10-soul.md` < `50-style.md`); `prompt.md` is treated as
+   priority 50. `_`-prefixed files are skipped (disabled). Each
+   fragment becomes its own SystemBlock so cache_control still
+   sits on the LAST static block. Read fresh from disk per turn,
+   so hand-edits land without `store.Reload`.
+3. **System environment block.** A new dynamic block lands at the
+   END of the prompt — AFTER the cache breakpoint — with date in
+   CDMX, hostname, OS/arch, LAN IPv4, tailnet IPv4, and the
+   daemon's listen addr. The agent now knows where it's running
+   ("the user said 'in the VPS' — I'm on a Linux box at
+   100.127.63.124") without burning cache. Sampled per turn via
+   `prompt.SampleEnv(daemonAddr)`; engines without an envFn (tests,
+   headless) just don't emit the block.
+
+Order of blocks emitted by `prompt.Build`:
+
+```
+[1] Runtime context        (static, cached)
+[2] Persona block(s)       (static, cached)         ← one per fragment
+[3] Skills/knowledge cat.  (static, cache_control)  ← breakpoint
+[4] Environment            (dynamic, no cache)
+```
+
+Knobs:
+- `agent.yaml: no_runtime_context: true` skips block [1].
+- `SUNNY_NO_META_PROMPT=1` (env) does the same globally.
+- `prompt.Build(a, nil)` skips block [4] (test path).
+
+---
+
 **Latest release: `v0.29.0`** (interactive onboarding, sunny
 uninstall, secrets catalog, secrets template seed, secrets knowledge
 for the default agent). Five additions on top of v0.28:
@@ -380,6 +421,11 @@ internal/tui        — Terminal UI, provider-agnostic, talks only to the daemon
 internal/bootstrap  — Seeds ~/.sunny/ from defaults/ on first run.
 internal/lifecycle  — On-disk daemon state (pid, addr, started_at).
 internal/engine     — Provider-agnostic chat orchestration.
+internal/prompt     — System-prompt assembly: runtime context, persona
+                      (prompt.md or prompt/<NN>-name.md), skills/knowledge
+                      catalog, and the dynamic env block (date in CDMX,
+                      hostname, IPs, daemon addr) appended after the
+                      cache breakpoint.
 internal/provider   — Interfaces + claudecode/anthropic drivers.
 internal/store      — Walks ~/.sunny/ and indexes agents/skills/knowledge.
 internal/session    — In-process session bookkeeping.

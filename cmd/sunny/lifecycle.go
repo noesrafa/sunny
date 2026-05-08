@@ -175,7 +175,7 @@ func update(args []string) error {
 	fmt.Printf("current: sunny %s\n", version)
 
 	upgraded := false
-	if _, err := exec.LookPath("brew"); err == nil {
+	if managedByBrew() {
 		// Refresh the tap formulae first. Without this, brew may
 		// keep its cached view of "latest" (HOMEBREW_AUTO_UPDATE_SECS
 		// throttles the implicit refresh that `brew upgrade` does)
@@ -236,6 +236,36 @@ func update(args []string) error {
 	return restart(nil)
 }
 
+// managedByBrew reports whether the running binary lives under
+// `brew --prefix`. Brew being on PATH isn't enough — sunny may have
+// been installed via the curl one-liner into /usr/local/bin on a
+// host that also happens to have linuxbrew. Trying `brew upgrade
+// noesrafa/tap/sunny` in that case spends ~5s on `brew update` only
+// to fail with "not installed", which the GitHub fallback then has
+// to clean up. Cheap prefix check up-front avoids the noise.
+func managedByBrew() bool {
+	brewPath, err := exec.LookPath("brew")
+	if err != nil {
+		return false
+	}
+	cur, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if real, err := filepath.EvalSymlinks(cur); err == nil {
+		cur = real
+	}
+	out, err := exec.Command(brewPath, "--prefix").Output()
+	if err != nil {
+		return false
+	}
+	prefix := strings.TrimSpace(string(out))
+	if prefix == "" {
+		return false
+	}
+	return strings.HasPrefix(cur, prefix+string(os.PathSeparator))
+}
+
 // updateViaRelease pulls the latest GitHub release matching the
 // host's GOOS/GOARCH and replaces the running binary atomically.
 // The atomic rename trick lets the in-flight process keep using its
@@ -265,6 +295,15 @@ func updateViaRelease() error {
 	var rel release
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
 		return fmt.Errorf("decode release info: %w", err)
+	}
+
+	// Skip the 30MB download (and the sudo dance on Linux) when the
+	// running binary already matches the latest tag. `version` is set
+	// at build-time via -ldflags; dev builds are "dev" and never match,
+	// so this never short-circuits a hand-built binary.
+	if rel.TagName != "" && version != "dev" && strings.TrimPrefix(rel.TagName, "v") == strings.TrimPrefix(version, "v") {
+		fmt.Printf("already on latest (%s)\n", rel.TagName)
+		return nil
 	}
 
 	suffix := "_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"

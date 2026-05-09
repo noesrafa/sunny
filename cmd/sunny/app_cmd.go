@@ -37,8 +37,9 @@ func appCmd(args []string) error {
 	fs := flag.NewFlagSet("app", flag.ExitOnError)
 	root := fs.String("root", defaultRoot(), "sunny runtime directory")
 	addrFlag := fs.String("addr", "", "override daemon address (default: read from state.json)")
+	tlsPortFlag := fs.String("tls-port", "7778", "HTTPS port the daemon listens on (matches `serve --tls-addr`)")
 	nameFlag := fs.String("name", "", "name to prefill on the app (default: hostname)")
-	prefer := fs.String("prefer", "", "force the URL shown in the QR (tailnet|lan|localhost)")
+	prefer := fs.String("prefer", "", "force the URL shown in the QR (tls|tailnet|lan|localhost)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -81,7 +82,7 @@ func appCmd(args []string) error {
 
 	// Build the candidate URL list. Order = preference for the QR
 	// payload, but every option is printed as a fallback below the QR.
-	cands := candidates(port)
+	cands := candidates(port, *tlsPortFlag)
 	pref := strings.ToLower(*prefer)
 	if pref != "" {
 		cands = filterByKind(cands, pref)
@@ -149,19 +150,39 @@ type addrCandidate struct {
 }
 
 // candidates returns the URLs the app could connect to, in
-// preference order: tailnet (works across networks if the phone
-// shares the tailscale account), LAN (same WiFi), then localhost.
-// localhost is included last because it's only useful for the iOS
-// simulator running on the same Mac.
-func candidates(port string) []addrCandidate {
+// preference order:
+//
+//	1. tls (HTTPS to <host>.<tailnet>.ts.net) — only path that works
+//	   from iOS 26 production builds, since NSAllowsArbitraryLoads
+//	   is now ignored for HTTP. Relies on the daemon's TLS listener
+//	   bringing up the Tailscale Let's Encrypt cert.
+//	2. tailnet (HTTP to the tailnet IP) — kept as a fallback for
+//	   non-iOS clients (TUI, curl) and older app builds.
+//	3. lan (HTTP to a local-WiFi IP) — same WiFi, no tailscale.
+//	4. localhost — only useful for the iOS simulator on this Mac.
+//
+// The TLS port comes from --tls-addr (default :7778); when --no-tls
+// is set or MagicDNS isn't available, it's just absent.
+func candidates(httpPort, tlsPort string) []addrCandidate {
 	out := []addrCandidate{}
+	// Pair TLS with the tailnet hostname: certs are issued for the
+	// MagicDNS FQDN, not the IP. iOS validates SNI/CN against the
+	// URL, so an IP-based HTTPS URL would fail name validation.
+	if tlsPort != "" {
+		if dns, err := tsnet.MagicDNSName(); err == nil && dns != "" {
+			out = append(out, addrCandidate{
+				URL:  fmt.Sprintf("https://%s:%s", dns, tlsPort),
+				Kind: "tls",
+			})
+		}
+	}
 	if ip, err := tsnet.LocalIP(); err == nil && ip != "" {
-		out = append(out, addrCandidate{URL: fmt.Sprintf("http://%s:%s", ip, port), Kind: "tailnet"})
+		out = append(out, addrCandidate{URL: fmt.Sprintf("http://%s:%s", ip, httpPort), Kind: "tailnet"})
 	}
 	for _, ip := range lanIPv4s() {
-		out = append(out, addrCandidate{URL: fmt.Sprintf("http://%s:%s", ip, port), Kind: "lan"})
+		out = append(out, addrCandidate{URL: fmt.Sprintf("http://%s:%s", ip, httpPort), Kind: "lan"})
 	}
-	out = append(out, addrCandidate{URL: "http://127.0.0.1:" + port, Kind: "localhost"})
+	out = append(out, addrCandidate{URL: "http://127.0.0.1:" + httpPort, Kind: "localhost"})
 	return out
 }
 

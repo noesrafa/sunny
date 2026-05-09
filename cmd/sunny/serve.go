@@ -36,6 +36,7 @@ import (
 	"github.com/noesrafa/sunny/internal/server"
 	"github.com/noesrafa/sunny/internal/store"
 	"github.com/noesrafa/sunny/internal/tabs"
+	"github.com/noesrafa/sunny/internal/tlscerts"
 	"github.com/noesrafa/sunny/internal/tools"
 	"github.com/noesrafa/sunny/internal/tsnet"
 )
@@ -49,6 +50,8 @@ import (
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:7777", "HTTP listen address")
+	tlsAddr := fs.String("tls-addr", ":7778", "HTTPS listen address (empty disables TLS)")
+	noTLS := fs.Bool("no-tls", false, "skip the auto-TLS / tailscale cert dance even when available")
 	root := fs.String("root", defaultRoot(), "sunny runtime directory")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -226,7 +229,7 @@ func serve(args []string) error {
 		listeners = append(listeners, ln)
 	}
 
-	errCh := make(chan error, len(listeners))
+	errCh := make(chan error, len(listeners)+1)
 	for _, ln := range listeners {
 		ln := ln
 		go func() {
@@ -235,6 +238,39 @@ func serve(args []string) error {
 				errCh <- err
 			}
 		}()
+	}
+
+	// Best-effort TLS bring-up: try to obtain a Tailscale Let's Encrypt
+	// cert and start an HTTPS listener alongside the HTTP one. iOS 26+
+	// production builds ignore NSAllowsArbitraryLoads, so HTTPS is now
+	// the only viable path for the phone app. Failures here are
+	// non-fatal — HTTP keeps working for the TUI/curl/etc.
+	if !*noTLS && *tlsAddr != "" {
+		if dns, err := tsnet.MagicDNSName(); err != nil {
+			log.Info("tls disabled: no tailscale magicdns", "err", err.Error())
+		} else if notAfter, err := tlscerts.Ensure(*root, dns, 30*24*time.Hour); err != nil {
+			log.Warn("tls cert provisioning failed; HTTP only", "host", dns, "err", err.Error())
+		} else {
+			tlsCfg, err := tlscerts.LoadConfig(*root)
+			if err != nil {
+				log.Warn("tls cert load failed; HTTP only", "err", err.Error())
+			} else if tlsLn, err := net.Listen("tcp", *tlsAddr); err != nil {
+				log.Warn("tls listener skipped", "addr", *tlsAddr, "err", err.Error())
+			} else {
+				log.Info("listening tls", "addr", tlsLn.Addr().String(), "host", dns, "expires", notAfter.Format(time.RFC3339))
+				tlsSrv := *srv // shallow copy: shares handler, doesn't share addr
+				tlsSrv.TLSConfig = tlsCfg
+				go func() {
+					if err := tlsSrv.ServeTLS(tlsLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+						errCh <- err
+					}
+				}()
+				// Renewal loop: every 24h check expiry, re-issue if
+				// inside the renewBefore window. Tailscale's `cert`
+				// is idempotent for unexpired certs so this is cheap.
+				go renewTLSLoop(ctx, *root, dns, log)
+			}
+		}
 	}
 
 	scheduler.Start(ctx)
@@ -255,6 +291,38 @@ func serve(args []string) error {
 		runtime.StopAll(shutdownCtx)
 		scheduler.Stop()
 		return shutdownErr
+	}
+}
+
+// renewTLSLoop polls the cert's NotAfter every 24h and re-issues
+// when the slack window (30d) elapses. tailscale's `cert` is
+// idempotent for unexpired certs so a "false alarm" tick is cheap.
+// Exits cleanly when ctx is cancelled (daemon shutdown).
+//
+// The new cert is written to the same files the running TLS
+// listener already loaded — but Go's tls.Config.Certificates
+// snapshots at server start, so a renew lands on disk but the
+// listener keeps serving the old cert until the next daemon
+// restart. That's acceptable: 30 days of slack covers most
+// restart cadences, and a stale-but-valid cert never breaks
+// anything. Hot reload via tls.Config.GetCertificate is a
+// possible follow-up if cert churn ever becomes a concern.
+func renewTLSLoop(ctx context.Context, root, hostname string, log *slog.Logger) {
+	const (
+		checkEvery  = 24 * time.Hour
+		renewBefore = 30 * 24 * time.Hour
+	)
+	t := time.NewTicker(checkEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := tlscerts.Ensure(root, hostname, renewBefore); err != nil {
+				log.Warn("tls cert renew failed", "host", hostname, "err", err.Error())
+			}
+		}
 	}
 }
 

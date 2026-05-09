@@ -27,10 +27,15 @@ import (
 // Peer is one tailnet node.
 type Peer struct {
 	HostName string
-	IP       string // first IPv4 (the v6 is rarely useful for sunny's HTTP daemon)
-	OS       string // "linux" / "macOS" / "iOS" / …
-	Online   bool
-	IsSelf   bool
+	// DNSName is the MagicDNS FQDN with trailing dot (e.g.
+	// "rafael-mac.taildbeec.ts.net."). Empty when MagicDNS is
+	// disabled on the tailnet. Callers stripping the trailing
+	// dot should use MagicDNSName for self.
+	DNSName string
+	IP      string // first IPv4 (the v6 is rarely useful for sunny's HTTP daemon)
+	OS      string // "linux" / "macOS" / "iOS" / …
+	Online  bool
+	IsSelf  bool
 	// UserID is the tailscale account that owns this node. Two nodes
 	// with the same UserID belong to the same person — sunny uses
 	// this for zero-config trust ("are you me?"). 0 means unknown
@@ -165,10 +170,64 @@ type rawStatus struct {
 
 type rawNode struct {
 	HostName     string   `json:"HostName"`
+	DNSName      string   `json:"DNSName"`
 	TailscaleIPs []string `json:"TailscaleIPs"`
 	OS           string   `json:"OS"`
 	Online       bool     `json:"Online"`
 	UserID       int64    `json:"UserID"`
+}
+
+// MagicDNSName returns the local node's FQDN on the tailnet, e.g.
+// "rafael-mac.taildbeec.ts.net" (no trailing dot). This is the only
+// name TLS certs from `tailscale cert` are issued for, so it's the
+// identifier the daemon must publish to the app for HTTPS pairing.
+// Returns ("", error) when tailscale isn't installed/logged in or
+// MagicDNS isn't enabled (the field comes back blank in that case).
+func MagicDNSName() (string, error) {
+	st, err := FetchStatus()
+	if err != nil {
+		return "", err
+	}
+	dns := strings.TrimSuffix(st.Self.DNSName, ".")
+	if dns == "" {
+		return "", fmt.Errorf("tsnet: empty DNSName (MagicDNS disabled?)")
+	}
+	return dns, nil
+}
+
+// IssueCert shells out to `tailscale cert` to obtain (or refresh) a
+// Let's Encrypt TLS cert for the given hostname (which MUST be the
+// local node's *.ts.net FQDN — Tailscale only signs certs for nodes
+// it owns). Writes cert+key to the supplied paths; the operation is
+// idempotent — when an unexpired cert already exists, tailscale
+// silently re-uses it.
+//
+// Requires "HTTPS Certificates" enabled in the tailnet admin
+// (https://login.tailscale.com/admin/dns) and MagicDNS on. When
+// either is missing, the CLI returns a helpful stderr we surface
+// verbatim so the operator can act.
+func IssueCert(hostname, certPath, keyPath string) error {
+	if !Available() {
+		return fmt.Errorf("tsnet: `tailscale` CLI not installed")
+	}
+	if hostname == "" {
+		return fmt.Errorf("tsnet: empty hostname")
+	}
+	// `tailscale cert` is a network operation (provisions via Let's
+	// Encrypt on first issue). Default-renews are local-only and fast,
+	// but a cold issue can take 10-30s — give it generous headroom.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tailscale", "cert",
+		"--cert-file", certPath,
+		"--key-file", keyPath,
+		hostname,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("tsnet: tailscale cert: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // parseStatusFull is the canonical parser; parseStatus is kept as a
@@ -203,6 +262,7 @@ func parseStatus(raw []byte) ([]Peer, error) {
 func toPeer(n *rawNode, self bool) Peer {
 	return Peer{
 		HostName: n.HostName,
+		DNSName:  n.DNSName,
 		IP:       firstIPv4(n.TailscaleIPs),
 		OS:       n.OS,
 		Online:   n.Online,

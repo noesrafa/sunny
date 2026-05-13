@@ -35,30 +35,26 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// Scope constants. The full MR-review flow needs four scopes:
+// Scope constants. Two scopes cover everything the monitor needs:
 //
-//   - spaces.readonly   — enumerate spaces (sunny gchat test)
-//   - messages.readonly — poll new messages (source_gchat)
-//   - messages.create   — post replies in the thread
-//   - messages.reactions — add 👀 / ✅ reactions
+//   - chat.spaces.readonly — enumerate spaces (sunny gchat test)
+//   - chat.messages        — read + create + UPDATE + delete + react
 //
-// We deliberately use granular scopes over the umbrella `chat.messages`
-// so the consent screen tells the user what we actually do.
+// We started with granular scopes (chat.messages.readonly +
+// chat.messages.create + chat.messages.reactions) but `messages.update`
+// (needed for editing the "Revisando…" message into the final review)
+// is only covered by the umbrella scope. Collapsing to the umbrella
+// trades a slightly broader consent screen for fewer re-auths.
 const (
-	ScopeSpacesReadonly      = "https://www.googleapis.com/auth/chat.spaces.readonly"
-	ScopeMessagesReadonly    = "https://www.googleapis.com/auth/chat.messages.readonly"
-	ScopeMessagesCreate      = "https://www.googleapis.com/auth/chat.messages.create"
-	ScopeMessagesReactions   = "https://www.googleapis.com/auth/chat.messages.reactions"
+	ScopeSpacesReadonly = "https://www.googleapis.com/auth/chat.spaces.readonly"
+	ScopeMessages       = "https://www.googleapis.com/auth/chat.messages"
 )
 
-// DefaultScopes is the bundle requested by `sunny gchat auth`. Covers
-// read + write + react so the monitor can run the full flow.
-// Re-consent is needed any time this list grows.
+// DefaultScopes is the bundle requested by `sunny gchat auth`. Re-
+// consent is needed any time this list grows.
 var DefaultScopes = []string{
 	ScopeSpacesReadonly,
-	ScopeMessagesReadonly,
-	ScopeMessagesCreate,
-	ScopeMessagesReactions,
+	ScopeMessages,
 }
 
 // Dir is the on-disk home for this integration.

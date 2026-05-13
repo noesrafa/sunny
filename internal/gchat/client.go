@@ -159,29 +159,72 @@ func (c *Client) ListMessages(ctx context.Context, spaceName, after string) ([]M
 	return out, nil
 }
 
-// React adds an emoji reaction to a message. messageName is the full
-// resource name returned in Message.Name (e.g.
-// "spaces/X/messages/Y"). emoji is a single unicode char like "👀".
-// Idempotent on Google's side per (message, user, emoji) — a second
-// call with the same triple returns 409, which we swallow so the
-// monitor doesn't error on retries.
-func (c *Client) React(ctx context.Context, messageName, emoji string) error {
+// React adds an emoji reaction to a message and returns the created
+// reaction's resource name (shape "spaces/X/messages/Y/reactions/Z").
+// Callers can pass that name back to Unreact when they need to remove
+// the same reaction later (e.g. swapping 👀 for ✅ at the end of a
+// monitor's chain).
+//
+// 409 / ALREADY_EXISTS is swallowed — the desired state is "this
+// emoji exists on this message", and it does. The returned name is
+// empty in that case because Google doesn't return the existing
+// reaction's body on the conflict.
+func (c *Client) React(ctx context.Context, messageName, emoji string) (string, error) {
 	if messageName == "" {
-		return fmt.Errorf("react: message name required")
+		return "", fmt.Errorf("react: message name required")
 	}
 	if emoji == "" {
-		return fmt.Errorf("react: emoji required")
+		return "", fmt.Errorf("react: emoji required")
 	}
-	_, err := c.svc.Spaces.Messages.Reactions.Create(messageName, &chat.Reaction{
+	r, err := c.svc.Spaces.Messages.Reactions.Create(messageName, &chat.Reaction{
 		Emoji: &chat.Emoji{Unicode: emoji},
 	}).Context(ctx).Do()
 	if err != nil {
-		// 409 = already reacted. Treat as success — the desired state
-		// is "this emoji exists on this message", and it does.
 		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "ALREADY_EXISTS") {
+			return "", nil
+		}
+		return "", fmt.Errorf("react %s: %w", messageName, err)
+	}
+	if r == nil {
+		return "", nil
+	}
+	return r.Name, nil
+}
+
+// Unreact removes the authenticated user's reaction matching `emoji`
+// from a message. Idempotent — if no matching reaction exists (e.g.
+// already removed, or we never added one), returns nil.
+//
+// Implementation: list reactions on the message with a server-side
+// filter (`emoji.unicode = X AND user.name = users/me`), delete the
+// first match. The filter syntax is per Google's Chat API quirks —
+// `users/me` is a magic alias for the authenticated user.
+func (c *Client) Unreact(ctx context.Context, messageName, emoji string) error {
+	if messageName == "" {
+		return fmt.Errorf("unreact: message name required")
+	}
+	if emoji == "" {
+		return fmt.Errorf("unreact: emoji required")
+	}
+	filter := fmt.Sprintf("emoji.unicode = %q AND user.name = \"users/me\"", emoji)
+	resp, err := c.svc.Spaces.Messages.Reactions.List(messageName).
+		Filter(filter).
+		PageSize(1).
+		Context(ctx).
+		Do()
+	if err != nil {
+		return fmt.Errorf("unreact list %s: %w", messageName, err)
+	}
+	if resp == nil || len(resp.Reactions) == 0 {
+		return nil
+	}
+	_, err = c.svc.Spaces.Messages.Reactions.Delete(resp.Reactions[0].Name).Context(ctx).Do()
+	if err != nil {
+		// 404 = already gone; treat as success.
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "NOT_FOUND") {
 			return nil
 		}
-		return fmt.Errorf("react %s: %w", messageName, err)
+		return fmt.Errorf("unreact delete %s: %w", resp.Reactions[0].Name, err)
 	}
 	return nil
 }
@@ -196,23 +239,45 @@ func (c *Client) React(ctx context.Context, messageName, emoji string) error {
 // Google: if the thread name we passed is bogus or already closed,
 // create a new thread instead of erroring. Safer than the strict
 // reply mode for an autonomous monitor.
-func (c *Client) Reply(ctx context.Context, spaceName, threadName, text string) error {
+func (c *Client) Reply(ctx context.Context, spaceName, threadName, text string) (string, error) {
 	if spaceName == "" {
-		return fmt.Errorf("reply: space name required")
+		return "", fmt.Errorf("reply: space name required")
 	}
 	if text == "" {
-		return fmt.Errorf("reply: text required")
+		return "", fmt.Errorf("reply: text required")
 	}
 	msg := &chat.Message{Text: text}
 	if threadName != "" {
 		msg.Thread = &chat.Thread{Name: threadName}
 	}
-	_, err := c.svc.Spaces.Messages.Create(spaceName, msg).
+	created, err := c.svc.Spaces.Messages.Create(spaceName, msg).
 		MessageReplyOption("REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD").
 		Context(ctx).
 		Do()
 	if err != nil {
-		return fmt.Errorf("reply in %s: %w", spaceName, err)
+		return "", fmt.Errorf("reply in %s: %w", spaceName, err)
+	}
+	if created == nil {
+		return "", nil
+	}
+	return created.Name, nil
+}
+
+// Edit replaces the `text` field on a previously-posted message.
+// `messageName` is the full resource name returned by Reply.
+// Other fields (thread membership, sender, createTime) are
+// untouched. The "edited" badge that Google Chat shows in the UI
+// is added automatically by the API.
+func (c *Client) Edit(ctx context.Context, messageName, text string) error {
+	if messageName == "" {
+		return fmt.Errorf("edit: message name required")
+	}
+	_, err := c.svc.Spaces.Messages.Patch(messageName, &chat.Message{Text: text}).
+		UpdateMask("text").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return fmt.Errorf("edit %s: %w", messageName, err)
 	}
 	return nil
 }

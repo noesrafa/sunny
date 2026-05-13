@@ -648,13 +648,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmds []tea.Cmd
-	// Image paste: intercept BEFORE the textarea consumes the paste, so we
-	// can swap binary clipboard content for an "[Image #N]" marker. If the
-	// clipboard has no image, fall through and the textarea pastes text.
+	// Paste interception, BEFORE the textarea consumes it:
+	//   1) image clipboard → "[Image #N]" marker (binary swap)
+	//   2) text over the paste-as-blob threshold → "[Pasted text #N]"
+	//      marker so the input stays compact and one backspace nukes
+	//      the whole chunk
+	//   3) otherwise fall through — the textarea inserts the chars itself
 	pasteHandled := false
 	if !m.overlay.HasOpen() {
 		if pm, ok := msg.(tea.PasteMsg); ok {
 			if m.tryImagePaste(pm.Content) {
+				pasteHandled = true
+			} else if m.tryPastedText(pm.Content) {
 				pasteHandled = true
 			}
 		}
@@ -774,8 +779,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 		if m.textarea.Value() != prevValue {
-			m.syncAttachmentMarkers() // drop attachments whose marker the user broke
-			m.layout()                // dynamic textarea height
+			m.syncAttachmentMarkers()  // drop attachments whose marker the user broke
+			m.syncPastedTextMarkers()  // same idea for "[Pasted text #N]" pills
+			m.layout()                 // dynamic textarea height
 			if wasAtBottom {
 				m.chat.ScrollToBottom()
 			}

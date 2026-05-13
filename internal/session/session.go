@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -90,6 +93,13 @@ type Session struct {
 	// Cleared on Send. Each carries the [Image #N] index marker.
 	Attachments   []Attachment
 	attachmentSeq int
+
+	// PastedTexts are big text blobs pasted into the current draft but not
+	// yet sent. Each is referenced by a "[Pasted text #N +K lines]" marker
+	// in the textarea. Cleared on Send (the per-turn copy lives on the
+	// resulting UserItem so regenerate can re-expand).
+	PastedTexts   []PastedText
+	pastedTextSeq int
 
 	logger        *log.Logger
 	turnHadOutput bool
@@ -188,6 +198,8 @@ func (s *Session) RebindConv(ctx context.Context) error {
 	s.turnHadOutput = false
 	s.Attachments = nil
 	s.attachmentSeq = 0
+	s.PastedTexts = nil
+	s.pastedTextSeq = 0
 
 	s.watchCh = make(chan client.JournalEvent, 256)
 	watchCtx, cancel := context.WithCancel(ctx)
@@ -252,6 +264,20 @@ func (s *Session) AddAttachment(path, mediaType string) int {
 		MediaType: mediaType,
 	})
 	return s.attachmentSeq
+}
+
+// AddPastedText registers a chunk of pasted text with the session and
+// returns the 1-based marker index plus its line count. The caller
+// embeds "[Pasted text #<idx> +<lines> lines]" in the textarea.
+func (s *Session) AddPastedText(text string) (idx, lines int) {
+	s.pastedTextSeq++
+	lines = strings.Count(text, "\n") + 1
+	s.PastedTexts = append(s.PastedTexts, PastedText{
+		Index: s.pastedTextSeq,
+		Text:  text,
+		Lines: lines,
+	})
+	return s.pastedTextSeq, lines
 }
 
 var idCounter atomic.Int64
@@ -369,8 +395,13 @@ func (s *Session) Send(ctx context.Context, text string) error {
 		return err
 	}
 	// Optimistic local append + skip the watch echo of this exact seq.
-	s.Items = append(s.Items, UserItem{Text: text, Attachments: s.Attachments})
+	s.Items = append(s.Items, UserItem{
+		Text:        text,
+		Attachments: s.Attachments,
+		PastedTexts: s.PastedTexts,
+	})
 	s.Attachments = nil
+	s.PastedTexts = nil
 	s.echoSkipSeq.Store(res.UserSeq)
 	s.State = StateThinking
 	now := time.Now()
@@ -396,7 +427,7 @@ func (s *Session) send(ctx context.Context, text string, _ bool) (*client.SendTu
 	if s.ConvID == "" {
 		return nil, fmt.Errorf("session: no conv_id (tab not initialised)")
 	}
-	wire := buildWireMessages(s.Items, text)
+	wire := buildWireMessages(s.Items, text, s.PastedTexts)
 	res, err := s.c.SendTurn(ctx, s.agentID, s.ConvID, client.TurnRequest{
 		Messages: wire,
 		Cwd:      s.Cwd,
@@ -459,7 +490,7 @@ func (s *Session) Regenerate(ctx context.Context) error {
 	}
 	userItem := s.Items[cut].(UserItem)
 
-	wire := buildWireMessages(s.Items[:cut], userItem.Text)
+	wire := buildWireMessages(s.Items[:cut], userItem.Text, userItem.PastedTexts)
 	if err := s.c.RegenerateLastTurn(ctx, s.agentID, s.ConvID, client.TurnRequest{
 		Messages: wire,
 		Cwd:      s.Cwd,
@@ -750,20 +781,58 @@ func (s *Session) linkToolResult(id, content string, isError bool) {
 // thinking blocks are dropped — claude-code reconstructs them via
 // --resume; the anthropic provider doesn't need them since it gets
 // the full text turns.
-func buildWireMessages(items []Item, newUserText string) []client.Message {
+//
+// User messages have their "[Pasted text #N +K lines]" markers expanded
+// back to the source blob so the model receives the full content even
+// though the textarea only ever shows the compact marker.
+func buildWireMessages(items []Item, newUserText string, newPastes []PastedText) []client.Message {
 	var wire []client.Message
 	for _, it := range items {
 		switch v := it.(type) {
 		case UserItem:
-			wire = append(wire, client.Message{Role: "user", Content: v.Text})
+			wire = append(wire, client.Message{Role: "user", Content: ExpandPastedTexts(v.Text, v.PastedTexts)})
 		case AssistantTextItem:
 			if v.Text != "" {
 				wire = append(wire, client.Message{Role: "assistant", Content: v.Text})
 			}
 		}
 	}
-	wire = append(wire, client.Message{Role: "user", Content: newUserText})
+	wire = append(wire, client.Message{Role: "user", Content: ExpandPastedTexts(newUserText, newPastes)})
 	return wire
+}
+
+// pastedTextMarkerRe matches the marker shape inserted into the
+// textarea. The line count is tolerated as any non-]-bearing tail so
+// minor reformatting (e.g. the user manually edited "+50 lines" to
+// "+51 lines") doesn't strand the blob.
+var pastedTextMarkerRe = regexp.MustCompile(`\[Pasted text #(\d+)[^\]]*\]`)
+
+// ExpandPastedTexts replaces "[Pasted text #N ...]" markers with the
+// matching blob's content. Unknown indices stay as literal text — that
+// way an orphan marker (e.g. left in a draft after the TUI restart
+// dropped the blob) survives as user-visible text instead of vanishing.
+func ExpandPastedTexts(text string, pastes []PastedText) string {
+	if len(pastes) == 0 || !strings.Contains(text, "[Pasted text #") {
+		return text
+	}
+	byIdx := make(map[int]string, len(pastes))
+	for _, p := range pastes {
+		byIdx[p.Index] = p.Text
+	}
+	return pastedTextMarkerRe.ReplaceAllStringFunc(text, func(match string) string {
+		sub := pastedTextMarkerRe.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		idx, err := strconv.Atoi(sub[1])
+		if err != nil {
+			return match
+		}
+		if body, ok := byIdx[idx]; ok {
+			return body
+		}
+		return match
+	})
 }
 
 // LiveStatus returns a short human-readable label like "writing" or

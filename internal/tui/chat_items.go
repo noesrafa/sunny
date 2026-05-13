@@ -212,11 +212,15 @@ func RenderItemRaw(it session.Item, ctx RenderContext) string {
 		// wordwrap treats the OSC 8 sequence as a single token (lipgloss
 		// width-counts only the visible glyphs), so the link stays intact.
 		body := s.UserText.Render(wrap(linkify(v.Text), ctx.Width-1))
-		if len(v.Attachments) > 0 {
-			lines := make([]string, 0, len(v.Attachments)+1)
+		if len(v.Attachments) > 0 || len(v.PastedTexts) > 0 {
+			lines := make([]string, 0, len(v.Attachments)+len(v.PastedTexts)+1)
 			lines = append(lines, body)
 			for _, a := range v.Attachments {
 				label := fmt.Sprintf("↳ [Image #%d] %s", a.Index, shortenPath(a.Path, ctx.Width-4))
+				lines = append(lines, s.Hint.Render(label))
+			}
+			for _, p := range v.PastedTexts {
+				label := fmt.Sprintf("↳ [Pasted text #%d] %d lines, %d chars", p.Index, p.Lines, len(p.Text))
 				lines = append(lines, s.Hint.Render(label))
 			}
 			body = strings.Join(lines, "\n")

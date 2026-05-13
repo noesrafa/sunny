@@ -17,9 +17,25 @@ type Attachment struct {
 	MediaType string `json:"media_type"`
 }
 
+// PastedText is a single chunk of pasted-as-blob text. When a paste
+// exceeds the configured threshold the textarea swaps the literal
+// content for a "[Pasted text #N +K lines]" marker so the input stays
+// compact and one backspace can delete the entire chunk. On Send the
+// marker expands back to the full text for the model.
+type PastedText struct {
+	Index int    `json:"index"`
+	Text  string `json:"text"`
+	Lines int    `json:"lines"`
+}
+
 type UserItem struct {
 	Text        string       `json:"Text"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// PastedTexts carries the blobs referenced by "[Pasted text #N]"
+	// markers in Text. Kept on the item so regenerate can re-expand
+	// against the same source content, and so the transcript renderer
+	// can show a per-blob label below the message.
+	PastedTexts []PastedText `json:"pasted_texts,omitempty"`
 }
 type AssistantTextItem struct{ Text string }
 type ThinkingItem struct{ Text string }

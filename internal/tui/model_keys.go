@@ -148,8 +148,9 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-// handlePaste runs the image-aware paste flow: image clipboard first, then
-// falls back to plain text via atotto when there's no image.
+// handlePaste runs the image-aware paste flow: image clipboard first,
+// then big text gets folded into a "[Pasted text #N]" blob marker, and
+// the rest falls through as a plain textarea insert.
 func (m *Model) handlePaste() {
 	if m.tryImagePaste("") {
 		return
@@ -162,11 +163,79 @@ func (m *Model) handlePaste() {
 	if text == "" {
 		return
 	}
+	if m.tryPastedText(text) {
+		return
+	}
 	m.textarea.InsertString(text)
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = m.textarea.Value()
 	}
 	m.layout()
+}
+
+// Paste-as-blob thresholds. Either hitting the char count or the line
+// count promotes a paste into a "[Pasted text #N]" marker. The values
+// land just above what fits in a typical chat input height without
+// scrolling, so prose-sized pastes stay inline.
+const (
+	pasteBlobMinChars = 200
+	pasteBlobMinLines = 4
+)
+
+// tryPastedText decides whether `text` should be swapped for a blob
+// marker. Returns true when the marker has been inserted (caller must
+// not also insert the raw text); false when the paste is small enough
+// to flow through as normal characters.
+func (m *Model) tryPastedText(text string) bool {
+	cur := m.manager.Current()
+	if cur == nil {
+		return false
+	}
+	lines := strings.Count(text, "\n") + 1
+	if lines < pasteBlobMinLines && len(text) < pasteBlobMinChars {
+		return false
+	}
+	idx, n := cur.AddPastedText(text)
+	marker := fmt.Sprintf("[Pasted text #%d +%d lines]", idx, n)
+	m.textarea.InsertString(marker)
+	cur.Draft = m.textarea.Value()
+	m.layout()
+	m.logger.Info("text pasted as blob",
+		"session", cur.ID, "idx", idx, "lines", n, "bytes", len(text))
+	return true
+}
+
+// syncPastedTextMarkers reconciles the textarea against pending pasted
+// blobs. If the user damaged a marker (e.g. backspaced into it), we
+// drop that blob + clean the residual text fragment. One backspace
+// from the end of a marker therefore deletes the whole pill.
+func (m *Model) syncPastedTextMarkers() {
+	cur := m.manager.Current()
+	if cur == nil || len(cur.PastedTexts) == 0 {
+		return
+	}
+	text := m.textarea.Value()
+	cleaned := text
+	kept := cur.PastedTexts[:0]
+	for _, p := range cur.PastedTexts {
+		exact := fmt.Sprintf("[Pasted text #%d +%d lines]", p.Index, p.Lines)
+		if strings.Contains(cleaned, exact) {
+			kept = append(kept, p)
+			continue
+		}
+		// Marker was edited away. Wipe whatever fragment remains so
+		// stray "[Pasted text #3 +50 line" residue doesn't sit in the
+		// draft after the blob is gone.
+		fragment := regexp.MustCompile(fmt.Sprintf(`\[?Pasted\s*text\s*#?\s*%d\b[^\]]*\]?`, p.Index))
+		cleaned = fragment.ReplaceAllString(cleaned, "")
+		m.logger.Info("pasted text dropped", "session", cur.ID, "idx", p.Index)
+	}
+	cur.PastedTexts = kept
+	if cleaned != text {
+		m.textarea.SetValue(cleaned)
+		m.textarea.CursorEnd()
+		cur.Draft = cleaned
+	}
 }
 
 // handleClearOrCancel: ctrl+c cancels the in-flight turn without touching

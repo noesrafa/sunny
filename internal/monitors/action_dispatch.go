@@ -59,51 +59,149 @@ func (a *DispatchAction) Run(ctx context.Context, cfg map[string]any, item Item,
 	if err != nil {
 		return nil, err
 	}
-	// Strip the optional trailing GH-REVIEWS block before exposing
-	// `result` to downstream actions — the block is a machine-readable
-	// hint for github_review and would just clutter the chat reply.
-	clean, reviews := parseGitHubReviews(out)
+	// The agent emits a single structured JSON block. We compose the
+	// chat reply from that same data so the per-PR review body shows
+	// up identically in both places (Chat thread + GitHub PR review).
+	// No re-prompting, no second pass.
+	chatReply, emoji, reviews := parseAgentOutput(out)
 	return map[string]any{
-		"result":  clean,
-		"emoji":   extractVerdictEmoji(clean),
-		"head":    firstLine(clean),
+		"result":  chatReply,
+		"emoji":   emoji,
+		"head":    firstLine(chatReply),
 		"reviews": reviews,
 	}, nil
 }
 
-// parseGitHubReviews extracts a trailing block of the form
+// parseAgentOutput pulls a single structured JSON block out of the
+// agent's response and produces three things from it:
+//
+//   - chatReply: a Markdown-light rendering composed from the JSON's
+//     summary + per-PR bodies. This is what gchat_edit posts in the
+//     thread.
+//   - emoji:     ✅ when verdict=APPROVE, ❌ otherwise. Drives the
+//     final gchat_react in the chain.
+//   - reviews:   the raw per-PR list, fed straight to github_review.
+//
+// Expected JSON shape (inside markers):
 //
 //	<!-- GH-REVIEWS-START -->
-//	{"reviews":[{"url":"...","decision":"APPROVE","body":"..."}, ...]}
+//	{
+//	  "verdict": "APPROVE" | "REQUEST_CHANGES",
+//	  "summary": "one-line executive summary",
+//	  "reviews": [
+//	    {"url":"...","title":"...","decision":"APPROVE","body":"..."}
+//	  ]
+//	}
 //	<!-- GH-REVIEWS-END -->
 //
-// from the agent's response. Returns the response with the block
-// stripped (clean) plus the parsed reviews list.
-//
-// Missing block → clean=s, reviews=nil. Malformed JSON → clean=s,
-// reviews=nil (we don't fail the whole turn over a bad emit; the
-// chat reply still goes through, the GitHub step just no-ops).
-func parseGitHubReviews(s string) (clean string, reviews []map[string]any) {
-	const startTag = "<!-- GH-REVIEWS-START -->"
-	const endTag = "<!-- GH-REVIEWS-END -->"
-	start := strings.Index(s, startTag)
-	if start < 0 {
-		return s, nil
+// Fallback when no JSON block is present (or the JSON is malformed):
+// the raw agent text becomes the chat reply, emoji is sniffed with
+// the legacy extractor, and reviews is nil so github_review no-ops.
+// This keeps the chain alive even when the agent forgets the
+// structured format.
+func parseAgentOutput(s string) (chatReply string, emoji string, reviews []map[string]any) {
+	block := extractJSONBlock(s)
+	if block == "" {
+		return s, extractVerdictEmoji(s), nil
 	}
-	tail := s[start+len(startTag):]
-	end := strings.Index(tail, endTag)
-	if end < 0 {
-		return s, nil
-	}
-	jsonRaw := strings.TrimSpace(tail[:end])
-	var wire struct {
+	var out struct {
+		Verdict string           `json:"verdict"`
+		Summary string           `json:"summary"`
 		Reviews []map[string]any `json:"reviews"`
 	}
-	if err := json.Unmarshal([]byte(jsonRaw), &wire); err != nil {
-		return s, nil
+	if err := json.Unmarshal([]byte(block), &out); err != nil {
+		return s, extractVerdictEmoji(s), nil
 	}
-	cleanBuf := strings.TrimSpace(s[:start] + tail[end+len(endTag):])
-	return cleanBuf, wire.Reviews
+	emoji = verdictToEmoji(out.Verdict)
+	chatReply = composeChatReply(emoji, out.Summary, out.Reviews)
+	return chatReply, emoji, out.Reviews
+}
+
+// extractJSONBlock returns the text between the GH-REVIEWS markers,
+// trimmed. Empty string when markers are missing or malformed.
+func extractJSONBlock(s string) string {
+	const startTag = "<!-- GH-REVIEWS-START -->"
+	const endTag = "<!-- GH-REVIEWS-END -->"
+	i := strings.Index(s, startTag)
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(s[i:], endTag)
+	if j < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[i+len(startTag) : i+j])
+}
+
+// verdictToEmoji collapses an agent-emitted verdict into the binary
+// emoji the user wants. Anything that smells like "request changes"
+// (or contains a ❌) flips to ❌; everything else is ✅. There's no
+// neutral middle ground by design.
+func verdictToEmoji(v string) string {
+	up := strings.ToUpper(strings.TrimSpace(v))
+	if strings.Contains(up, "REQUEST") || strings.Contains(up, "CHANGES") || strings.Contains(v, "❌") {
+		return "❌"
+	}
+	return "✅"
+}
+
+// composeChatReply renders the structured agent output as the text
+// that lands in the Google Chat thread. Same per-PR bodies that go
+// to GitHub get reused here verbatim — one source of truth.
+//
+// Layout:
+//
+//	<emoji> <summary>
+//
+//	*PR #<num>* <decision-emoji> — <title>
+//	<body>
+//
+//	*PR #<num>* <decision-emoji> — <title>
+//	<body>
+func composeChatReply(emoji, summary string, reviews []map[string]any) string {
+	var b strings.Builder
+	b.WriteString(emoji)
+	if summary != "" {
+		b.WriteString(" ")
+		b.WriteString(summary)
+	}
+	b.WriteString("\n\n")
+	for i, r := range reviews {
+		title, _ := r["title"].(string)
+		url, _ := r["url"].(string)
+		body, _ := r["body"].(string)
+		decision, _ := r["decision"].(string)
+		prNum := extractPRNumber(url)
+		prEmoji := verdictToEmoji(decision)
+		header := fmt.Sprintf("*PR #%s* %s", prNum, prEmoji)
+		if title != "" {
+			header += " — " + title
+		}
+		b.WriteString(header)
+		b.WriteString("\n")
+		b.WriteString(body)
+		if i < len(reviews)-1 {
+			b.WriteString("\n\n")
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// extractPRNumber returns the trailing path segment of a GitHub PR
+// URL ("https://github.com/owner/repo/pull/346" → "346"). Empty when
+// the URL doesn't look like a PR URL.
+func extractPRNumber(url string) string {
+	if i := strings.LastIndex(url, "/pull/"); i >= 0 {
+		num := url[i+len("/pull/"):]
+		// Trim anything past the number (query string, fragment, etc.)
+		for j, r := range num {
+			if r < '0' || r > '9' {
+				return num[:j]
+			}
+		}
+		return num
+	}
+	return ""
 }
 
 // extractVerdictEmoji finds the earliest of ✅ / ⚠️ / ❌ in the first

@@ -3,6 +3,7 @@ package monitors
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -345,10 +346,28 @@ func (s *Scheduler) tick(ctx context.Context, w *worker, m *Monitor, state *Stat
 }
 
 func (s *Scheduler) processItem(ctx context.Context, m *Monitor, item Item, state *State, historyPath string) {
+	limits := m.RateLimit.Effective()
 	for _, rule := range m.Rules {
 		if !EvaluateWhen(rule.When, item) {
 			continue
 		}
+		// Rate-limit guard: count recent firings BEFORE doing any
+		// work. We log the skip so the user can spot when their
+		// monitor is being silenced, and write a no-actions history
+		// entry so the scheduler still publishes "fired" and the
+		// item is still marked seen — without the seen mark, the
+		// same item would keep coming back every tick.
+		if perMin := state.CountFiringsSince(time.Minute); perMin >= limits.PerMinute {
+			s.log.Warn("monitor rate-limited (per_minute)", "name", m.Name, "rule", rule.Name, "count", perMin, "limit", limits.PerMinute)
+			s.appendRateLimitHistory(historyPath, m, rule, item, "per_minute", perMin, limits.PerMinute)
+			continue
+		}
+		if perHr := state.CountFiringsSince(time.Hour); perHr >= limits.PerHour {
+			s.log.Warn("monitor rate-limited (per_hour)", "name", m.Name, "rule", rule.Name, "count", perHr, "limit", limits.PerHour)
+			s.appendRateLimitHistory(historyPath, m, rule, item, "per_hour", perHr, limits.PerHour)
+			continue
+		}
+		state.MarkFiring()
 		entry := HistoryEntry{
 			Ts:   time.Now().UTC(),
 			Rule: rule.Name,
@@ -377,6 +396,27 @@ func (s *Scheduler) processItem(ctx context.Context, m *Monitor, item Item, stat
 			s.log.Warn("monitor history append", "name", m.Name, "err", err)
 		}
 		s.publishFired(m.Name)
+	}
+}
+
+// appendRateLimitHistory records a rule that matched but was
+// suppressed by the rate limiter. Without this the user has no
+// signal in the UI that the monitor decided NOT to fire — they'd
+// just see fewer entries and wonder why. The entry carries a single
+// synthetic "rate_limit" action whose Err describes which window
+// tripped and what the threshold was.
+func (s *Scheduler) appendRateLimitHistory(historyPath string, m *Monitor, rule Rule, item Item, window string, count, limit int) {
+	entry := HistoryEntry{
+		Ts:   time.Now().UTC(),
+		Rule: rule.Name,
+		Item: item.Fields,
+		Actions: []HistoryAction{{
+			Type: "rate_limit",
+			Err:  fmt.Sprintf("skipped: %s cap exhausted (%d/%d)", window, count, limit),
+		}},
+	}
+	if err := AppendHistory(historyPath, entry); err != nil {
+		s.log.Warn("monitor history append", "name", m.Name, "err", err)
 	}
 }
 

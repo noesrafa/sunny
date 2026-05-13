@@ -27,11 +27,45 @@ import (
 
 // Monitor is the parsed form of one monitors/<name>.yaml.
 type Monitor struct {
-	Name     string       `yaml:"name"`
-	Enabled  bool         `yaml:"enabled"`
-	Interval string       `yaml:"interval"` // "60s", "5m", "1h"
-	Source   SourceConfig `yaml:"-"`
-	Rules    []Rule       `yaml:"rules"`
+	Name      string       `yaml:"name"`
+	Enabled   bool         `yaml:"enabled"`
+	Interval  string       `yaml:"interval"` // "60s", "5m", "1h"
+	Source    SourceConfig `yaml:"-"`
+	Rules     []Rule       `yaml:"rules"`
+	RateLimit RateLimit    `yaml:"rate_limit"`
+}
+
+// RateLimit caps how often a monitor's rules can FIRE (= a matching
+// item runs its action chain). Independent of the tick interval —
+// a 30s ticker can still be capped to 1 firing/min if you want.
+//
+// Defaults (PerMinute=1, PerHour=10) are conservative: they protect
+// a chatty source (team channel, busy webhook) from hammering the
+// agent and from spamming the surfaces the actions write to (Chat,
+// GitHub). Set higher in YAML when needed:
+//
+//	rate_limit:
+//	  per_minute: 5
+//	  per_hour: 50
+//
+// Zero / negative values fall back to the default.
+type RateLimit struct {
+	PerMinute int `yaml:"per_minute"`
+	PerHour   int `yaml:"per_hour"`
+}
+
+// Effective returns the rate limit with zero values replaced by the
+// shipped defaults (1/min, 10/hr). Always call this before reading
+// PerMinute / PerHour so a YAML without the section behaves the
+// same as one that omits a single sub-field.
+func (r RateLimit) Effective() RateLimit {
+	if r.PerMinute <= 0 {
+		r.PerMinute = 1
+	}
+	if r.PerHour <= 0 {
+		r.PerHour = 10
+	}
+	return r
 }
 
 // SourceConfig is the type discriminator + the rest of the source's
@@ -79,11 +113,12 @@ func Load(path string) (*Monitor, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var raw struct {
-		Name     string                 `yaml:"name"`
-		Enabled  bool                   `yaml:"enabled"`
-		Interval string                 `yaml:"interval"`
-		Source   map[string]any         `yaml:"source"`
-		Rules    []Rule                 `yaml:"rules"`
+		Name      string                 `yaml:"name"`
+		Enabled   bool                   `yaml:"enabled"`
+		Interval  string                 `yaml:"interval"`
+		Source    map[string]any         `yaml:"source"`
+		Rules     []Rule                 `yaml:"rules"`
+		RateLimit RateLimit              `yaml:"rate_limit"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -92,10 +127,11 @@ func Load(path string) (*Monitor, error) {
 		raw.Name = strings.TrimSuffix(filepath.Base(path), ".yaml")
 	}
 	m := &Monitor{
-		Name:     raw.Name,
-		Enabled:  raw.Enabled,
-		Interval: raw.Interval,
-		Rules:    raw.Rules,
+		Name:      raw.Name,
+		Enabled:   raw.Enabled,
+		Interval:  raw.Interval,
+		Rules:     raw.Rules,
+		RateLimit: raw.RateLimit,
 	}
 	if raw.Source != nil {
 		if t, ok := raw.Source["type"].(string); ok {

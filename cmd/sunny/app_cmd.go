@@ -112,15 +112,16 @@ func appCmd(args []string) error {
 	}
 	pairURL := buildPairURL(chosen.URL, altURLs, offered.Code, name)
 
-	// Render. qrterminal.M is medium error correction, plenty for a
-	// payload this small (under 200 bytes), and it keeps the matrix
-	// compact enough to fit a typical 80-col terminal.
+	// Render. Medium error correction is plenty for a payload this
+	// small (under 200 bytes). HalfBlocks halves the row count by
+	// packing two QR rows into one terminal row via ▀ / ▄ glyphs,
+	// which makes the QR roughly square (~33×17 instead of 66×33)
+	// and far less likely to wrap or scroll the user's terminal.
 	cfg := qrterminal.Config{
-		Level:     qrterminal.M,
-		Writer:    os.Stdout,
-		BlackChar: qrterminal.BLACK,
-		WhiteChar: qrterminal.WHITE,
-		QuietZone: 1,
+		Level:      qrterminal.M,
+		Writer:     os.Stdout,
+		HalfBlocks: true,
+		QuietZone:  1,
 	}
 	fmt.Println()
 	qrterminal.GenerateWithConfig(pairURL, cfg)

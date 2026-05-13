@@ -427,7 +427,7 @@ func (s *Session) send(ctx context.Context, text string, _ bool) (*client.SendTu
 	if s.ConvID == "" {
 		return nil, fmt.Errorf("session: no conv_id (tab not initialised)")
 	}
-	wire := buildWireMessages(s.Items, text, s.PastedTexts)
+	wire := buildWireMessages(s.Items, text, s.PastedTexts, s.Attachments)
 	res, err := s.c.SendTurn(ctx, s.agentID, s.ConvID, client.TurnRequest{
 		Messages: wire,
 		Cwd:      s.Cwd,
@@ -490,7 +490,7 @@ func (s *Session) Regenerate(ctx context.Context) error {
 	}
 	userItem := s.Items[cut].(UserItem)
 
-	wire := buildWireMessages(s.Items[:cut], userItem.Text, userItem.PastedTexts)
+	wire := buildWireMessages(s.Items[:cut], userItem.Text, userItem.PastedTexts, userItem.Attachments)
 	if err := s.c.RegenerateLastTurn(ctx, s.agentID, s.ConvID, client.TurnRequest{
 		Messages: wire,
 		Cwd:      s.Cwd,
@@ -783,21 +783,28 @@ func (s *Session) linkToolResult(id, content string, isError bool) {
 // the full text turns.
 //
 // User messages have their "[Pasted text #N +K lines]" markers expanded
-// back to the source blob so the model receives the full content even
-// though the textarea only ever shows the compact marker.
-func buildWireMessages(items []Item, newUserText string, newPastes []PastedText) []client.Message {
+// back to the source blob, and "[Image #N]" markers expanded to the
+// attachment's absolute path, so the model receives content the textarea
+// only ever shows in compact form. claude-code reads the path via its
+// own Read tool; other providers see the path as plain text.
+func buildWireMessages(items []Item, newUserText string, newPastes []PastedText, newAtts []Attachment) []client.Message {
+	expand := func(text string, pastes []PastedText, atts []Attachment) string {
+		text = ExpandPastedTexts(text, pastes)
+		text = ExpandImageMarkers(text, atts)
+		return text
+	}
 	var wire []client.Message
 	for _, it := range items {
 		switch v := it.(type) {
 		case UserItem:
-			wire = append(wire, client.Message{Role: "user", Content: ExpandPastedTexts(v.Text, v.PastedTexts)})
+			wire = append(wire, client.Message{Role: "user", Content: expand(v.Text, v.PastedTexts, v.Attachments)})
 		case AssistantTextItem:
 			if v.Text != "" {
 				wire = append(wire, client.Message{Role: "assistant", Content: v.Text})
 			}
 		}
 	}
-	wire = append(wire, client.Message{Role: "user", Content: ExpandPastedTexts(newUserText, newPastes)})
+	wire = append(wire, client.Message{Role: "user", Content: expand(newUserText, newPastes, newAtts)})
 	return wire
 }
 
@@ -806,6 +813,12 @@ func buildWireMessages(items []Item, newUserText string, newPastes []PastedText)
 // minor reformatting (e.g. the user manually edited "+50 lines" to
 // "+51 lines") doesn't strand the blob.
 var pastedTextMarkerRe = regexp.MustCompile(`\[Pasted text #(\d+)[^\]]*\]`)
+
+// imageMarkerRe matches the "[Image #N]" placeholder injected by
+// tryImagePaste. Strict shape — the marker is machine-inserted and
+// syncAttachmentMarkers already drops the attachment if the user
+// damages it, so we don't need to tolerate drift here.
+var imageMarkerRe = regexp.MustCompile(`\[Image #(\d+)\]`)
 
 // ExpandPastedTexts replaces "[Pasted text #N ...]" markers with the
 // matching blob's content. Unknown indices stay as literal text — that
@@ -830,6 +843,38 @@ func ExpandPastedTexts(text string, pastes []PastedText) string {
 		}
 		if body, ok := byIdx[idx]; ok {
 			return body
+		}
+		return match
+	})
+}
+
+// ExpandImageMarkers replaces "[Image #N]" markers with the matching
+// attachment's absolute path so the provider can resolve the image.
+// claude-code reads the path natively via its Read tool; other
+// providers receive it as plain text (graceful degradation — they
+// don't render images yet, but the path is visible to the model so
+// behavior is at worst the same as today).
+//
+// Unknown indices stay as literal text, mirroring [[ExpandPastedTexts]].
+func ExpandImageMarkers(text string, atts []Attachment) string {
+	if len(atts) == 0 || !strings.Contains(text, "[Image #") {
+		return text
+	}
+	byIdx := make(map[int]string, len(atts))
+	for _, a := range atts {
+		byIdx[a.Index] = a.Path
+	}
+	return imageMarkerRe.ReplaceAllStringFunc(text, func(match string) string {
+		sub := imageMarkerRe.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		idx, err := strconv.Atoi(sub[1])
+		if err != nil {
+			return match
+		}
+		if p, ok := byIdx[idx]; ok {
+			return p
 		}
 		return match
 	})

@@ -64,7 +64,7 @@ func TestBuildWireMessagesExpandsHistoryAndCurrent(t *testing.T) {
 		AssistantTextItem{Text: "ack"},
 	}
 	currentPastes := []PastedText{{Index: 1, Text: "NEW BLOB", Lines: 1}}
-	wire := buildWireMessages(items, "follow [Pasted text #1 +1 lines]", currentPastes)
+	wire := buildWireMessages(items, "follow [Pasted text #1 +1 lines]", currentPastes, nil)
 	if len(wire) != 3 {
 		t.Fatalf("want 3 wire msgs, got %d", len(wire))
 	}

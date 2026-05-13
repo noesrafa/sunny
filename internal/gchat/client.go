@@ -3,6 +3,8 @@ package gchat
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"google.golang.org/api/chat/v1"
 	"google.golang.org/api/option"
@@ -156,3 +158,113 @@ func (c *Client) ListMessages(ctx context.Context, spaceName, after string) ([]M
 	}
 	return out, nil
 }
+
+// React adds an emoji reaction to a message. messageName is the full
+// resource name returned in Message.Name (e.g.
+// "spaces/X/messages/Y"). emoji is a single unicode char like "👀".
+// Idempotent on Google's side per (message, user, emoji) — a second
+// call with the same triple returns 409, which we swallow so the
+// monitor doesn't error on retries.
+func (c *Client) React(ctx context.Context, messageName, emoji string) error {
+	if messageName == "" {
+		return fmt.Errorf("react: message name required")
+	}
+	if emoji == "" {
+		return fmt.Errorf("react: emoji required")
+	}
+	_, err := c.svc.Spaces.Messages.Reactions.Create(messageName, &chat.Reaction{
+		Emoji: &chat.Emoji{Unicode: emoji},
+	}).Context(ctx).Do()
+	if err != nil {
+		// 409 = already reacted. Treat as success — the desired state
+		// is "this emoji exists on this message", and it does.
+		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "ALREADY_EXISTS") {
+			return nil
+		}
+		return fmt.Errorf("react %s: %w", messageName, err)
+	}
+	return nil
+}
+
+// Reply posts a message in the same thread as a previous message.
+// spaceName is "spaces/X". threadName is "spaces/X/threads/Y" (empty
+// = create a new thread). text is the body — pre-format with
+// FormatForChat() if it came from a Markdown-aware source like a
+// model response.
+//
+// messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD tells
+// Google: if the thread name we passed is bogus or already closed,
+// create a new thread instead of erroring. Safer than the strict
+// reply mode for an autonomous monitor.
+func (c *Client) Reply(ctx context.Context, spaceName, threadName, text string) error {
+	if spaceName == "" {
+		return fmt.Errorf("reply: space name required")
+	}
+	if text == "" {
+		return fmt.Errorf("reply: text required")
+	}
+	msg := &chat.Message{Text: text}
+	if threadName != "" {
+		msg.Thread = &chat.Thread{Name: threadName}
+	}
+	_, err := c.svc.Spaces.Messages.Create(spaceName, msg).
+		MessageReplyOption("REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return fmt.Errorf("reply in %s: %w", spaceName, err)
+	}
+	return nil
+}
+
+// FormatForChat strips Markdown that Google Chat doesn't render and
+// keeps the few formatting glyphs that DO render (single-asterisk
+// bold). The goal is "agent's prose lands readable", not "perfect
+// fidelity" — a heading like "## Bien" turns into bare "Bien".
+//
+// Mappings:
+//
+//	# / ## / ### …    → bare line (Chat has no headings)
+//	**bold**          → *bold*    (Chat bold uses single asterisk)
+//	*italic*          → *italic*  (left as-is; Chat italic uses _italic_, see note)
+//	`inline`          → bare      (Chat has no inline code)
+//	```block```       → indented  (Chat has no code blocks)
+//	[txt](url)        → "txt (url)"
+//	---               → ""        (no horizontal rule)
+//	\n\n\n+           → "\n\n"    (collapse paragraph runs)
+//
+// Note on italic: Google Chat uses `_italic_`, but we leave `*italic*`
+// as-is — converting blindly would also clobber bold. The agent's
+// reviews use bold far more than italic anyway, and a stray asterisk
+// is more readable than a misrendered emphasis.
+func FormatForChat(s string) string {
+	s = reHeading.ReplaceAllString(s, "$1")
+	s = reBoldItalic.ReplaceAllString(s, "*$1*")
+	s = reBold.ReplaceAllString(s, "*$1*")
+	s = reHr.ReplaceAllString(s, "")
+	s = reCodeBlock.ReplaceAllStringFunc(s, func(m string) string {
+		// Strip the fence and indent the body 2 spaces.
+		inner := reCodeFence.ReplaceAllString(m, "")
+		lines := strings.Split(inner, "\n")
+		for i := range lines {
+			lines[i] = "  " + lines[i]
+		}
+		return strings.Join(lines, "\n")
+	})
+	s = reInlineCode.ReplaceAllString(s, "$1")
+	s = reLink.ReplaceAllString(s, "$1 ($2)")
+	s = reBlankRun.ReplaceAllString(s, "\n\n")
+	return strings.TrimSpace(s)
+}
+
+var (
+	reHeading    = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	reBoldItalic = regexp.MustCompile(`\*\*\*(.+?)\*\*\*`)
+	reBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reHr         = regexp.MustCompile(`(?m)^-{3,}$`)
+	reCodeBlock  = regexp.MustCompile("(?s)```[a-zA-Z]*\\n?(.+?)```")
+	reCodeFence  = regexp.MustCompile("```[a-zA-Z]*\\n?|```")
+	reInlineCode = regexp.MustCompile("`([^`]+)`")
+	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reBlankRun   = regexp.MustCompile(`\n{3,}`)
+)

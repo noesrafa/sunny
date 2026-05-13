@@ -164,23 +164,22 @@ func wordwrap(line string, width int) string {
 }
 
 func compactJSON(raw json.RawMessage, max int) string {
-	s := strings.TrimSpace(string(raw))
+	s := sanitizeRender(string(raw))
+	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\n", " ")
-	if max > 0 && lipgloss.Width(s) > max {
-		s = s[:max] + "…"
-	}
-	return s
+	return truncateVisual(s, max, "…")
 }
 
 func truncateLines(text string, maxLines, width int) string {
+	text = sanitizeRender(text)
 	lines := strings.Split(text, "\n")
 	if len(lines) > maxLines {
 		lines = lines[:maxLines]
 		lines = append(lines, "…")
 	}
-	for i, l := range lines {
-		if width > 0 && lipgloss.Width(l) > width {
-			lines[i] = l[:width-1] + "…"
+	if width > 0 {
+		for i, l := range lines {
+			lines[i] = truncateVisual(l, width, "…")
 		}
 	}
 	return strings.Join(lines, "\n")

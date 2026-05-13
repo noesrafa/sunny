@@ -158,6 +158,7 @@ func serve(args []string) error {
 	monReg.RegisterAction(monitors.NewGChatUnreactAction(*root))
 	monReg.RegisterAction(monitors.NewGChatReplyAction(*root))
 	monReg.RegisterAction(monitors.NewGChatEditAction(*root))
+	monReg.RegisterAction(monitors.NewGitHubReviewAction())
 	monitorsDir := filepath.Join(*root, "monitors")
 	if err := os.MkdirAll(monitorsDir, 0o755); err != nil {
 		log.Warn("monitors dir", "err", err)

@@ -2,6 +2,7 @@ package monitors
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -58,11 +59,51 @@ func (a *DispatchAction) Run(ctx context.Context, cfg map[string]any, item Item,
 	if err != nil {
 		return nil, err
 	}
+	// Strip the optional trailing GH-REVIEWS block before exposing
+	// `result` to downstream actions — the block is a machine-readable
+	// hint for github_review and would just clutter the chat reply.
+	clean, reviews := parseGitHubReviews(out)
 	return map[string]any{
-		"result": out,
-		"emoji":  extractVerdictEmoji(out),
-		"head":   firstLine(out),
+		"result":  clean,
+		"emoji":   extractVerdictEmoji(clean),
+		"head":    firstLine(clean),
+		"reviews": reviews,
 	}, nil
+}
+
+// parseGitHubReviews extracts a trailing block of the form
+//
+//	<!-- GH-REVIEWS-START -->
+//	{"reviews":[{"url":"...","decision":"APPROVE","body":"..."}, ...]}
+//	<!-- GH-REVIEWS-END -->
+//
+// from the agent's response. Returns the response with the block
+// stripped (clean) plus the parsed reviews list.
+//
+// Missing block → clean=s, reviews=nil. Malformed JSON → clean=s,
+// reviews=nil (we don't fail the whole turn over a bad emit; the
+// chat reply still goes through, the GitHub step just no-ops).
+func parseGitHubReviews(s string) (clean string, reviews []map[string]any) {
+	const startTag = "<!-- GH-REVIEWS-START -->"
+	const endTag = "<!-- GH-REVIEWS-END -->"
+	start := strings.Index(s, startTag)
+	if start < 0 {
+		return s, nil
+	}
+	tail := s[start+len(startTag):]
+	end := strings.Index(tail, endTag)
+	if end < 0 {
+		return s, nil
+	}
+	jsonRaw := strings.TrimSpace(tail[:end])
+	var wire struct {
+		Reviews []map[string]any `json:"reviews"`
+	}
+	if err := json.Unmarshal([]byte(jsonRaw), &wire); err != nil {
+		return s, nil
+	}
+	cleanBuf := strings.TrimSpace(s[:start] + tail[end+len(endTag):])
+	return cleanBuf, wire.Reviews
 }
 
 // extractVerdictEmoji finds the earliest of ✅ / ⚠️ / ❌ in the first

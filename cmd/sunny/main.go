@@ -61,6 +61,8 @@ func main() {
 		err = uninstallCmd(args)
 	case "app":
 		err = appCmd(args)
+	case "gchat":
+		err = gchatCmd(args)
 	case "version", "-v", "--version":
 		fmt.Println("sunny", version)
 	case "help", "-h", "--help":
@@ -98,6 +100,7 @@ commands:
   onboarding Interactive first-run flow: tailscale, brew, providers, first agent. Re-runnable as a manual doctor.
   uninstall Stop the daemon and clean sunny off the system. Asks before deleting ~/.sunny/.
   app       Print a QR for the iOS/Android app — one scan and the phone is paired.
+  gchat     Google Chat integration. 'sunny gchat auth --credentials <path>' once, then 'sunny gchat test' to verify.
   version   Print version.
 
 common flags:

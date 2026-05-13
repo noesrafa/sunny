@@ -126,6 +126,7 @@ func serve(args []string) error {
 	// monitors package itself stays free of engine/store imports.
 	monReg := monitors.NewRegistry()
 	monReg.RegisterSource(monitors.ShellSource{})
+	monReg.RegisterSource(monitors.NewGChatSource(*root))
 	monReg.RegisterAction(monitors.NewDispatchAction(func(ctx context.Context, agentID, promptText string) (string, error) {
 		eng := enginePtr.Load()
 		if eng == nil {

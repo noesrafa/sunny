@@ -35,12 +35,19 @@ import (
 	"golang.org/x/oauth2/google"
 )
 
-// Scope constants. Start with read-only — `auth` and `test` only need
-// to list spaces. Adding `chat.messages` later (to send / react) is a
-// re-consent for the user.
+// Scope constants. The MR-detection monitor needs spaces.readonly
+// (to enumerate spaces in `gchat test`) AND messages.readonly (to
+// poll for new messages). Send / react require `chat.messages` and
+// land in a re-consent when the user opts into auto-reply.
 const (
-	ScopeSpacesReadonly = "https://www.googleapis.com/auth/chat.spaces.readonly"
+	ScopeSpacesReadonly   = "https://www.googleapis.com/auth/chat.spaces.readonly"
+	ScopeMessagesReadonly = "https://www.googleapis.com/auth/chat.messages.readonly"
 )
+
+// DefaultScopes is the bundle requested by `sunny gchat auth` and
+// `sunny gchat test` — enough for spaces.list + spaces.messages.list,
+// which is what the monitor needs.
+var DefaultScopes = []string{ScopeSpacesReadonly, ScopeMessagesReadonly}
 
 // Dir is the on-disk home for this integration.
 func Dir(root string) string {

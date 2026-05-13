@@ -74,7 +74,7 @@ func gchatAuth(args []string) error {
 		return fmt.Errorf("--credentials <path> is required (download from console.cloud.google.com → APIs & Services → Credentials)")
 	}
 
-	cfg, err := gchat.LoadConfig(*credentials, gchat.ScopeSpacesReadonly)
+	cfg, err := gchat.LoadConfig(*credentials, gchat.DefaultScopes...)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func gchatTest(args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	c, err := gchat.New(ctx, *root, gchat.ScopeSpacesReadonly)
+	c, err := gchat.New(ctx, *root, gchat.DefaultScopes...)
 	if err != nil {
 		return err
 	}

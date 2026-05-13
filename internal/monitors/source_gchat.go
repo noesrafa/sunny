@@ -3,6 +3,7 @@ package monitors
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/noesrafa/sunny/internal/gchat"
 )
@@ -24,6 +25,13 @@ import (
 //	                                      Sender.Type=="BOT" (default
 //	                                      true so the monitor doesn't
 //	                                      echo on its own auto-replies).
+//	only_top_level: false               — when true, drop messages that
+//	                                      are replies inside a thread.
+//	                                      Useful for high-traffic team
+//	                                      spaces where you only want to
+//	                                      react to fresh top-level
+//	                                      posts. Default false to keep
+//	                                      existing monitors unchanged.
 //
 // Cursor (per-monitor, stored in state.Vars):
 //
@@ -56,6 +64,10 @@ func (g *GChatSource) Fetch(ctx context.Context, cfg map[string]any, state map[s
 	skipBots := true
 	if v, ok := cfg["skip_bots"].(bool); ok {
 		skipBots = v
+	}
+	onlyTopLevel := false
+	if v, ok := cfg["only_top_level"].(bool); ok {
+		onlyTopLevel = v
 	}
 
 	if state == nil {
@@ -102,6 +114,14 @@ func (g *GChatSource) Fetch(ctx context.Context, cfg map[string]any, state map[s
 			if skipBots && m.SenderType == "BOT" {
 				continue
 			}
+			if onlyTopLevel && !isTopLevelMessage(m.Name) {
+				// Drop thread replies but advance the cursor so we
+				// don't keep re-fetching this message every tick.
+				if m.CreateTime > lastSeen[space] {
+					lastSeen[space] = m.CreateTime
+				}
+				continue
+			}
 			out = append(out, Item{
 				ID: m.Name,
 				Fields: map[string]any{
@@ -130,6 +150,32 @@ func (g *GChatSource) Fetch(ctx context.Context, cfg map[string]any, state map[s
 	}
 	state["last_seen"] = out2
 	return out, state, nil
+}
+
+// isTopLevelMessage reports whether the given Chat message resource
+// name belongs to a thread starter, not a reply.
+//
+// Google Chat encodes the message id as <thread_id>.<message_short_id>
+// in the trailing path segment. For a top-level message (the first
+// in its thread) those two halves are identical:
+//
+//	spaces/X/messages/8MgvAZM8NpE.8MgvAZM8NpE   ← top-level
+//	spaces/X/messages/8MgvAZM8NpE.somethingElse ← reply
+//
+// Unexpected shapes (no dot, no /messages/ segment) return true so
+// we stay permissive — better to occasionally process an oddly-named
+// message than to drop a legit one.
+func isTopLevelMessage(name string) bool {
+	idx := strings.LastIndex(name, "/messages/")
+	if idx < 0 {
+		return true
+	}
+	last := name[idx+len("/messages/"):]
+	dot := strings.Index(last, ".")
+	if dot < 0 {
+		return true
+	}
+	return last[:dot] == last[dot+1:]
 }
 
 // parseSpaces reads cfg["spaces"] flexibly: YAML can produce []any

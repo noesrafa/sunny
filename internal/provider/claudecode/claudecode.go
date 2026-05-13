@@ -74,6 +74,16 @@ func (d *Driver) Stream(ctx context.Context, req provider.Request) (<-chan provi
 		// prompts. Without this the CLI would hang waiting on stdin
 		// approvals that the API caller has no way to deliver.
 		"--dangerously-skip-permissions",
+		// AskUserQuestion is an interactive tool — the model emits a
+		// tool_use and waits for the SDK caller to write back a
+		// tool_result on stdin with the user's answer. sunny closes
+		// stdin right after the initial user message (one process per
+		// turn), so there's no way to deliver an answer; the model
+		// stalls until the 5-min idle watchdog kills the turn. Strip
+		// the tool from the model's available set so it never reaches
+		// for it. The other interactive tool (ExitPlanMode) only fires
+		// in plan-mode sessions, which we don't enter in -p.
+		"--disallowedTools", "AskUserQuestion",
 	}
 
 	// On --dangerously-skip-permissions claude still sandboxes file/bash

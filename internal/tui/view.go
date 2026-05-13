@@ -192,20 +192,13 @@ func (m Model) renderInputHint() string {
 	return " " + strings.Join(parts, sep)
 }
 
-// renderStatus is the bottom row. We used to show "N sessions · M turns"
-// on the right but that info is already implicit (sidebar lists sessions,
-// each row carries its turn count) — kept the row only so a session's
-// `error: …` message has somewhere to surface without stealing input space.
+// renderStatus is the bottom row. Kept blank for breathing room — the
+// session's last error already surfaces in two better places (the
+// transcript shows it inline as an ErrorItem, and the sidebar pill flips
+// to the error color), so duplicating it here just made the bottom edge
+// of the UI look noisy.
 func (m Model) renderStatus() string {
-	var left string
-	if cur := m.manager.Current(); cur != nil && cur.State == session.StateError && cur.LastErr != nil {
-		left = m.styles.ResultError.Render("error: " + cur.LastErr.Error())
-	}
-	pad := m.width - lipgloss.Width(left)
-	if pad < 0 {
-		pad = 0
-	}
-	return left + strings.Repeat(" ", pad)
+	return strings.Repeat(" ", m.width)
 }
 
 // renderChangesBadge paints the per-bucket file counts of pending git changes

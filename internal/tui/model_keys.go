@@ -342,7 +342,13 @@ func (m *Model) tryImagePaste(text string) bool {
 
 func (m Model) handleSend() (Model, tea.Cmd) {
 	cur := m.manager.Current()
-	if cur == nil || cur.State != session.StateIdle {
+	// Block only while a turn is mid-flight. Sessions in StateError
+	// (e.g. claudecode: unresponsive after the 5-min idle watchdog
+	// kicked) stay sendable: typing + Enter clears the error and
+	// posts a new turn against the same conv — claudecode's
+	// --resume session id lives in meta.json so the model picks up
+	// where it left off.
+	if cur == nil || cur.State == session.StateThinking {
 		return m, nil
 	}
 	value := m.textarea.Value()
@@ -360,6 +366,7 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 
 	m.textarea.Reset()
 	cur.Draft = ""
+	cur.LastErr = nil
 
 	if err := cur.Send(m.ctx, text); err != nil {
 		cur.LastErr = err

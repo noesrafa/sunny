@@ -152,7 +152,10 @@ func (m Model) renderMain(height int) string {
 
 func (m Model) renderInput(cur *session.Session) string {
 	style := m.styles.Input
-	if cur != nil && cur.State == session.StateIdle {
+	// Input stays "alive" whenever a turn isn't mid-flight — that
+	// includes StateError, where the user can type a new message
+	// to revive a conv stuck on (e.g.) "claudecode: unresponsive".
+	if cur != nil && cur.State != session.StateThinking {
 		style = m.styles.InputFocused
 	}
 	mainW := m.width - sidebarWidth - sidebarGap - mainPadLeft
